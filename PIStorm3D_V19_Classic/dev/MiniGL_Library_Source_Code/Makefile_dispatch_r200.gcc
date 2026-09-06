@@ -1,0 +1,131 @@
+CC := m68k-amigaos-gcc
+AR := m68k-amigaos-ar
+NM := m68k-amigaos-nm
+PYTHON ?= python3
+CPU ?= 68060
+PERF_TIMING ?= 1
+OBJDIR ?= obj_gcc_dispatch_r200
+EXOBJDIR ?= obj_gcc_examples_dispatch
+OUTDIR ?= bin/dispatch-r200-gcc
+BINDIR ?= bin
+RADEON3D_INC ?= third_party/radeon3d/include
+WARP3D_INC ?= third_party/warp3d/include
+
+# The R200 backend's own validated flags. Do not substitute the PiStorm3D
+# (-mcrt=clib2) or stub (-mhard-float -ffast-math) settings: this backend is
+# freestanding and talks to Radeon9200.chip through the Radeon3D service.
+COMMON_CFLAGS = -std=gnu99 -O2 -mcpu=$(CPU) -m68881 -noixemul -ffreestanding -fno-builtin
+LIB_CFLAGS = $(COMMON_CFLAGS) -I$(RADEON3D_INC) -I$(WARP3D_INC) -Iinclude -Ilibrary \
+	-D__M68K__ -DMINIGL_BACKEND_R200 -DMINIGL_LIBRARY_BUILD -fno-baserel -Wall -Wextra
+
+LIB_CFLAGS += -DR200_PERF_TIMING=$(PERF_TIMING)
+# Segment streaming is the accepted default as of the T5 acceptance run
+# (see R200_STREAM_COMMITS in library/minigl_r200_internal.h). Build with
+# STREAM_COMMITS=0 to fall back to the inline Execute path.
+STREAM_COMMITS ?= 1
+LIB_CFLAGS += -DR200_STREAM_COMMITS=$(STREAM_COMMITS)
+# Async segment rotation: park a submitted segment until its fence retires
+# instead of draining all submissions on every rotation. ASYNC_ROTATION=0
+# restores the synchronous drain-and-free rotation.
+ASYNC_ROTATION ?= 1
+LIB_CFLAGS += -DR200_ASYNC_ROTATION=$(ASYNC_ROTATION)
+# Temporary diagnostics: dump the first two submit batches to T:.
+DUMP_FIRST_BATCHES ?= 0
+LIB_CFLAGS += -DR200_DUMP_FIRST_BATCHES=$(DUMP_FIRST_BATCHES)
+# Persistent lifecycle/segment diagnostics write to Work: and are intended
+# only for crash triage; keep them out of performance measurements.
+STREAM_DIAG ?= 0
+LIB_CFLAGS += -DR200_STREAM_DIAG=$(STREAM_DIAG)
+EX_CFLAGS = -std=gnu99 -O2 -mcpu=$(CPU) -m68881 -noixemul -I$(WARP3D_INC) -I$(RADEON3D_INC) -Iinclude
+
+LIB_OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_r200.o \
+	$(OBJDIR)/r200_unity.o \
+	$(OBJDIR)/context_state_r200.o \
+	$(OBJDIR)/debug_output.o $(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o
+CLIENT_OBJS = $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub_gcc.o
+IMPORTLIB = lib/libminigl_dispatch.a
+GEARS_68K = $(BINDIR)/gears68k
+GEARS_68K_PRECALC = $(BINDIR)/gears68k_precalc
+
+.PHONY: all clean importlib testprograms testsuite dispatchtable gears-benchmarks
+all: $(OUTDIR)/minigl.library
+
+$(OBJDIR) $(EXOBJDIR) $(OUTDIR) $(BINDIR) lib:
+	mkdir -p $@
+
+$(OBJDIR)/r200_unity.o: library/minigl_r200.c library/r200_math.c \
+	library/r200_submit.c library/r200_texture.c library/r200_state.c \
+	library/r200_geometry.c library/r200_surface.c \
+	library/minigl_r200_internal.h include/libraries/minigl_r200_bridge.h
+
+$(OBJDIR)/%.o: library/%.c | $(OBJDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+
+$(OUTDIR)/minigl.library: $(LIB_OBJS) | $(OUTDIR)
+	$(CC) -nostdlib -nostartfiles -nodefaultlibs -noixemul -mcpu=$(CPU) -m68881 -o $@ \
+		-Wl,--start-group $(LIB_OBJS) -lm -lgcc -Wl,--end-group
+	@test -s $@
+	@test -z "$$($(NM) -u $@)" || \
+		{ echo "unresolved symbols in $@:"; $(NM) -u $@; exit 1; }
+
+# Regenerate the thunk layer from the dispatch table declaration. Requires an
+# already-compiled backend objects, whose defined Lib_* symbols decide which
+# fields bind and which become unsupported stubs.
+R200_BACKEND_OBJS = $(filter-out $(OBJDIR)/minigl_library.o \
+		$(OBJDIR)/dispatch_table_r200.o,$(LIB_OBJS))
+dispatchtable: $(R200_BACKEND_OBJS)
+	$(NM) --defined-only $(R200_BACKEND_OBJS) | sed -n 's/.* T _\(Lib_.*\)/\1/p' \
+		| sort -u > $(OBJDIR)/r200_symbols.txt
+	$(PYTHON) tools/generate_dispatch_r200.py include/libraries/minigl_dispatch.h \
+		$(OBJDIR)/r200_symbols.txt library/dispatch_table_r200.c
+
+$(EXOBJDIR)/minigl_base.o: client/minigl_base.c include/libraries/minigl_dispatch.h | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -c $< -o $@
+$(EXOBJDIR)/minigl_open.o: client/minigl_open.c include/libraries/minigl_dispatch.h | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -c $< -o $@
+$(EXOBJDIR)/minigl_dispatch_stub_gcc.o: client/minigl_dispatch_stub_gcc.s | $(EXOBJDIR)
+	$(CC) -mcpu=$(CPU) -c $< -o $@
+
+importlib: $(IMPORTLIB)
+$(IMPORTLIB): $(CLIENT_OBJS) | lib
+	$(AR) rcs $@ $(CLIENT_OBJS)
+
+gears-benchmarks: $(GEARS_68K) $(GEARS_68K_PRECALC)
+
+$(GEARS_68K): examples/gears_benchmark.c include/libraries/minigl_perf.h \
+		$(IMPORTLIB) | $(BINDIR)
+	$(CC) $(EX_CFLAGS) $< $(IMPORTLIB) -lm -o $@
+
+$(GEARS_68K_PRECALC): examples/gears_benchmark.c include/libraries/minigl_perf.h \
+		$(IMPORTLIB) | $(BINDIR)
+	$(CC) $(EX_CFLAGS) -DMGL_GEARS_PRECALC=1 $< $(IMPORTLIB) -lm -o $@
+
+testprograms: importlib gears-benchmarks | $(BINDIR)
+	$(CC) $(EX_CFLAGS) examples/library_test.c $(IMPORTLIB) -o $(BINDIR)/library_test_dispatch_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/bootstrap_smoke.c $(IMPORTLIB) -o $(BINDIR)/bootstrap_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/phase4_smoke.c $(IMPORTLIB) -lm -o $(BINDIR)/phase4_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/phase5_smoke.c $(IMPORTLIB) -o $(BINDIR)/phase5_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/phase6_primitives.c $(IMPORTLIB) -o $(BINDIR)/phase6_primitives_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/phase6_acceptance.c $(IMPORTLIB) -lm -o $(BINDIR)/phase6_acceptance_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/cull_shade_smoke.c $(IMPORTLIB) -o $(BINDIR)/cull_shade_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/blend_alpha_smoke.c $(IMPORTLIB) -o $(BINDIR)/blend_alpha_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/phase7_lighting.c $(IMPORTLIB) -lm -o $(BINDIR)/phase7_lighting_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/phaseE_smoke.c $(IMPORTLIB) -o $(BINDIR)/phaseE_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/quad_list_smoke.c $(IMPORTLIB) -o $(BINDIR)/quad_list_smoke_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/perspective_precision_smoke.c $(IMPORTLIB) -o $(BINDIR)/perspective_precision_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/v19_parity_r200.c $(IMPORTLIB) -o $(BINDIR)/v19_parity_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/v19_emergency_r200.c $(IMPORTLIB) -o $(BINDIR)/v19_emergency_r200_gcc
+	$(CC) $(EX_CFLAGS) examples/v19_tri_buffers.c $(IMPORTLIB) -lm -o $(BINDIR)/v19_tri_buffers_gcc
+	$(CC) $(EX_CFLAGS) examples/v19_worst_probe.c $(IMPORTLIB) -lm -o $(BINDIR)/v19_worst_probe_gcc
+	$(CC) $(EX_CFLAGS) examples/v19_lit_probe.c $(IMPORTLIB) -lm -o $(BINDIR)/v19_lit_probe_gcc
+
+testsuite: importlib | $(BINDIR)
+	$(CC) $(EX_CFLAGS) examples/minigl_testsuite.c $(IMPORTLIB) -o $(BINDIR)/minigl_testsuite_r200_gcc
+	cp $(BINDIR)/minigl_testsuite_r200_gcc $(BINDIR)/MiniGLTestSuite
+	cp examples/StartMiniGLTests $(BINDIR)/StartMiniGLTests
+
+clean:
+	rm -rf $(OBJDIR) $(OUTDIR)
+	rm -f $(BINDIR)/*_dispatch_r200_gcc $(BINDIR)/*_r200_gcc \
+		$(BINDIR)/MiniGLTestSuite $(BINDIR)/StartMiniGLTests \
+		$(GEARS_68K) $(GEARS_68K_PRECALC)

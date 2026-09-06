@@ -1,0 +1,9 @@
+# build artifacts
+obj_*/
+bin/
+lib/*.a
+lib/**/*.a
+*.lha
+.opencode/
+CVS/
+__pycache__/

@@ -1,0 +1,21 @@
+MINIGL_ROOT ?= ../..
+CC = m68k-amigaos-gcc
+CPU ?= 68060
+TARGET ?= build/hello_triangle
+
+CPPFLAGS += -I$(MINIGL_ROOT)/include \
+	-I$(MINIGL_ROOT)/third_party/warp3d/include
+CFLAGS += -std=gnu99 -O2 -mcpu=$(CPU) -m68881 -noixemul -Wall -Wextra
+MINIGL_IMPORTLIB := $(MINIGL_ROOT)/lib/libminigl_dispatch.a
+
+.PHONY: all clean
+all: $(TARGET)
+
+$(TARGET): hello_triangle.c $(MINIGL_IMPORTLIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(MINIGL_IMPORTLIB) -o $@
+
+build:
+	mkdir -p $@
+
+clean:
+	rm -rf build

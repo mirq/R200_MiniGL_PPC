@@ -1,0 +1,81 @@
+# WarpOS MiniGL V19 direct-dispatch client import library + shared test examples
+CPU       ?= 604e
+include Makefile.wos.gcc.common
+
+OBJDIR    ?= obj/import
+EXOBJDIR  ?= $(OBJDIR)/examples
+BINDIR    ?= bin/examples
+OUTLIB    ?= lib/libminigl_dispatch_ppc.a
+DROPINLIB ?= lib/libminigl.a
+
+COMMON_CFLAGS = $(WOS_ARCH_CFLAGS) -O2 -Wall -fomit-frame-pointer \
+                 -Iinclude -Ihyperion_dll $(WOS_CPPFLAGS)
+CFLAGS    = $(COMMON_CFLAGS)
+EX_CFLAGS = $(COMMON_CFLAGS)
+
+OBJS = $(OBJDIR)/minigl_ppc_base.o \
+       $(OBJDIR)/minigl_ppc_open.o \
+       $(OBJDIR)/dll.o
+DEPS = $(OBJS:.o=.d)
+EXAMPLE_NAMES = library_test milestone_ballonly_library \
+                 milestone_bounce_interactive_library \
+                 milestone_gears_stats_library r200_legacy_smoke \
+                 r200_texture_upload_smoke r200_triangle_smoke warp_library \
+                  r200_mapping_bench r200_texture_update_test
+EXAMPLE_OBJS = $(addprefix $(EXOBJDIR)/,$(addsuffix .o,$(EXAMPLE_NAMES)))
+EXAMPLE_DEPS = $(EXAMPLE_OBJS:.o=.d)
+EXAMPLE_WARPELFS = $(addprefix $(BINDIR)/,$(addsuffix _ppc.warpelf,$(EXAMPLE_NAMES)))
+
+.PHONY: all importlib testprograms clean
+.SECONDARY: $(EXAMPLE_OBJS)
+all: importlib
+importlib: $(OUTLIB) $(DROPINLIB)
+
+$(OBJDIR) $(EXOBJDIR) lib $(BINDIR):
+	mkdir -p $@
+
+$(OBJDIR)/minigl_ppc_base.o: client/minigl_ppc_base.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_open.o: client/minigl_ppc_open.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dll.o: hyperion_dll/dll.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OUTLIB): $(OBJS) | lib
+	$(AR) rcs $@ $(OBJS)
+	-$(RANLIB) $@
+
+$(DROPINLIB): $(OUTLIB) | lib
+	cp $< $@
+
+# Linux can produce the complete WarpOS ELF but cannot run target-hosted
+# Elf2Exe2. These files exercise the public headers and import archive and are
+# ready for conversion on Amiga/WarpOS, just like the DLL's warpelf target.
+testprograms: importlib $(EXAMPLE_WARPELFS)
+
+# Standalone protocol client: no MiniGL dispatch archive or driver linkage.
+$(EXOBJDIR)/r200_mapping_bench.o: EX_CFLAGS += -Ibackend_r200/include
+
+$(EXOBJDIR)/mapping_bench_transport.o: backend_r200/client/minigl_ppc_transport.c Makefile.wos.gcc.common | $(EXOBJDIR)
+	$(CC) $(COMMON_CFLAGS) -Ibackend_r200/include -MMD -MP -c $< -o $@
+
+$(BINDIR)/r200_mapping_bench_ppc.warpelf: $(EXOBJDIR)/r200_mapping_bench.o $(EXOBJDIR)/mapping_bench_transport.o $(WOS_ETREL_LDSCRIPT) | $(BINDIR)
+	$(LD) $(WOS_LINK_FLAGS) $(WOS_LIBRARY_DIRS) -o $@ \
+		$(WOS_STARTFILE) $(EXOBJDIR)/r200_mapping_bench.o \
+		$(EXOBJDIR)/mapping_bench_transport.o $(WOS_RUNTIME_LIBS) $(WOS_ENDFILE)
+	$(call WOS_VALIDATE_ETREL,$@)
+
+$(EXOBJDIR)/%.o: examples/%.c Makefile.wos.gcc.common | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -MMD -MP -c $< -o $@
+
+$(BINDIR)/%_ppc.warpelf: $(EXOBJDIR)/%.o $(OUTLIB) $(WOS_ETREL_LDSCRIPT) | $(BINDIR)
+	$(LD) $(WOS_LINK_FLAGS) $(WOS_LIBRARY_DIRS) -o $@ \
+		$(WOS_STARTFILE) $< $(OUTLIB) $(WOS_RUNTIME_LIBS) $(WOS_ENDFILE)
+	$(call WOS_VALIDATE_ETREL,$@)
+
+clean:
+	rm -rf $(OBJDIR) $(BINDIR) $(OUTLIB) $(DROPINLIB)
+
+-include $(DEPS) $(EXAMPLE_DEPS) $(EXOBJDIR)/mapping_bench_transport.d

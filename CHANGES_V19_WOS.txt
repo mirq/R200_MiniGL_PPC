@@ -1,0 +1,44 @@
+MiniGL WarpOS V19 update
+========================
+
+- Public version raised to MINIGL_VERSION 19.
+- MINIGL_MIN_VERSION set to 10.
+- Dispatch ABI remains 3.
+- Released V10 dispatch-table prefix preserved; five V19 entries appended only.
+- FromWindow/CreateContextFromWindow is not present.
+- Dispatch-facing public declarations made self-contained without importing
+  private V3D/backend context and vertex layouts.
+- PPC dispatch updated for the V19 tail.
+- Diagnostic stub DLL updated for the V19 tail.
+- Bundled current mglQ3 source added as the WarpOS backend.
+- Added mglQ3/Makefile.wos.gcc.
+- Makefile.dll.gcc now builds and links bundled mglQ3 automatically.
+- Added a shared GCC/MOS2WOS configuration in Makefile.wos.gcc.common.
+- Added warpos-etrel.ld and fail-closed ET_REL validation for Elf2Exe2.
+- WarpOS objects use -fno-jump-tables so the final ELF contains no unsupported
+  R_PPC_REL32 relocations.
+- Added lib/libminigl.a as a byte-identical drop-in alias for the PPC import
+  archive.
+- Removed obsolete external BACKEND_INC/BACKEND_LIB requirement.
+- Removed stale FastPath example build/reference from the common WOS package.
+- mini_CurrentContext is owned by mglQ3; the DLL glue only references it.
+- MGLResizeContext, MGLEmergencyCloseScreen and MGLForceNewRenderPass remain
+  conservative no-ops for this backend; glClientActiveTextureARB is also a no-op.
+- GLPolygonOffset and GLInterleavedArrays use mglQ3; GLMultiDrawArrays loops over
+  GLDrawArrays.
+- Added Radeon/Radeon2 renderer identification and enabled the generic
+  multitexture/compiled-array extension path for those Warp3D chip IDs.
+- Fixed texture-unit validation to reject unit MAX_TEXUNIT instead of indexing
+  one element past the two-unit state arrays, including no-error-check builds.
+
+Validation performed here:
+- V10 prefix field count/order checked against original WOS archive.
+- SilentHill.elf verified to use only the common dispatch prefix, not the
+  reference DLL's private fast-path tail.
+- No FromWindow symbols remain.
+- Real DLL, stub DLL, import archives and all five examples clean-built with
+  ppc-amigaos-gcc 8.4.0.
+- Normalized ET_REL outputs have _start at .text+0, no undefined or COMMON
+  symbols, and only the four relocation classes accepted by Elf2Exe2.
+- Target conversion/runtime remains pending. Elf2Exe2 and ppclibemu 0.9d both
+  raised a PowerPC exception on the tested Sonnet powerpc.library 17.15 setup.

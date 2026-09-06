@@ -1,0 +1,4 @@
+; MiniGL Test Suite launcher for AmigaDOS/IconX.
+; Install the launcher and executable in Work:MiniGLTestSuite.
+Stack 65536
+Work:MiniGLTestSuite/MiniGLTestSuite --window --width 512 --height 320 --depth 16

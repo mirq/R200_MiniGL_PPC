@@ -1,0 +1,36 @@
+# Build the bundled mglQ3 core for WarpOS/PPC with GCC.
+CPU     ?= 604e
+include ../Makefile.wos.gcc.common
+
+OBJDIR  ?= obj_wos_gcc
+LIBDIR  ?= lib
+LIBNAME ?= $(LIBDIR)/libmgl-wos.a
+
+CFLAGS = -std=c99 $(WOS_ARCH_CFLAGS) -O2 -ffast-math \
+         -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow \
+         -DNDEBUG -Iinclude $(WOS_CPPFLAGS) -Wall -Wextra \
+         -Wno-unknown-pragmas -MMD -MP
+
+SOURCES = src/context.c src/init.c src/fog.c src/texture.c src/others.c \
+          src/matrix.c src/vertexbuffer.c src/hclip.c src/draw.c src/aclip.c \
+          src/vertexarray.c src/vertexelements.c src/glu.c
+OBJS = $(patsubst src/%.c,$(OBJDIR)/%.o,$(SOURCES))
+DEPS = $(OBJS:.o=.d)
+
+.PHONY: all clean
+all: $(LIBNAME)
+
+$(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+$(OBJDIR)/%.o: src/%.c ../Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(LIBNAME): $(OBJS) | $(LIBDIR)
+	$(AR) rcs $@ $(OBJS)
+	-$(RANLIB) $@
+
+clean:
+	rm -rf $(OBJDIR) $(LIBNAME)
+
+-include $(DEPS)

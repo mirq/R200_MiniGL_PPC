@@ -1,0 +1,53 @@
+# Linux cross build, following the configuration the R200 library was
+# validated with. Note that this differs in style from the other .vbcc
+# makefiles in this tree, which are Amiga-native scripts (makedir/delete and
+# an "Include:" assign) rather than cross builds.
+#
+# Source the vbcc environment first, or override VBCC_ROOT:
+#     . /home/mirek/vbcc/env.sh
+VC = vc
+VASM = vasmm68k_mot
+VBCC_ROOT ?= /home/mirek/vbcc
+VBCC_NDK ?= /opt/amiga/m68k-amigaos/ndk-include
+VBCC_INCLUDE := $(VBCC_ROOT)/build/targets/m68k-amigaos/include
+VBCC_BIN := $(VBCC_ROOT)/build/bin
+
+OBJDIR = obj_vbcc_dispatch_r200
+BINDIR = bin/dispatch-r200-vbcc
+RADEON3D_INC = third_party/radeon3d/include
+WARP3D_INC = third_party/warp3d/include
+
+# -cpu/-fpu 68060 and -O2 are the settings the R200 library was accepted on.
+# Do not raise this to -O=3: it enlarged the library and hung the Phase 6
+# primitive test.
+CFLAGS = +aos68k -c99 -O2 -cpu=68060 -fpu=68060 \
+	-I$(RADEON3D_INC) -I$(WARP3D_INC) -Iinclude -Ilibrary \
+	-I$(VBCC_INCLUDE) -I$(VBCC_NDK) \
+	-D__M68K__ -DMINIGL_VBCC_LIBRARY -DMINIGL_BACKEND_R200 -DMINIGL_LIBRARY_BUILD
+
+OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_r200.o \
+	$(OBJDIR)/r200_unity.o \
+	$(OBJDIR)/context_state_r200.o \
+	$(OBJDIR)/debug_output.o
+
+VBCC_ENV = VBCC=$(VBCC_ROOT)/build PATH="$(VBCC_BIN):$$PATH"
+
+.PHONY: all clean
+all: $(BINDIR)/minigl.library
+
+$(OBJDIR) $(BINDIR):
+	mkdir -p $@
+
+$(OBJDIR)/r200_unity.o: library/minigl_r200.c library/r200_math.c \
+	library/r200_submit.c library/r200_texture.c library/r200_state.c \
+	library/r200_geometry.c library/r200_surface.c \
+	library/minigl_r200_internal.h include/libraries/minigl_r200_bridge.h
+
+$(OBJDIR)/%.o: library/%.c | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -c $< -o $@
+
+$(BINDIR)/minigl.library: $(OBJS) | $(BINDIR)
+	$(VBCC_ENV) $(VC) +aos68k -nostdlib -resident -o $@ $(OBJS) -lm060
+
+clean:
+	rm -rf $(OBJDIR) $(BINDIR)

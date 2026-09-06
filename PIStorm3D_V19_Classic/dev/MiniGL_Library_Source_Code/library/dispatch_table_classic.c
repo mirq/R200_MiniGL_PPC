@@ -1,0 +1,170 @@
+#define MINIGL_LIBRARY_BUILD 1
+#include <exec/types.h>
+#include <libraries/minigl_dispatch.h>
+#include "fastpath_api.h"
+#include "context_access.h"
+
+/* Present in backend archives but not declared by every historical header. */
+extern void MGLLockMode(GLcontext context, GLenum lockMode);
+extern void mglChooseNumberOfBuffers(int number);
+extern void mglChooseVertexBufferSize(int size);
+extern void mglChooseWindowMode(GLboolean flag);
+extern void mglProposeCloseDesktop(GLboolean closeme);
+
+/* Functions added by PiStorm3D but not present in Classic MiniGL. */
+static void ClassicStub_GLColorMask(GLcontext context, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) { (void)0; }
+static void ClassicStub_MGLClearPointer(GLcontext context) { (void)0; }
+static void * ClassicStub_MGLGetInputWindowHandle(GLcontext context) { return (void *)0; }
+static void ClassicStub_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height) { (void)context; (void)width; (void)height; }
+static void ClassicStub_MGLSetPointer(GLcontext context) { (void)0; }
+static void ClassicStub_mglChooseGuardBand(GLboolean flag) { (void)0; }
+static void ClassicStub_mglChooseMtexBufferSize(int size) { (void)0; }
+static void ClassicStub_mglChooseTextureBufferSize(int size) { (void)0; }
+static GLint ClassicStub_mglGetSupportedScreenModes(MGLScreenModeCallback CallbackFn) { return 0; }
+static void ClassicStub_mglProhibitAlphaFallback(GLboolean flag) { (void)0; }
+static void ClassicStub_mglProhibitMipMapping(GLboolean flag) { (void)0; }
+
+static void ClassicStub_GLPolygonOffset(GLcontext context, GLfloat factor, GLfloat units)
+{
+    (void)context; (void)factor; (void)units;
+}
+
+const MGLDispatchTable MiniGLDispatchTable = {
+    MINIGL_DISPATCH_ABI_VERSION,
+    (ULONG)sizeof(MGLDispatchTable),
+    MINIGL_BACKEND_FLAG_CLASSIC,
+    0,
+    &mini_CurrentContext,
+    GLActiveTextureARB,
+    GLAlphaFunc,
+    GLArrayElement,
+    GLBegin,
+    GLBindTexture,
+    GLBlendFunc,
+    GLClear,
+    GLClearColor,
+    GLClearDepth,
+    GLColor3fv,
+    GLColor3ubv,
+    GLColor4f,
+    GLColor4fv,
+    GLColor4ub,
+    GLColor4ubv,
+    ClassicStub_GLColorMask,
+    GLColorPointer,
+    GLColorTable,
+    GLCullFace,
+    GLDeleteTextures,
+    GLDepthFunc,
+    GLDepthMask,
+    GLDepthRange,
+    GLDisableClientState,
+    GLDrawArrays,
+    GLDrawBuffer,
+    GLDrawElements,
+    GLEnableClientState,
+    GLEnd,
+    GLFinish,
+    GLFlush,
+    GLFogf,
+    GLFogfv,
+    GLFrontFace,
+    GLFrustum,
+    GLGenTextures,
+    GLGetBooleanv,
+    GLGetError,
+    GLGetFloatv,
+    GLGetIntegerv,
+    GLGetString,
+    GLHint,
+    GLIsEnabled,
+    GLLoadIdentity,
+    GLLoadMatrixd,
+    GLLoadMatrixf,
+    GLLockArrays,
+    GLMatrixMode,
+    GLMultMatrixd,
+    GLMultMatrixf,
+    GLMultiTexCoord2fARB,
+    GLMultiTexCoord2fvARB,
+    GLNormal3f,
+    GLOrtho,
+    GLPixelStorei,
+    GLPointSize,
+    GLPolygonMode,
+    GLPopMatrix,
+    GLPushMatrix,
+    GLReadPixels,
+    GLRotated,
+    GLRotatef,
+    GLRotatefEXT,
+    GLRotatefEXTs,
+    GLScaled,
+    GLScalef,
+    GLScissor,
+    GLShadeModel,
+    GLTexCoord2f,
+    GLTexCoord2fv,
+    GLTexCoord4f,
+    GLTexCoord4fv,
+    GLTexCoordPointer,
+    GLTexEnvi,
+    GLTexGeni,
+    GLTexImage2D,
+    GLTexParameteri,
+    GLTexSubImage2D,
+    GLTranslated,
+    GLTranslatef,
+    GLULookAt,
+    GLUPerspective,
+    GLUnlockArrays,
+    GLVertex2fv,
+    GLVertex3fv,
+    GLVertex4f,
+    GLVertex4fv,
+    GLVertexPointer,
+    GLViewport,
+    ClassicStub_MGLClearPointer,
+    MGLCreateContext,
+    MGLCreateContextFromID,
+    MGLDeleteContext,
+    MGLDrawMultitexBuffer,
+    MGLEnableSync,
+    MGLExit,
+    ClassicStub_MGLGetInputWindowHandle,
+    MGLGetWindowHandle,
+    MGLIdleFunc,
+    MGLKeyFunc,
+    MGLLockBack,
+    MGLLockDisplay,
+    MGLLockMode,
+    MGLMainLoop,
+    MGLMinTriArea,
+    MGLMouseFunc,
+    MGLPrintMatrix,
+    MGLPrintMatrixStack,
+    ClassicStub_MGLResizeContext,
+    ClassicStub_MGLSetPointer,
+    MGLSetState,
+    MGLSetZOffset,
+    MGLSpecialFunc,
+    MGLSwitchDisplay,
+    MGLTexMemStat,
+    MGLUnlockDisplay,
+    MGLWriteShotPPM,
+    ClassicStub_mglChooseGuardBand,
+    ClassicStub_mglChooseMtexBufferSize,
+    mglChooseNumberOfBuffers,
+    mglChoosePixelDepth,
+    ClassicStub_mglChooseTextureBufferSize,
+    mglChooseVertexBufferSize,
+    mglChooseWindowMode,
+    ClassicStub_mglGetSupportedScreenModes,
+    ClassicStub_mglProhibitAlphaFallback,
+    ClassicStub_mglProhibitMipMapping,
+    mglProposeCloseDesktop,
+    ClassicStub_GLPolygonOffset,
+    Lib_mglGetFastPathCapabilities,
+    Lib_mglBeginFastPath,
+    Lib_mglEndFastPath,
+};

@@ -1,0 +1,353 @@
+# WarpOS/PPC smoke tests.  Source /home/mirek/vbcc/env.sh first, or use the
+# defaults below.  Output is an AmigaOS LoadSeg()-able WarpOS hunk executable.
+VBCC_ROOT ?= /home/mirek/vbcc
+VBCC_NDK ?= /opt/amiga/m68k-amigaos/ndk-include
+VC := $(VBCC_ROOT)/build/bin/vc
+VAS := $(VBCC_ROOT)/build/bin/vasmppc_std
+AR := /opt/amiga/bin/m68k-amigaos-ar
+M68K_CC ?= /opt/amiga/bin/m68k-amigaos-gcc
+VBCC_ENV = VBCC=$(VBCC_ROOT)/build PATH="$(VBCC_ROOT)/build/bin:$$PATH"
+
+BINDIR := bin/warpos
+BRIDGE_BINDIR := bin/miniglppc-bridge
+OBJDIR := obj_warpos
+LIBDIR := lib
+OPEN_SMOKE := $(BINDIR)/minigl_warpos_open_smoke
+DISPATCH_SMOKE := $(BINDIR)/minigl_warpos_dispatch_smoke
+TRANSPORT_SMOKE := $(BINDIR)/minigl_warpos_transport_smoke
+CLEAR_SMOKE := $(BINDIR)/minigl_warpos_clear_smoke
+TRIANGLE_SMOKE := $(BINDIR)/minigl_warpos_triangle_smoke
+API_SMOKE := $(BINDIR)/minigl_warpos_api_smoke
+GEARS_DEMO := $(BINDIR)/gears_miniglppc
+GEARS_LAUNCHER := $(BINDIR)/run_gears_miniglppc
+PPC_MICROBENCH := $(BINDIR)/minigl_warpos_ppc_microbench
+GEARS_PPC := $(BINDIR)/gearsppc
+GEARS_PPC_ALTIVEC := $(BINDIR)/gearsppc_altivec
+GEARS_PPC_PRECALC := $(BINDIR)/gearsppc_precalc
+GEARS_PPC_LAUNCHER := $(BINDIR)/run_gearsppc
+M68K_HOST := $(BRIDGE_BINDIR)/minigl_ppc_host
+ALTIVEC_PROBE := $(BINDIR)/minigl_warpos_altivec_probe
+ALTIVEC_LAUNCHER := $(BINDIR)/run_altivec_probe
+ALTIVEC_LIB := $(LIBDIR)/libminigl_altivec_warpos.a
+VRAM_PROBE := $(BINDIR)/minigl_warpos_vram_probe
+R200_PORTABILITY_PROBE := $(OBJDIR)/minigl_r200_warpos_compile_probe.o
+R200_FRONTEND_PROOF := $(BINDIR)/minigl_r200_warpos_frontend_proof
+R200_FRONTEND_REFERENCE := $(BRIDGE_BINDIR)/minigl_r200_m68k_frontend_proof
+R200_SEMANTIC_STEP2 := $(BINDIR)/minigl_r200_semantic_step2
+R200_SEMANTIC_LIB := $(LIBDIR)/libminigl_r200_semantic_warpos.a
+R200_SEMANTIC_ALTIVEC_LIB := $(LIBDIR)/libminigl_r200_semantic_warpos_altivec.a
+R200_SEMANTIC_LIB_SMOKE := $(BINDIR)/minigl_warpos_semantic_library_smoke
+R200_SEMANTIC_ALTIVEC_SMOKE := $(BINDIR)/minigl_warpos_semantic_altivec_smoke
+R200_SEMANTIC_LIB_SMOKE_PROFILE := $(BINDIR)/minigl_warpos_semantic_library_smoke_profile
+R200_SEMANTIC_FRONTEND_OBJ := $(OBJDIR)/minigl_r200_semantic_frontend.o
+R200_SEMANTIC_ALTIVEC_FRONTEND_OBJ := $(OBJDIR)/minigl_r200_semantic_altivec_frontend.o
+R200_SEMANTIC_DISPATCH_OBJ := $(OBJDIR)/minigl_ppc_r200_semantic_dispatch.o
+ALTIVEC_PROBE_OBJ := $(OBJDIR)/minigl_warpos_altivec_probe.o
+ALTIVEC_API_OBJ := $(OBJDIR)/minigl_ppc_altivec.o
+ALTIVEC_KERNEL_OBJ := $(OBJDIR)/minigl_ppc_altivec_kernels.o
+PCI_BARRIER_OBJ := $(OBJDIR)/minigl_warpos_pci_barrier.o
+CACHE_FLUSH_OBJ := $(OBJDIR)/minigl_warpos_cache_flush.o
+SERIAL_KERNEL_OBJ := $(OBJDIR)/minigl_ppc_serial.o
+DISPATCH_LIB := $(LIBDIR)/libminigl_dispatch_warpos.a
+DISPATCH_OBJS := $(OBJDIR)/minigl_ppc_dispatch_static.o \
+	$(OBJDIR)/minigl_ppc_transport.o $(OBJDIR)/minigl_ppc_batch.o \
+	$(OBJDIR)/minigl_ppc_api.o
+R200_IMPORTLIB := lib/libminigl_dispatch.a
+PPC_INCLUDE := $(VBCC_ROOT)/build/targets/ppc-warpos/include
+# WarpOS programs access 68k AmigaOS structures through amiga.lib. Keep those
+# structures at the native Amiga two-byte alignment rather than PPC natural
+# alignment.
+CFLAGS := +warpos -c99 -O3 -amiga-align \
+	-Iinclude -Ithird_party/warp3d/include -I$(PPC_INCLUDE) -I$(VBCC_NDK)
+M68K_CFLAGS := -std=gnu99 -O2 -mcpu=68020 -noixemul -Iinclude
+
+.PHONY: all smoke open-smoke dispatch-smoke transport step0-probes \
+	altivec-probe vram-probe r200-portability-probe r200-frontend-proof \
+	step2-semantic r200-semantic-library r200-semantic-gears \
+	r200-semantic-profile r200-semantic-altivec ppc-microbench \
+	gears-benchmarks altivec-support clean
+all: smoke gears-benchmarks
+smoke: open-smoke dispatch-smoke transport
+ppc-microbench: $(PPC_MICROBENCH)
+open-smoke: $(OPEN_SMOKE)
+dispatch-smoke: $(DISPATCH_SMOKE)
+transport: $(M68K_HOST) $(TRANSPORT_SMOKE) $(CLEAR_SMOKE) $(TRIANGLE_SMOKE) \
+	$(API_SMOKE) $(GEARS_DEMO) $(GEARS_LAUNCHER)
+step0-probes: r200-portability-probe altivec-probe vram-probe
+altivec-support: $(ALTIVEC_LIB)
+altivec-probe: $(ALTIVEC_PROBE) $(ALTIVEC_LAUNCHER)
+vram-probe: $(M68K_HOST) $(VRAM_PROBE)
+r200-portability-probe: $(R200_PORTABILITY_PROBE)
+r200-frontend-proof: $(R200_FRONTEND_PROOF) $(R200_FRONTEND_REFERENCE)
+step2-semantic: $(M68K_HOST) $(R200_SEMANTIC_STEP2)
+r200-semantic-library: $(M68K_HOST) $(R200_SEMANTIC_LIB_SMOKE)
+r200-semantic-altivec: $(M68K_HOST) $(R200_SEMANTIC_ALTIVEC_SMOKE)
+r200-semantic-gears: gears-benchmarks
+r200-semantic-profile: $(M68K_HOST) $(R200_SEMANTIC_LIB_SMOKE_PROFILE) \
+	$(GEARS_PPC)
+gears-benchmarks: $(M68K_HOST) $(GEARS_PPC) $(GEARS_PPC_ALTIVEC) \
+	$(GEARS_PPC_PRECALC) $(GEARS_PPC_LAUNCHER)
+
+$(BINDIR) $(BRIDGE_BINDIR) $(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+$(OPEN_SMOKE): examples/minigl_warpos_open_smoke.c | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< -lamiga -o $@
+
+$(OBJDIR)/minigl_ppc_dispatch_static.o: client/minigl_ppc_dispatch_static.c \
+		include/libraries/minigl_ppc_dispatch.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_transport.o: client/minigl_ppc_transport.c \
+		include/libraries/minigl_ppc_transport.h \
+		include/libraries/minigl_ppc_protocol.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_batch.o: client/minigl_ppc_batch.c \
+		include/libraries/minigl_ppc_batch.h \
+		include/libraries/minigl_ppc_transport.h \
+		include/libraries/minigl_ppc_protocol.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_api.o: client/minigl_ppc_api.c \
+		include/libraries/minigl_dispatch.h \
+		include/libraries/minigl_ppc_batch.h \
+		include/libraries/minigl_ppc_profile.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -c $< -o $@
+
+$(DISPATCH_LIB): $(DISPATCH_OBJS) | $(LIBDIR)
+	rm -f $@
+	$(AR) rcs $@ $(DISPATCH_OBJS)
+
+$(DISPATCH_SMOKE): examples/minigl_warpos_dispatch_smoke.c $(DISPATCH_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(DISPATCH_LIB) -lamiga -o $@
+
+$(R200_IMPORTLIB): client/minigl_base.c client/minigl_open.c \
+		client/minigl_dispatch_stub_gcc.s
+	PATH="/opt/amiga/bin:$$PATH" $(MAKE) -f Makefile_dispatch_r200.gcc importlib
+
+$(M68K_HOST): examples/minigl_ppc_host.c $(R200_IMPORTLIB) \
+		include/libraries/minigl_ppc_protocol.h \
+		include/libraries/minigl_r200_bridge.h | $(BRIDGE_BINDIR)
+	$(M68K_CC) $(M68K_CFLAGS) -Ithird_party/warp3d/include \
+		-Ithird_party/radeon3d/include $< $(R200_IMPORTLIB) -o $@
+
+$(R200_PORTABILITY_PROBE): library/minigl_r200_warpos_compile_probe.c \
+		library/r200_unity.c library/minigl_r200.c library/r200_geometry.c \
+		library/r200_submit.c library/r200_math.c library/r200_texture.c \
+		library/r200_surface.c library/r200_state.c library/minigl_r200.h \
+		library/minigl_r200_internal.h library/minigl_r200_base.h \
+		library/debug_output.h include/libraries/minigl_fastpath.h \
+		include/libraries/minigl_perf.h include/libraries/minigl_r200_bridge.h \
+		third_party/radeon3d/include/radeon3d.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -Ithird_party/radeon3d/include \
+		-DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 -c $< -o $@
+
+$(R200_FRONTEND_PROOF): library/minigl_r200_warpos_compile_probe.c \
+		library/r200_unity.c library/minigl_r200.c library/r200_geometry.c \
+		library/r200_submit.c library/r200_math.c library/r200_texture.c \
+		library/r200_surface.c library/r200_state.c library/minigl_r200.h \
+		library/minigl_r200_internal.h library/minigl_r200_base.h \
+		library/debug_output.h include/libraries/minigl_fastpath.h \
+		include/libraries/minigl_perf.h include/libraries/minigl_r200_bridge.h \
+		third_party/radeon3d/include/radeon3d.h | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -Ithird_party/radeon3d/include \
+		-DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
+		-DR200_FRONTEND_LINK_PROOF=1 $< $(SERIAL_KERNEL_OBJ) \
+		-lppcmath -lm -lamiga -o $@
+
+$(R200_FRONTEND_REFERENCE): library/minigl_r200_warpos_compile_probe.c \
+		library/r200_unity.c library/minigl_r200.c library/r200_geometry.c \
+		library/r200_submit.c library/r200_math.c library/r200_texture.c \
+		library/r200_surface.c library/r200_state.c library/minigl_r200.h \
+		library/minigl_r200_internal.h library/minigl_r200_base.h \
+		library/debug_output.h include/libraries/minigl_fastpath.h \
+		include/libraries/minigl_perf.h include/libraries/minigl_r200_bridge.h \
+		third_party/radeon3d/include/radeon3d.h | $(BRIDGE_BINDIR)
+	$(M68K_CC) -std=gnu99 -O2 -mcpu=68060 -m68881 -noixemul \
+		-ffreestanding -fno-builtin -Iinclude -Ilibrary \
+		-Ithird_party/warp3d/include -Ithird_party/radeon3d/include \
+		-I$(VBCC_NDK) -DR200_PPC_FRONTEND=1 \
+		-DR200_FRONTEND_LINK_PROOF=1 $< -lm -o $@
+
+$(CACHE_FLUSH_OBJ): examples/minigl_warpos_cache_flush.s | $(OBJDIR)
+	$(VAS) -quiet -big -m7410 -Fhunk -sdreg=2 -opt-branch $< -o $@
+
+$(SERIAL_KERNEL_OBJ): client/minigl_ppc_serial.s | $(OBJDIR)
+	$(VAS) -quiet -big -m7410 -Fhunk -sdreg=2 -opt-branch $< -o $@
+
+$(R200_SEMANTIC_STEP2): library/minigl_r200_warpos_compile_probe.c \
+		library/r200_unity.c library/minigl_r200.c library/r200_geometry.c \
+		library/r200_submit.c library/r200_math.c library/r200_texture.c \
+		library/r200_surface.c library/r200_state.c library/minigl_r200.h \
+		library/minigl_r200_internal.h library/minigl_r200_base.h \
+		library/debug_output.h include/libraries/minigl_fastpath.h \
+		include/libraries/minigl_perf.h include/libraries/minigl_ppc_protocol.h \
+		include/libraries/minigl_ppc_transport.h \
+		include/libraries/minigl_r200_bridge.h \
+		third_party/radeon3d/include/radeon3d.h \
+		$(OBJDIR)/minigl_ppc_transport.o $(CACHE_FLUSH_OBJ) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -Ithird_party/radeon3d/include \
+		-DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
+		-DR200_FRONTEND_SEMANTIC_STEP2=1 $< \
+		$(OBJDIR)/minigl_ppc_transport.o $(CACHE_FLUSH_OBJ) \
+		$(SERIAL_KERNEL_OBJ) -lppcmath -lm -lamiga -o $@
+
+$(R200_SEMANTIC_FRONTEND_OBJ): library/minigl_r200_warpos_compile_probe.c \
+		library/r200_unity.c library/minigl_r200.c library/r200_geometry.c \
+		library/r200_submit.c library/r200_math.c library/r200_texture.c \
+		library/r200_surface.c library/r200_state.c library/minigl_r200.h \
+		library/minigl_r200_internal.h library/minigl_r200_base.h \
+		library/debug_output.h include/libraries/minigl_fastpath.h \
+		include/libraries/minigl_perf.h include/libraries/minigl_ppc_protocol.h \
+		include/libraries/minigl_ppc_transport.h \
+		include/libraries/minigl_ppc_altivec.h \
+		include/libraries/minigl_ppc_events.h \
+		include/libraries/minigl_r200_bridge.h \
+		third_party/radeon3d/include/radeon3d.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -Ithird_party/radeon3d/include \
+		-DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
+		-DR200_FRONTEND_LIBRARY=1 -c $< -o $@
+
+$(R200_SEMANTIC_ALTIVEC_FRONTEND_OBJ): library/minigl_r200_warpos_compile_probe.c \
+		library/r200_unity.c library/minigl_r200.c library/r200_geometry.c \
+		library/r200_submit.c library/r200_math.c library/r200_texture.c \
+		library/r200_surface.c library/r200_state.c library/minigl_r200.h \
+		library/minigl_r200_internal.h library/minigl_r200_base.h \
+		library/debug_output.h include/libraries/minigl_fastpath.h \
+		include/libraries/minigl_perf.h include/libraries/minigl_ppc_protocol.h \
+		include/libraries/minigl_ppc_transport.h \
+		include/libraries/minigl_ppc_altivec.h \
+		include/libraries/minigl_ppc_events.h \
+		include/libraries/minigl_r200_bridge.h \
+		third_party/radeon3d/include/radeon3d.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -Ithird_party/radeon3d/include \
+		-DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
+		-DR200_FRONTEND_LIBRARY=1 -DR200_PPC_ALTIVEC=1 -c $< -o $@
+
+$(R200_SEMANTIC_DISPATCH_OBJ): client/minigl_ppc_r200_semantic_dispatch.c \
+		library/dispatch_table_r200.c library/context_access.h \
+		include/libraries/minigl_dispatch.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -Ilibrary -c $< -o $@
+
+$(R200_SEMANTIC_LIB): $(R200_SEMANTIC_FRONTEND_OBJ) \
+		$(R200_SEMANTIC_DISPATCH_OBJ) $(OBJDIR)/minigl_ppc_transport.o \
+		$(CACHE_FLUSH_OBJ) $(SERIAL_KERNEL_OBJ) | $(LIBDIR)
+	rm -f $@
+	$(AR) rcs $@ $(R200_SEMANTIC_DISPATCH_OBJ) \
+		$(R200_SEMANTIC_FRONTEND_OBJ) $(OBJDIR)/minigl_ppc_transport.o \
+		$(CACHE_FLUSH_OBJ) $(SERIAL_KERNEL_OBJ)
+
+$(R200_SEMANTIC_ALTIVEC_LIB): $(R200_SEMANTIC_ALTIVEC_FRONTEND_OBJ) \
+		$(R200_SEMANTIC_DISPATCH_OBJ) $(OBJDIR)/minigl_ppc_transport.o \
+		$(CACHE_FLUSH_OBJ) $(SERIAL_KERNEL_OBJ) $(ALTIVEC_API_OBJ) \
+		$(ALTIVEC_KERNEL_OBJ) | $(LIBDIR)
+	rm -f $@
+	$(AR) rcs $@ $(R200_SEMANTIC_DISPATCH_OBJ) \
+		$(R200_SEMANTIC_ALTIVEC_FRONTEND_OBJ) \
+		$(OBJDIR)/minigl_ppc_transport.o $(CACHE_FLUSH_OBJ) \
+		$(SERIAL_KERNEL_OBJ) \
+		$(ALTIVEC_API_OBJ) $(ALTIVEC_KERNEL_OBJ)
+
+$(R200_SEMANTIC_LIB_SMOKE): examples/minigl_warpos_semantic_library_smoke.c \
+		$(R200_SEMANTIC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(R200_SEMANTIC_LIB) \
+		-lppcmath -lm -lamiga -o $@
+
+$(R200_SEMANTIC_ALTIVEC_SMOKE): examples/minigl_warpos_semantic_library_smoke.c \
+		$(R200_SEMANTIC_ALTIVEC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(R200_SEMANTIC_ALTIVEC_LIB) \
+		-lppcmath -lm -lamiga -o $@
+
+$(R200_SEMANTIC_LIB_SMOKE_PROFILE): examples/minigl_warpos_semantic_library_smoke.c \
+		$(R200_SEMANTIC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -DMINIGLPPC_SEMANTIC_PROFILE=1 $< \
+		$(R200_SEMANTIC_LIB) -lppcmath -lm -lamiga -o $@
+
+$(ALTIVEC_PROBE_OBJ): examples/minigl_warpos_altivec_probe.s | $(OBJDIR)
+	$(VAS) -quiet -big -m7410 -mavec -Fhunk -sdreg=2 -opt-branch \
+		-nowarn=62 $< -o $@
+
+$(ALTIVEC_API_OBJ): client/minigl_ppc_altivec.c \
+		include/libraries/minigl_ppc_altivec.h | $(OBJDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -c $< -o $@
+
+$(ALTIVEC_KERNEL_OBJ): client/minigl_ppc_altivec.s | $(OBJDIR)
+	$(VAS) -quiet -big -m7410 -mavec -Fhunk -sdreg=2 -opt-branch \
+		-nowarn=62 $< -o $@
+
+$(ALTIVEC_LIB): $(ALTIVEC_API_OBJ) $(ALTIVEC_KERNEL_OBJ) | $(LIBDIR)
+	rm -f $@
+	$(AR) rcs $@ $(ALTIVEC_API_OBJ) $(ALTIVEC_KERNEL_OBJ)
+
+$(PCI_BARRIER_OBJ): examples/minigl_warpos_pci_barrier.s | $(OBJDIR)
+	$(VAS) -quiet -big -m7410 -Fhunk -sdreg=2 -opt-branch $< -o $@
+
+$(ALTIVEC_PROBE): examples/minigl_warpos_altivec_probe.c \
+		$(ALTIVEC_PROBE_OBJ) $(ALTIVEC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(ALTIVEC_PROBE_OBJ) \
+		$(ALTIVEC_LIB) -lamiga -o $@
+
+$(ALTIVEC_LAUNCHER): examples/run_altivec_probe | $(BINDIR)
+	cp $< $@
+
+$(VRAM_PROBE): examples/minigl_warpos_vram_probe.c \
+		$(OBJDIR)/minigl_ppc_transport.o $(PCI_BARRIER_OBJ) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(OBJDIR)/minigl_ppc_transport.o \
+		$(PCI_BARRIER_OBJ) -lamiga -o $@
+
+$(TRANSPORT_SMOKE): examples/minigl_warpos_transport_smoke.c \
+		$(DISPATCH_LIB) include/libraries/minigl_ppc_protocol.h | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(DISPATCH_LIB) -lamiga -o $@
+
+$(CLEAR_SMOKE): examples/minigl_warpos_clear_smoke.c $(DISPATCH_LIB) \
+		include/libraries/minigl_ppc_protocol.h | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(DISPATCH_LIB) -lamiga -o $@
+
+$(TRIANGLE_SMOKE): examples/minigl_warpos_triangle_smoke.c $(DISPATCH_LIB) \
+		include/libraries/minigl_ppc_batch.h | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(DISPATCH_LIB) -lamiga -o $@
+
+$(API_SMOKE): examples/minigl_warpos_api_smoke.c $(DISPATCH_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(DISPATCH_LIB) \
+		-lppcmath -lm -lamiga -o $@
+
+$(GEARS_DEMO): examples/gears_miniglppc.c $(DISPATCH_LIB) \
+		include/libraries/minigl_ppc_batch.h | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) $< $(DISPATCH_LIB) \
+		-lppcmath -lm -lamiga -o $@
+
+$(GEARS_LAUNCHER): examples/run_gears_miniglppc | $(BINDIR)
+	cp $< $@
+
+$(PPC_MICROBENCH): examples/minigl_warpos_ppc_microbench.c $(R200_SEMANTIC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -DMINIGLPPC_SEMANTIC_PROFILE=1 $< \
+		$(R200_SEMANTIC_LIB) -lppcmath -lm -lamiga -o $@
+
+$(GEARS_PPC): examples/gears_benchmark.c \
+		include/libraries/minigl_perf.h \
+		$(R200_SEMANTIC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -DMINIGLPPC_SEMANTIC=1 $< $(R200_SEMANTIC_LIB) \
+		-lppcmath -lm -lamiga -o $@
+
+$(GEARS_PPC_PRECALC): examples/gears_benchmark.c \
+		include/libraries/minigl_perf.h \
+		$(R200_SEMANTIC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -DMINIGLPPC_SEMANTIC=1 \
+		-DMGL_GEARS_PRECALC=1 $< $(R200_SEMANTIC_LIB) \
+		-lppcmath -lm -lamiga -o $@
+
+$(GEARS_PPC_ALTIVEC): examples/gears_benchmark.c \
+		include/libraries/minigl_perf.h \
+		include/libraries/minigl_ppc_altivec.h \
+		$(R200_SEMANTIC_ALTIVEC_LIB) | $(BINDIR)
+	$(VBCC_ENV) $(VC) $(CFLAGS) -DMINIGLPPC_SEMANTIC=1 \
+		-DMGL_GEARS_ALTIVEC=1 $< \
+		$(R200_SEMANTIC_ALTIVEC_LIB) -lppcmath -lm -lamiga -o $@
+
+$(GEARS_PPC_LAUNCHER): examples/run_gearsppc | $(BINDIR)
+	cp $< $@
+
+clean:
+	rm -rf $(BINDIR) $(BRIDGE_BINDIR) $(OBJDIR)
+	rm -f $(DISPATCH_LIB)

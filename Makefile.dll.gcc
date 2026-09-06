@@ -1,0 +1,67 @@
+# WarpOS MiniGL V19 PPC DLL using Hyperion's DLL runtime.
+# The MiniGL implementation is the bundled mglQ3 tree.
+CPU     ?= 604e
+include Makefile.wos.gcc.common
+
+OBJDIR  ?= obj/dll
+OUT     ?= bin/minigl_ppc.dll
+WARPELF ?= bin/minigl_ppc.warpelf
+
+MGLQ3_DIR ?= mglQ3
+MGLQ3_LIB ?= $(MGLQ3_DIR)/lib/libmgl-wos.a
+MGLQ3_DEPS = $(wildcard $(MGLQ3_DIR)/src/*.c $(MGLQ3_DIR)/src/*.h \
+              $(MGLQ3_DIR)/include/mgl/*.h $(MGLQ3_DIR)/include/proto/*.h)
+
+CFLAGS = $(WOS_ARCH_CFLAGS) -O3 -Wall \
+         -fomit-frame-pointer \
+         -I$(MGLQ3_DIR)/include -Iinclude -Ihyperion_dll \
+         $(WOS_CPPFLAGS)
+
+OBJS = $(OBJDIR)/minigl_ppc_dispatch.o \
+       $(OBJDIR)/dllstartup.o \
+       $(OBJDIR)/dll.o \
+       $(OBJDIR)/dllimport.o
+DEPS = $(OBJS:.o=.d)
+
+.PHONY: all warpelf mglq3 clean
+all: $(OUT)
+warpelf: $(WARPELF)
+
+mglq3: $(MGLQ3_LIB)
+
+$(MGLQ3_LIB): $(MGLQ3_DEPS) $(MGLQ3_DIR)/Makefile.wos.gcc Makefile.wos.gcc.common
+	$(MAKE) -C $(MGLQ3_DIR) -f Makefile.wos.gcc CPU=$(CPU) \
+		WOS_TOOLCHAIN_BIN="$(WOS_TOOLCHAIN_BIN)" \
+		MOS2WOS_ROOT="$(MOS2WOS_ROOT)" WOS_SDK_ROOT="$(WOS_SDK_ROOT)"
+
+$(OBJDIR) bin:
+	mkdir -p $@
+
+$(OBJDIR)/minigl_ppc_dispatch.o: ppc_dll/minigl_ppc_dispatch.c include/libraries/minigl_dispatch.h Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dll.o: hyperion_dll/dll.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(WARPELF): $(OBJS) $(MGLQ3_LIB) $(WOS_ETREL_LDSCRIPT) | bin
+	$(LD) $(WOS_LINK_FLAGS) $(WOS_LIBRARY_DIRS) -o $@ \
+		$(WOS_STARTFILE) $(OBJS) $(MGLQ3_LIB) \
+		$(WOS_RUNTIME_LIBS) $(WOS_ENDFILE)
+	$(call WOS_VALIDATE_ETREL,$@)
+
+$(OUT): $(WARPELF)
+	@command -v "$(ELF2EXE2)" >/dev/null 2>&1 || \
+		{ echo "Elf2Exe2 is target-hosted; build 'warpelf' here and run conversion on Amiga/WarpOS."; exit 127; }
+	$(ELF2EXE2) $< $@
+
+clean:
+	rm -rf $(OBJDIR) $(OUT) $(WARPELF)
+	$(MAKE) -C $(MGLQ3_DIR) -f Makefile.wos.gcc clean
+
+-include $(DEPS)

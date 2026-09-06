@@ -1,0 +1,55 @@
+# WarpOS MiniGL direct-dispatch STUB DLL using Hyperion's DLL runtime.
+# No real MiniGL backend archive is required.
+# The output uses the normal runtime filename so it can be copied directly
+# in place of the real DLL for testing, but lives in bin/stub to avoid
+# overwriting the real build.
+CPU     ?= 604e
+include Makefile.wos.gcc.common
+
+OBJDIR  ?= obj/dll_stub
+OUT     ?= bin/stub/minigl_ppc.dll
+WARPELF ?= bin/stub/minigl_ppc.warpelf
+
+CFLAGS = $(WOS_ARCH_CFLAGS) -O2 -Wall -Wno-unused-parameter \
+         -fomit-frame-pointer \
+         -Iinclude -Ihyperion_dll $(WOS_CPPFLAGS)
+
+OBJS = $(OBJDIR)/minigl_ppc_dispatch_stub.o \
+       $(OBJDIR)/dllstartup.o \
+       $(OBJDIR)/dll.o \
+       $(OBJDIR)/dllimport.o
+DEPS = $(OBJS:.o=.d)
+
+.PHONY: all warpelf clean
+all: $(OUT)
+warpelf: $(WARPELF)
+
+$(OBJDIR) bin/stub:
+	mkdir -p $@
+
+$(OBJDIR)/minigl_ppc_dispatch_stub.o: ppc_dll/minigl_ppc_dispatch_stub.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dll.o: hyperion_dll/dll.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(WARPELF): $(OBJS) $(WOS_ETREL_LDSCRIPT) | bin/stub
+	$(LD) $(WOS_LINK_FLAGS) $(WOS_LIBRARY_DIRS) -o $@ \
+		$(WOS_STARTFILE) $(OBJS) $(WOS_RUNTIME_LIBS) $(WOS_ENDFILE)
+	$(call WOS_VALIDATE_ETREL,$@)
+
+$(OUT): $(WARPELF)
+	@command -v "$(ELF2EXE2)" >/dev/null 2>&1 || \
+		{ echo "Elf2Exe2 is target-hosted; build 'warpelf' here and run conversion on Amiga/WarpOS."; exit 127; }
+	$(ELF2EXE2) $< $@
+
+clean:
+	rm -rf $(OBJDIR) $(OUT) $(WARPELF)
+
+-include $(DEPS)

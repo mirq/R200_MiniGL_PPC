@@ -1,0 +1,35 @@
+MINIGL_ROOT ?= ../..
+VC = vc
+VASM = vasmm68k_mot
+CPU ?= 68040
+TARGET ?= build/hello_triangle_vbcc
+
+CFLAGS = +aos68k -c99 -O=2 -cpu=$(CPU) -fpu=68881 \
+	-I$(MINIGL_ROOT)/include \
+	-I$(MINIGL_ROOT)/third_party/warp3d/include
+CLIENT_OBJS = build/minigl_base.o build/minigl_open.o \
+	build/minigl_dispatch_stub.o
+
+.PHONY: all clean
+all: $(TARGET)
+
+$(TARGET): build/hello_triangle.o $(CLIENT_OBJS)
+	$(VC) +aos68k -o $@ $^
+
+build/hello_triangle.o: hello_triangle.c | build
+	$(VC) $(CFLAGS) -c $< -o $@
+
+build/minigl_base.o: $(MINIGL_ROOT)/client/minigl_base.c | build
+	$(VC) $(CFLAGS) -c $< -o $@
+
+build/minigl_open.o: $(MINIGL_ROOT)/client/minigl_open.c | build
+	$(VC) $(CFLAGS) -c $< -o $@
+
+build/minigl_dispatch_stub.o: $(MINIGL_ROOT)/client/minigl_dispatch_stub_vbcc.s | build
+	$(VASM) -Fhunk -m$(CPU) -o $@ $<
+
+build:
+	mkdir -p $@
+
+clean:
+	rm -rf build

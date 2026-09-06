@@ -1,0 +1,5 @@
+Run >NIL: Work:minigl_warpos_altivec_probe A >Work:altivec_probe_a.log
+Work:minigl_warpos_altivec_probe B >Work:altivec_probe_b.log
+Wait 2 SECS
+Type Work:altivec_probe_a.log
+Type Work:altivec_probe_b.log

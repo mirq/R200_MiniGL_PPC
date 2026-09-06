@@ -1,0 +1,63 @@
+# Linux-hosted GCC configuration for the MOS2WOS WarpOS SDK overlay.
+WOS_COMMON_DIR    := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+WOS_TOOLCHAIN_BIN ?= /home/mirek/ppc-amigaos-gcc/native-build/root-cross/bin
+MOS2WOS_ROOT      ?= /home/mirek/Downloads/gg
+WOS_SDK_ROOT      ?= $(MOS2WOS_ROOT)/ppc-warpos
+WOS_CROSS         ?= $(WOS_TOOLCHAIN_BIN)/ppc-amigaos-
+
+CC      := $(WOS_CROSS)gcc
+LD      := $(WOS_CROSS)ld
+AR      := $(WOS_CROSS)ar
+RANLIB  := $(WOS_CROSS)ranlib
+NM      := $(WOS_CROSS)nm
+READELF := $(WOS_CROSS)readelf
+
+CPU ?= 604e
+
+# The compiler targets AmigaOS 4, but its PPC SysV code generator and ELF
+# binutils are also suitable for MOS2WOS when the OS defaults are replaced.
+WOS_CPPFLAGS = -nostdinc \
+               -U__AMIGAOS4__ -U__AMIGAOS4 -UAMIGAOS4 \
+               -U__amigaos4__ -U__amigaos4 -Uamigaos4 -U__NEWLIB__ \
+               -D__PPC__ -DWARPUP -DNEWLIB \
+               -isystem $(WOS_SDK_ROOT)/newlib/include \
+               -isystem $(WOS_SDK_ROOT)/newlib/include/c++ \
+               -isystem $(WOS_SDK_ROOT)/os-includeppc \
+               -isystem $(WOS_SDK_ROOT)/include \
+               -isystem $(WOS_SDK_ROOT)/include/sdl \
+               -isystem $(WOS_SDK_ROOT)/netinclude \
+               -isystem $(WOS_SDK_ROOT)/gcc-include
+
+WOS_ARCH_CFLAGS = -mcpu=$(CPU) -mcall-sysv -mbig-endian -mmultiple \
+                  -fno-pic -fno-pie -fno-stack-protector \
+                  -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                  -fno-jump-tables
+
+WOS_STARTFILE = $(WOS_SDK_ROOT)/lib/startupwos.o
+WOS_ENDFILE   = $(WOS_SDK_ROOT)/lib/end.o
+WOS_LIBRARY_DIRS = -L$(WOS_SDK_ROOT)/newlib/lib -L$(WOS_SDK_ROOT)/lib
+
+# This mirrors the MOS2WOS warpup spec. libamigawos supplies the alib helpers
+# used by Hyperion's DLL loader, notably CreatePort() and DeletePort().
+WOS_RUNTIME_LIBS = --start-group -lamigawos -lgccwos -lm \
+                   -lglosswos -lcwos -lglosswos -lgccwos --end-group
+WOS_ETREL_LDSCRIPT ?= $(WOS_COMMON_DIR)warpos-etrel.ld
+WOS_LINK_FLAGS = -r -EB -d -x -T $(WOS_ETREL_LDSCRIPT)
+
+# Elf2Exe2 accepts only these relocation classes. Keep this check in every
+# final ET_REL link so a toolchain change cannot silently produce bad input.
+define WOS_VALIDATE_ETREL
+	@test -z "$$($(NM) --undefined-only $(1))" || \
+		{ echo "Unexpected undefined symbols:"; $(NM) --undefined-only $(1); exit 1; }
+	@$(NM) --defined-only --format=posix $(1) | \
+		awk '$$1 == "_start" && $$2 == "T" && $$3 == "00000000" { found = 1 } END { exit found ? 0 : 1 }' || \
+		{ echo "_start is not defined at .text+0 in $(1)"; exit 1; }
+	@bad=$$($(NM) --format=posix $(1) | awk '$$2 == "C" { print $$1 }'); \
+		test -z "$$bad" || { echo "Unexpected COMMON symbols: $$bad"; exit 1; }
+	@bad=$$($(READELF) --relocs --wide $(1) | \
+		awk '$$3 ~ /^R_PPC_/ && $$3 !~ /^R_PPC_(ADDR32|ADDR16_LO|ADDR16_HA|REL24)$$/ { print $$3 }' | sort -u); \
+		test -z "$$bad" || { echo "Unsupported WarpOS relocations: $$bad"; exit 1; }
+endef
+
+# Elf2Exe2 is target-hosted. Override this on an Amiga/WarpOS build host.
+ELF2EXE2 ?= elf2exe2

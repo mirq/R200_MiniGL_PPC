@@ -1,0 +1,4 @@
+FailAt 21
+Run >NIL: Work:minigl_ppc_host >NIL:
+Wait 1 SECS
+Work:gearsppc -width 800 -height 600 -depth 32 -window -overlay -envmap Work:minigl_demos/data/chrome.ppm

@@ -1,0 +1,146 @@
+# WarpOS MiniGL V19 PPC DLL using the direct R200 semantic frontend.
+CPU     ?= 604e
+include Makefile.wos.gcc.common
+
+OBJDIR  ?= obj/dll-r200
+OUT     ?= bin/minigl_ppc_r200.dll
+WARPELF ?= bin/minigl_ppc_r200.warpelf
+PYTHON  ?= python3
+M68K_CC ?= /opt/amiga/bin/m68k-amigaos-gcc
+
+R200_NATIVE_ROOT ?= $(HOME)/Downloads/PIStorm3D_V19_Classic/dev/MiniGL_Library_Source_Code
+R200_NATIVE_IMPORT := $(R200_NATIVE_ROOT)/lib/libminigl_dispatch.a
+R200_NATIVE_LIBRARY := $(R200_NATIVE_ROOT)/bin/dispatch-r200-gcc/minigl.library
+R200_HOST ?= bin/minigl_ppc_host
+R200_PACKAGE_DIR ?= bin/r200-package
+
+R200_DIR       := backend_r200
+R200_LIBRARY   := $(R200_DIR)/library
+R200_CLIENT    := $(R200_DIR)/client
+R200_INCLUDE   := $(R200_DIR)/include
+R200_THIRDPARTY:= $(R200_DIR)/third_party/radeon3d/include
+R200_GENERATED := $(R200_DIR)/generated
+R200_SYMBOLS   := $(R200_GENERATED)/r200_symbols.txt
+R200_TABLE     := $(R200_GENERATED)/dispatch_table_abi3.c
+
+COMMON_CFLAGS = $(WOS_ARCH_CFLAGS) -O2 -std=gnu99 -Wall \
+                -fomit-frame-pointer -fno-common $(WOS_CPPFLAGS)
+DLL_CFLAGS = $(COMMON_CFLAGS) -Iinclude -I$(R200_INCLUDE) \
+             -I$(R200_LIBRARY) -Ihyperion_dll
+R200_CFLAGS = $(COMMON_CFLAGS) -I$(R200_INCLUDE) -Iinclude \
+              -I$(R200_LIBRARY) -I$(R200_THIRDPARTY) \
+               -DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
+               -DR200_FRONTEND_LIBRARY=1 -DR200_PERF_TIMING=1 \
+               -DR200_PERF_AUTOREPORT=1 \
+               -DR200_STREAM_COMMITS=1 -DR200_ASYNC_ROTATION=1
+
+R200_SOURCES = $(R200_LIBRARY)/minigl_r200_warpos_compile_probe.c \
+               $(R200_LIBRARY)/r200_unity.c \
+               $(R200_LIBRARY)/minigl_r200.c \
+               $(R200_LIBRARY)/r200_geometry.c \
+               $(R200_LIBRARY)/r200_submit.c \
+               $(R200_LIBRARY)/r200_math.c \
+               $(R200_LIBRARY)/r200_texture.c \
+               $(R200_LIBRARY)/r200_surface.c \
+               $(R200_LIBRARY)/r200_state.c \
+               $(wildcard $(R200_LIBRARY)/*.h) \
+               $(wildcard $(R200_INCLUDE)/libraries/*.h) \
+               $(wildcard $(R200_THIRDPARTY)/*.h \
+                           $(R200_THIRDPARTY)/*/*.h)
+
+OBJS = $(OBJDIR)/minigl_ppc_dispatch_r200.o \
+       $(OBJDIR)/r200_frontend.o \
+       $(OBJDIR)/minigl_ppc_transport.o \
+       $(OBJDIR)/minigl_ppc_serial.o \
+       $(OBJDIR)/minigl_warpos_cache_flush.o \
+       $(OBJDIR)/dllstartup.o \
+       $(OBJDIR)/dll.o \
+       $(OBJDIR)/dllimport.o
+DEPS = $(filter %.d,$(OBJS:.o=.d))
+
+.PHONY: all warpelf frontend native-r200 host stack package clean
+all: $(OUT)
+warpelf: $(WARPELF)
+frontend: $(OBJDIR)/r200_frontend.o
+native-r200:
+	$(MAKE) -C "$(R200_NATIVE_ROOT)" -f Makefile_dispatch_r200.gcc all importlib
+host: native-r200 $(R200_HOST)
+stack: warpelf host
+package: stack $(OUT) lib/libminigl.a backend_r200/README-WarpOS-R200.txt
+	mkdir -p $(R200_PACKAGE_DIR)
+	cp $(OUT) $(R200_PACKAGE_DIR)/minigl_ppc.dll
+	cp $(R200_HOST) $(R200_PACKAGE_DIR)/minigl_ppc_host
+	cp $(R200_NATIVE_LIBRARY) $(R200_PACKAGE_DIR)/minigl.library
+	cp lib/libminigl.a $(R200_PACKAGE_DIR)/libminigl.a
+	cp backend_r200/README-WarpOS-R200.txt $(R200_PACKAGE_DIR)/README.txt
+	cd $(R200_PACKAGE_DIR) && sha256sum minigl_ppc.dll minigl_ppc_host \
+		minigl.library libminigl.a > SHA256SUMS
+
+$(OBJDIR) $(R200_GENERATED) bin:
+	mkdir -p $@
+
+$(OBJDIR)/r200_frontend.o: $(R200_SOURCES) Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
+
+$(R200_SYMBOLS): $(OBJDIR)/r200_frontend.o | $(R200_GENERATED)
+	$(NM) --defined-only --format=posix $< | \
+		awk '$$2 == "T" && $$1 ~ /^Lib_/ { print $$1 }' | sort -u > $@
+
+$(R200_TABLE): include/libraries/minigl_dispatch.h $(R200_SYMBOLS) \
+              tools/generate_dispatch_r200.py | $(R200_GENERATED)
+	$(PYTHON) tools/generate_dispatch_r200.py \
+		include/libraries/minigl_dispatch.h $(R200_SYMBOLS) $@
+
+$(OBJDIR)/minigl_ppc_dispatch_r200.o: ppc_dll/minigl_ppc_dispatch_r200.c \
+              include/libraries/minigl_dispatch.h $(R200_TABLE) | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_transport.o: $(R200_CLIENT)/minigl_ppc_transport.c \
+              $(R200_INCLUDE)/libraries/minigl_ppc_transport.h \
+              $(R200_INCLUDE)/libraries/minigl_ppc_protocol.h | $(OBJDIR)
+	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_serial.o: $(R200_CLIENT)/minigl_ppc_serial.s | $(OBJDIR)
+	$(CC) $(WOS_ARCH_CFLAGS) -Wa,-mregnames -c $< -o $@
+
+$(OBJDIR)/minigl_warpos_cache_flush.o: \
+              $(R200_CLIENT)/minigl_warpos_cache_flush.s | $(OBJDIR)
+	$(CC) $(WOS_ARCH_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dll.o: hyperion_dll/dll.c | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
+              $(R200_INCLUDE)/libraries/minigl_ppc_protocol.h \
+              $(R200_INCLUDE)/libraries/minigl_r200_bridge.h \
+              $(R200_NATIVE_IMPORT) Makefile.dll.r200.gcc | bin
+	$(M68K_CC) -std=gnu99 -O2 -mcpu=68020 -noixemul -Wall \
+		-Werror=incompatible-pointer-types \
+		-I$(R200_INCLUDE) -I$(R200_NATIVE_ROOT)/include \
+		-I$(R200_NATIVE_ROOT)/third_party/warp3d/include \
+		-I$(R200_THIRDPARTY) $< $(R200_NATIVE_IMPORT) -o $@
+
+lib/libminigl.a:
+	$(MAKE) -f Makefile.import.gcc importlib
+
+$(WARPELF): $(OBJS) $(WOS_ETREL_LDSCRIPT) | bin
+	$(LD) $(WOS_LINK_FLAGS) $(WOS_LIBRARY_DIRS) -o $@ \
+		$(WOS_STARTFILE) $(OBJS) $(WOS_RUNTIME_LIBS) $(WOS_ENDFILE)
+	$(call WOS_VALIDATE_ETREL,$@)
+
+$(OUT): $(WARPELF)
+	@command -v "$(ELF2EXE2)" >/dev/null 2>&1 || \
+		{ echo "Elf2Exe2 is target-hosted; build 'warpelf' here and run conversion on Amiga/WarpOS."; exit 127; }
+	$(ELF2EXE2) $< $@
+
+clean:
+	rm -rf $(OBJDIR) $(OUT) $(WARPELF) $(R200_HOST) \
+		$(R200_PACKAGE_DIR) $(R200_SYMBOLS) $(R200_TABLE)
+
+-include $(DEPS)
