@@ -58,6 +58,59 @@ Raw files: `DH2:gearsclean/<prefix>-client.log` and `<prefix>-host.log`.
 Combined `priorities.log` (1,172 bytes) and `pri-hosts.log` (4,430 bytes) were
 CRC-verified on download into `/tmp/opencode/gears-hygiene/`.
 
+## Reboot-Isolated Follow-Up
+
+Following commit `eab5dac`, six additional trials were run, each after its own
+bridge-requested Amiga software reboot. These are **not physical power-cycle
+tests** and do not replace that part of the full cold-boot validation gate.
+After every reboot, `/home/mirek/minigl_ppc/tools/wait_bridge.sh` polled the
+physical bridge, the
+connection was re-established explicitly, bootstrap passed, and `C:InitPPC`
+was called once. No build, deployment, driver, or benchmark-code change was
+made between trials.
+
+Command on every boot, from `DH2:gearsclean`, with the fixed `mglhost-priority`
+host and `MINIGL_PRESENT=BLIT` set before host startup:
+
+```text
+precalc -frames 150 -depth 32 -buffers 2 -nosync -envmap chrome.ppm
+```
+
+Only `MGLPPC_HOSTPRI` changed, alternating 0 and -1. The shell stack remained
+1,000,000 bytes; all timing/profiling options remained off. Both environment
+overrides were removed after each run.
+
+| Boot / Log Prefix | Priority | Ticks (50 Hz) | Seconds | Reported FPS |
+| --- | ---: | ---: | ---: | ---: |
+| 1 / s0a | 0 | 386 | 7.72 | 19.430 |
+| 2 / s1a | -1 | 174 | 3.48 | 43.103 |
+| 3 / s0b | 0 | 405 | 8.10 | 18.518 |
+| 4 / s1b | -1 | 178 | 3.56 | 42.134 |
+| 5 / s0c | 0 | 390 | 7.80 | 19.230 |
+| 6 / s1c | -1 | 180 | 3.60 | 41.666 |
+
+Median reported FPS: **19.230 at 0**, **42.134 at -1**. Using the raw median
+tick counts (390 versus 178), the improvement is **2.191x / +119.1%**.
+The console formatter truncates FPS to three decimal places.
+
+All six runs: 150 frames, `error=0`, host `executes=508 presents=150`, clean
+client/DLL/host exit, and passing post-run bootstrap. Total: 900 benchmark
+frames and 3,048 execute batches. No freeze, recovery, or forced client exit
+occurred. The Amiga was left idle and healthy with PPC already initialized
+for the final boot and no test environment overrides remaining.
+
+Individual `<prefix>-client.log` and `<prefix>-host.log` files are preserved
+in `DH2:gearsclean`. Combined `reboot-runs.log` (708 bytes) and
+`reboot-hosts.log` (2,727 bytes) were CRC-verified on download into
+`/tmp/opencode/gears-hygiene/`.
+
+Host/DLL/precalc CRCs were checked before testing: `98DE2066` / `38FEBCCA` /
+`1F3401F7`. The installed native library and driver pair were re-checked after
+the series and remain `DC041695` / `07A7193D` / `18A453D6` respectively.
+This confirms the scheduling gain survives separate software reboots. Physical
+power-cycle and application input/audio/IO validation remain unperformed; the
+default priority and native presenter have not been changed.
+
 ## Interpretation And Next Gate
 
 Lowering only the host priority to -1 approximately doubled BLIT throughput.
