@@ -479,6 +479,7 @@ static const float i1 = 1.2f, i2 = 3.1f, i3 = 2.3f, i4 = 1.1f;
  * the run rather than a single end-of-run number. */
 #define FPS_SAMPLE_FRAMES 30
 static struct DateStamp g_fps_ds;
+static struct DateStamp g_run_ds;
 static int g_fps_frame_count = 0;
 static char g_fps_text[40] = "fps: --";
 
@@ -662,6 +663,7 @@ int main(int argc, char *argv[])
 {
 	GLint width = MILESTONE_WIDTH, height = MILESTONE_HEIGHT;
 	int depth = 0;
+	int noSync = 0;
 	int i;
 	char *name = 0;
 	GLuint texname;
@@ -703,6 +705,10 @@ if (!GfxBase)
 			i++;
 			depth = atoi(argv[i]);
 		}
+		if (0 == local_stricmp(argv[i], "-nosync"))
+		{
+			noSync = 1;
+		}
 		if (0 == local_stricmp(argv[i], "-frames") && i + 1 < argc)
 		{
 			i++;
@@ -740,7 +746,16 @@ if (!GfxBase)
 
 
 
-	mglEnableSync(GL_FALSE);
+	/* Sync ON for benchmark validity: with sync off the R200 fullscreen
+	 * present skips screen-buffer switches when one is still outstanding
+	 * ("latest completed frame wins"), so the frame counter races ahead
+	 * of what the monitor actually scans out. With sync on every frame
+	 * is vblank-locked and the counted frames equal visible frames.
+	 * -nosync restores the old tear/skip behaviour. */
+	if (!noSync)
+		mglEnableSync(GL_TRUE);
+	else
+		mglEnableSync(GL_FALSE);
 
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -797,21 +812,25 @@ if (!GfxBase)
 
 			mglIdleFunc(oneFrame);
 			mglKeyFunc(keys);
-			DateStamp(&g_fps_ds);
+			DateStamp(&g_run_ds);
 			MarkLog("mainloop enter\n");
 			mglMainLoop();
 			MarkLog("mainloop returned\n");
 			/* Console-independent run summary: frames and true
-			 * wall time, independent of MGLPPC_VERBOSE. */
+			 * wall time, independent of MGLPPC_VERBOSE. Measured
+			 * against g_run_ds (set once before mglMainLoop) --
+			 * NOT g_fps_ds, which UpdateFPSOverlay() rewrites
+			 * every FPS_SAMPLE_FRAMES frames and which used to
+			 * reduce this summary to the last sample's tail. */
 			{
 				struct DateStamp run_ds;
 				LONG run_ticks;
 				DateStamp(&run_ds);
-				run_ticks = (run_ds.ds_Days - g_fps_ds.ds_Days)
+				run_ticks = (run_ds.ds_Days - g_run_ds.ds_Days)
 					    * 1440L * 3000L
-					  + (run_ds.ds_Minute - g_fps_ds.ds_Minute)
+					  + (run_ds.ds_Minute - g_run_ds.ds_Minute)
 					    * 3000L
-					  + (run_ds.ds_Tick - g_fps_ds.ds_Tick);
+					  + (run_ds.ds_Tick - g_run_ds.ds_Tick);
 				if (run_ticks > 0)
 				{
 					LONG fps_x10 = ((LONG)framesDone * 500L)
