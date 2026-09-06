@@ -11,6 +11,7 @@
 #include <graphics/rastport.h>
 #include <intuition/intuition.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Diagnostic clocks/stage reports are separate from protocol probe timing. */
@@ -2703,11 +2704,38 @@ static BOOL PollMailbox(MGLPPCHostState *state)
     return TRUE;
 }
 
+/* Startup only. A busy host must never turn an ASCII digit/sign into a
+ * priority above input.device. Unset/empty preserves the inherited priority. */
+static BOOL ReadHostPriority(LONG *priority, BOOL *specified)
+{
+    char value[16], *end;
+    LONG length;
+    long parsed;
+
+    *specified = FALSE;
+    length = GetVar((CONST_STRPTR)"MGLPPC_HOSTPRI", (UBYTE *)value,
+                    sizeof(value), GVF_GLOBAL_ONLY);
+    if (length <= 0)
+        return TRUE;
+    /* GetVar may report only the copied prefix when its buffer is full. */
+    if ((ULONG)length >= sizeof(value) - 1UL)
+        return FALSE;
+    value[length] = '\0';
+    parsed = strtol(value, &end, 10);
+    if (end == value || *end || parsed < -20 || parsed > 2)
+        return FALSE;
+    *priority = (LONG)parsed;
+    *specified = TRUE;
+    return TRUE;
+}
+
 int main(int argc, char **argv)
 {
     struct MsgPort *hostPort;
     struct MsgPort *existingPort;
     MGLPPCHostState state;
+    LONG hostPriority = 0;
+    BOOL prioritySpecified;
 
     memset(&state, 0, sizeof(state));
     state.running = 1;
@@ -2729,6 +2757,10 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!ReadHostPriority(&hostPriority, &prioritySpecified)) {
+        printf("MiniGLPPC host: MGLPPC_HOSTPRI must be an integer from -20 to 2\n");
+        return 20;
+    }
     if (argc > 1 && strcmp(argv[1], "--probe-only") == 0) {
         printf("MiniGLPPC host: probe-only mode\n");
     } else if (!MiniGLOpen()) {
@@ -2787,16 +2819,10 @@ int main(int argc, char **argv)
     HostClockHz = TimerClockRate;
     HostWallStart = HostClock();
 #endif
-    /* Hang discriminator: at priority 0 the host round-robins with every
-     * other 68k task; dropping it below everything else shows whether a
-     * hang is 68k CPU starvation or a wedge inside the driver/PCI. */
-    {
-        UBYTE priBuf[8];
-        priBuf[0] = 0;
-        GetVar((CONST_STRPTR)"MGLPPC_HOSTPRI", priBuf, (LONG)sizeof(priBuf),
-               GVF_GLOBAL_ONLY);
-        if (priBuf[0])
-            SetTaskPri(FindTask(NULL), (LONG)priBuf[0]);
+    if (prioritySpecified) {
+        LONG previous = SetTaskPri(FindTask(NULL), hostPriority);
+        printf("MiniGLPPC host: priority=%ld previous=%ld\n",
+               (long)hostPriority, (long)previous);
     }
     printf("MiniGLPPC host: step=service_enter\n");
     fflush(stdout);
