@@ -1651,8 +1651,14 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
         }
 #endif
         while ((control->head - control->completed) >= control->slotCount) {
-            if (!(spin & 255UL))
+            if (!(spin & 255UL)) {
                 MGLPPCInvalidateLine32((APTR)&control->head);
+                /* A cached full-ring snapshot must not force a tick sleep
+                 * after the host has already released space. */
+                if (!control->error &&
+                    (control->head - control->completed) < control->slotCount)
+                    break;
+            }
             /* Yield so the 68k host can drain the ring; a pure spin
              * monopolizes the scheduler on WarpOS. */
             if (!(spin & 8191UL))
@@ -1877,8 +1883,12 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
             spin = 0;
             while ((control->head - control->completed) >=
                    control->slotCount) {
-                if (!(spin & 255UL))
+                if (!(spin & 255UL)) {
                     MGLPPCInvalidateLine32((APTR)&control->head);
+                    if (!control->error &&
+                        (control->head - control->completed) < control->slotCount)
+                        break;
+                }
                 if (!(spin & 8191UL))
                     Delay(1);
                 if (control->error || ++spin > 5000000UL) {
@@ -1940,8 +1950,11 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
             R200PPCTimelineMark(MGLPPC_TL_DRAIN_ENTER, control->head, 0);
 #endif
             while (control->completed != control->head) {
-                if (!(spin & 255UL))
+                if (!(spin & 255UL)) {
                     MGLPPCInvalidateLine32((APTR)&control->completed);
+                    if (!control->error && control->completed == control->head)
+                        break;
+                }
                 if (!(spin & 8191UL))
                     Delay(1);
                 if (control->error || ++spin > 5000000UL) {
@@ -2012,6 +2025,9 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
     (void)vertexBytes;
     if (!context || !context->segmentPoolCount || !control)
         return FALSE;
+    /* Retirement is host-owned. Refresh before selecting a segment, rather
+     * than sleeping on an old snapshot when the whole pool is already free. */
+    MGLPPCInvalidateLine32((APTR)&control->retired);
     /* Prefer the next segment in rotation order, but if it is not retired
      * yet, take ANY pool segment whose GPU reads have retired: with a pool
      * of four and one outstanding, another segment is almost always free,
@@ -2042,10 +2058,14 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
         /* This spin used to be unyielding with dcbf+sync every iteration:
          * 5M bus transactions that starved the whole box right around the
          * segment wrap (frames 2-3), then failed silently. */
+        if (!(spin & 255UL)) {
+            MGLPPCInvalidateLine32((APTR)&control->retired);
+            if (!control->error &&
+                control->retired >= FrontendPlatform.segmentLastEntry[next])
+                break;
+        }
         if (!(spin & 8191UL))
             Delay(1);
-        if (!(spin & 255UL))
-            MGLPPCInvalidateLine32((APTR)&control->retired);
 #if MGLPPC_PROFILE || MGLPPC_CLIENT_TRACE
         if (!(spin & 500000UL)) {
             R200PPCConsolePrintf("RING rotate spin retired=%lu need=%lu spin=%lu\n",

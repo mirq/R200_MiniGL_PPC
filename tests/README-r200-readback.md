@@ -48,6 +48,8 @@ python3 tests/test_r200_context_lifecycle.py
 python3 tests/test_r200_context_lifecycle.py --regress-crc
 python3 tests/test_r200_context_lifecycle.py --regress-cache
 python3 tests/test_r200_context_lifecycle.py --regress-register
+python3 tests/test_r200_context_lifecycle.py --regress-waits
+python3 tests/test_r200_host_pacing.py
 ```
 
 `r200_texture_layout_test.c` contains the former protocol-header test program:
@@ -86,6 +88,11 @@ stale writeback corrupts the next payload. `--regress-register` removes the
 registration control-block clean and checks that an unpublished registration
 is rejected by the test. Normal execution checks the PPC invalidates all new
 control lines before use. These models do not prove physical cache visibility.
+Wait tests additionally verify that fresh completion/retirement avoids an
+unnecessary `Delay(1)`, while genuinely pending work still yields.
+`--regress-waits` disables the readiness rechecks and reproduces the extra
+tick sleep. The optional host-pacing diagnostic has separate tests for bins,
+clock wrap, top-gap ordering and its disabled/no-timer-access paths.
 
 `--regress-crc` removes only the frontend CreateContext CRC rearm in the generated
 test translation unit. This reproduces the original second-context failure:

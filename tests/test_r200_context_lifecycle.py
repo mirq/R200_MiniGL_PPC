@@ -4,6 +4,7 @@ python3 tests/test_r200_context_lifecycle.py
 python3 tests/test_r200_context_lifecycle.py --regress-crc
 python3 tests/test_r200_context_lifecycle.py --regress-cache
 python3 tests/test_r200_context_lifecycle.py --regress-register
+python3 tests/test_r200_context_lifecycle.py --regress-waits
 
 GPU services and allocation are mocked. RingPoll retains its actual inline path
 and CRC/error/completion logic; unused streamed-commit branches are excluded.
@@ -78,6 +79,7 @@ typedef int BOOL;
 #define MGL_R200_PRIVATE_SEGMENT_FREE_V1_QUERY 2
 #define MGL_R200_PRIVATE_BRIDGE_COMPACT_TCL 1
 #define R200PPCTimelineMark(...) ((void)0)
+#define HOST_PACING_PRESENT() ((void)0)
 #define R200PPCTraceOpen(...) ((void)0)
 #define R200PPCTraceClose(...) ((void)0)
 #define R200PPCTraceStr(...) ((void)0)
@@ -137,6 +139,8 @@ static ULONG hostCache[8][16], expectedClearColor;
 static BOOL hostDirty[8];
 static BOOL controlPublished;
 static ULONG controlInvalidated;
+static ULONG delayCalls, refreshRetired, retireOnDelay;
+static BOOL holdHostUntilDelay;
 static ULONG RingPoll(MGLPPCHostState *state);
 static BOOL PollMailbox(MGLPPCHostState *state);
 static void HandleMessage(MGLPPCMessage *message, MGLPPCHostState *state);
@@ -158,9 +162,18 @@ static void CacheClearE(APTR p, ULONG n, int f) {
     }
 }
 static void poll(void) {
-    if (!polling) { polling = TRUE; RingPoll(&host); PollMailbox(&host); polling = FALSE; }
+    if (!polling && !holdHostUntilDelay) {
+        polling = TRUE; RingPoll(&host); PollMailbox(&host); polling = FALSE;
+    }
 }
-static void Delay(LONG ticks) { (void)ticks; poll(); }
+static void Delay(LONG ticks) {
+    assert(ticks == 1); ++delayCalls; holdHostUntilDelay = FALSE;
+    if (retireOnDelay) {
+        host.ringControl->retired = retireOnDelay;
+        retireOnDelay = 0;
+    }
+    poll();
+}
 static LONG GetVar(CONST_STRPTR name, STRPTR buffer, LONG size, LONG flags) {
     (void)name; (void)buffer; (void)size; (void)flags; return -1;
 }
@@ -171,6 +184,10 @@ static void MGLPPCInvalidateLine32(APTR p) {
     uintptr_t address = (uintptr_t)p, base = (uintptr_t)sharedRing;
     if (address >= base && address < base + sizeof(MGLPPCRingControlV1))
         controlInvalidated |= 1UL << ((address - base) / 32);
+    if (refreshRetired && p == &((MGLPPCRingControlV1 *)sharedRing)->retired) {
+        ((MGLPPCRingControlV1 *)sharedRing)->retired = refreshRetired;
+        refreshRetired = 0;
+    }
     poll();
 }
 static void MGLPPCFlushDataRange(APTR p, ULONG n) { (void)p; (void)n; }
@@ -318,11 +335,14 @@ for signature in ("static BOOL PlatformMailboxReady(", "static BOOL PlatformMail
                   "static void CopyRecordToRingSlot(", "void R200PPCPlatformResetClientDefaults(",
                   "BOOL R200PPCPlatformOpen(", "BOOL R200PPCPlatformPublishSlot(",
                   "BOOL R200PPCPlatformWaitSlot(", "BOOL R200PPCPlatformBarrier(",
+                  "BOOL R200PPCPlatformRotateSegment(",
                   "void *R200PPCDispatchCreateContext(", "void R200PPCDispatchDeleteContext(",
                   "void R200PPCPlatformClose(", "static BOOL FrontendTextureBarrier("):
     body = function(F, signature)
     if "--regress-crc" in sys.argv and signature == "void *R200PPCDispatchCreateContext(":
         body = body.replace("FrontendPlatform.crcArmed = TRUE;", "")
+    if "--regress-waits" in sys.argv:
+        body = body.replace("if (!control->error &&", "if (0 && !control->error &&")
     code += body
 code += r'''
 static BOOL SubmitAndWait(struct MiniGLR200Context *c) {
@@ -343,6 +363,52 @@ static void texture(ULONG cmd) {
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = 1; /* same texture name in both contexts */
     assert(PlatformCall(cmd, FrontendPlatform.contextId));
+}
+static void testWaitRefresh(void) {
+    ULONG before, needed;
+    clearPrefix();
+    /* No host polling occurs on publication until the ring appears full.
+     * The cache refresh services the host: readiness must skip Delay(1). */
+    for (ULONG i = 0; i < 8; ++i) assert(R200PPCPlatformPublishSlot(&proofContext, 0));
+    before = delayCalls;
+    assert(R200PPCPlatformPublishSlot(&proofContext, 0));
+    assert(delayCalls == before);
+    poll();
+    for (ULONG i = 0; i < 8; ++i) assert(R200PPCPlatformPublishSlot(&proofContext, 0));
+    before = delayCalls;
+    assert(R200PPCPlatformBarrier(&proofContext, TRUE));
+    assert(delayCalls == before);
+    poll();
+    assert(R200PPCPlatformPublishSlot(&proofContext, 0));
+    before = delayCalls;
+    assert(R200PPCPlatformBarrier(&proofContext, FALSE));
+    assert(delayCalls == before);
+
+    /* If fresh state really is still busy, a yield must remain available. */
+    for (ULONG i = 0; i < 8; ++i) assert(R200PPCPlatformPublishSlot(&proofContext, 0));
+    holdHostUntilDelay = TRUE;
+    before = delayCalls;
+    assert(R200PPCPlatformPublishSlot(&proofContext, 0));
+    assert(delayCalls == before + 1 && !holdHostUntilDelay);
+    poll();
+
+    needed = host.ringCompleted;
+    host.ringControl->retired = 0;
+    for (ULONG i = 0; i < 4; ++i) FrontendPlatform.segmentLastEntry[i] = needed;
+    for (ULONG i = 0; i < 2; ++i) proofContext.submitSlots[i].segmentCursor = 64;
+    refreshRetired = needed;
+    before = delayCalls;
+    assert(R200PPCPlatformRotateSegment(&proofContext, 32));
+    assert(delayCalls == before && !refreshRetired);
+    assert(proofContext.segmentPoolNext == 1);
+    for (ULONG i = 0; i < 2; ++i) assert(!proofContext.submitSlots[i].segmentCursor);
+    for (ULONG i = 0; i < 4; ++i) FrontendPlatform.segmentLastEntry[i] = needed + 1;
+    retireOnDelay = needed + 1;
+    before = delayCalls;
+    assert(R200PPCPlatformRotateSegment(&proofContext, 32));
+    assert(delayCalls == before + 1 && !retireOnDelay);
+    assert(proofContext.segmentPoolNext == 2);
+    proofContext.submitSlots[0].recordCount = 0;
 }
 int main(int argc, char **argv) {
     (void)argv;
@@ -420,6 +486,7 @@ int main(int argc, char **argv) {
                 }
                 for (ULONG i = 0; i < 8; ++i) assert(!hostDirty[i]);
                 assert(R200PPCPlatformBarrier(&proofContext, TRUE)); poll();
+                testWaitRefresh();
             }
             printf("PASS: %s context%u id=%u epoch=%u first/repeat submit + mailbox/Exec updates\n",
                    ringMode ? "ring" : "inline", context + 1, id, epoch);
@@ -446,7 +513,11 @@ with tempfile.TemporaryDirectory(prefix="r200-lifecycle-", dir="/tmp/opencode") 
                     "-Wno-unused-variable", "-Wno-pointer-to-int-cast", "-Wno-int-to-pointer-cast",
                     "-fno-pie", "-no-pie", "-fsanitize=address,undefined",
                     str(source), "-o", str(binary)], check=True)
-    if "--regress-register" in sys.argv:
+    if "--regress-waits" in sys.argv:
+        completed = subprocess.run([str(binary)], capture_output=True, text=True)
+        assert completed.returncode != 0 and "delayCalls == before" in completed.stderr
+        print("REPRO: not rechecking fresh completion forces an unnecessary tick sleep")
+    elif "--regress-register" in sys.argv:
         completed = subprocess.run([str(binary)], capture_output=True, text=True)
         assert completed.returncode != 0 and "controlPublished" in completed.stderr
         print("REPRO: registration must publish the control block before replying")

@@ -19,6 +19,10 @@
 #define MGLPPC_PROFILE 0
 #endif
 
+#ifndef MGLPPC_PACING
+#define MGLPPC_PACING 0
+#endif
+
 /* DH2:wosbuild/mglppc_host.log trace logger. Default off: each emitted line
  * costs a 68k Open/Seek/Write/Close cycle. Define 1 to enable file traces;
  * MGLPPC_PROFILE also enables the 2-second poll/stage console reports. */
@@ -151,6 +155,80 @@ static ULONG ProbeMicros(ULONG start, ULONG end)
 
     return (ULONG)(ticks * 1000000ULL / TimerClockRate);
 }
+
+#if MGLPPC_PACING
+/* Full host session, not per context: recreation gaps count between contexts.
+ * Frame numbers are 1-based successful presents; a gap ends at its frame. */
+static const ULONG HostPacingLimitsMs[7] = { 1, 5, 10, 20, 33, 50, 100 };
+static ULONG HostPacingLimits[7], HostPacingBins[8];
+static ULONG HostPacingPresents, HostPacingPrevious;
+static struct { ULONG frame, ticks; } HostPacingGaps[16];
+
+static void HostPacingInit(void)
+{
+    ULONG i;
+
+    for (i = 0; i < 7; ++i)
+        HostPacingLimits[i] = (ULONG)(((unsigned long long)TimerClockRate *
+                                     HostPacingLimitsMs[i] + 999ULL) / 1000ULL);
+}
+
+static void HostPacingPresent(void)
+{
+    ULONG now = ProbeTicks(), ticks, i;
+
+    if (++HostPacingPresents == 1) {
+        HostPacingPrevious = now;
+        return;
+    }
+    ticks = (ULONG)(now - HostPacingPrevious);
+    HostPacingPrevious = now;
+    for (i = 0; i < 7 && ticks >= HostPacingLimits[i]; ++i) { }
+    ++HostPacingBins[i];
+    if (HostPacingGaps[15].frame && ticks <= HostPacingGaps[15].ticks)
+        return;
+    /* Descending insertion, retaining earlier frames on equal gaps. */
+    for (i = 15; i && (!HostPacingGaps[i - 1].frame ||
+                      ticks > HostPacingGaps[i - 1].ticks); --i)
+        HostPacingGaps[i] = HostPacingGaps[i - 1];
+    HostPacingGaps[i].frame = HostPacingPresents;
+    HostPacingGaps[i].ticks = ticks;
+}
+
+static void HostPacingReport(void)
+{
+    ULONG i;
+
+    /* TimerClockRate is saved at open; ProbeMicros never reads TimerBase. */
+    printf("HOST_PACING scope=host_session presents=%lu intervals=%lu "
+           "eclock_hz=%lu\n", (unsigned long)HostPacingPresents,
+           (unsigned long)(HostPacingPresents ? HostPacingPresents - 1UL : 0UL),
+           (unsigned long)TimerClockRate);
+    printf("HOST_PACING histogram=noncumulative "
+           "bounds=lower_inclusive_upper_exclusive "
+           "limits_ms=1,5,10,20,33,50,100 rounding=ceil boundaries_ticks=0");
+    for (i = 0; i < 7; ++i)
+        printf(",%lu", (unsigned long)HostPacingLimits[i]);
+    printf(",inf counts=");
+    for (i = 0; i < 8; ++i)
+        printf("%s%lu", i ? "," : "", (unsigned long)HostPacingBins[i]);
+    printf("\n");
+    for (i = 0; i < 16 && HostPacingGaps[i].frame; ++i)
+        printf("HOST_GAP rank=%lu frame=%lu ticks=%lu us=%lu\n",
+               (unsigned long)(i + 1UL), (unsigned long)HostPacingGaps[i].frame,
+               (unsigned long)HostPacingGaps[i].ticks,
+               (unsigned long)ProbeMicros(0, HostPacingGaps[i].ticks));
+    fflush(stdout);
+}
+
+#define HOST_PACING_INIT() HostPacingInit()
+#define HOST_PACING_PRESENT() HostPacingPresent()
+#define HOST_PACING_REPORT() HostPacingReport()
+#else
+#define HOST_PACING_INIT() do { } while (0)
+#define HOST_PACING_PRESENT() do { } while (0)
+#define HOST_PACING_REPORT() do { } while (0)
+#endif
 
 /* Table generated from the same reflected polynomial the bit loop used, so
  * every emitted value is unchanged and the wire contract is untouched. The
@@ -1240,6 +1318,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                     break;
                 }
             }
+            HOST_PACING_PRESENT();
             control->presentSeq = state->ringCompleted;
         }
         control->completed = state->ringCompleted;
@@ -1358,6 +1437,7 @@ static BOOL ExecuteSemanticSlot(MGLPPCMessage *message,
             message->status = MGLPPC_STATUS_GL_ERROR;
             return FALSE;
         }
+        HOST_PACING_PRESENT();
     }
     HOST_STAGE(HostTotalTicks, totalStart);
     HostExecuteCount++;
@@ -2815,6 +2895,7 @@ int main(int argc, char **argv)
     printf("MiniGLPPC host: step=port_added\n");
     fflush(stdout);
 
+    HOST_PACING_INIT();
 #if MGLPPC_PROFILE
     HostClockHz = TimerClockRate;
     HostWallStart = HostClock();
@@ -3045,6 +3126,7 @@ int main(int argc, char **argv)
                (unsigned long)HostExecuteCount,
                (unsigned long)HostPresentCount);
 #endif
+    HOST_PACING_REPORT();
     printf("MiniGLPPC host: stopped\n");
     return 0;
 }
