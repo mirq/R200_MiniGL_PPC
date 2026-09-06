@@ -14,7 +14,7 @@ updates until the visibility and mapping gates below pass.
 - PPC frontend: this tree's `backend_r200/library/`, built through
   `Makefile.dll.r200.gcc`.
 - Native backend: `R200_NATIVE_ROOT`, defaulting to
-  `/home/mirek/Downloads/PIStorm3D_V19_Classic/dev/MiniGL_Library_Source_Code`.
+  `classic_68k/dev/MiniGL_Library_Source_Code`.
   The host links that tree's dispatch import archive and opens its native
   `minigl.library`. This is NOT the older `/home/mirek/minigl_ppc` backend.
 - Driver: `/home/mirek/p96-driver`. Existing worktree modifications predate

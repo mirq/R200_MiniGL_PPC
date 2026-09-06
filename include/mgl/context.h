@@ -411,7 +411,7 @@ struct GLcontext_t
 	V3DDevice               device;
 	V3DContext               backend;
 
-	/* PiStorm3D allocator-consistency cleanup (2026-08-29): this struct's
+	/* Allocator-consistency cleanup (2026-08-29): this struct's
 	 * own allocation record (MGLCreateContext uses v3d_mem_alloc/
 	 * MEMF_CLEAR instead of malloc+memset now, matching every other
 	 * allocation in this driver). Held directly on the struct so

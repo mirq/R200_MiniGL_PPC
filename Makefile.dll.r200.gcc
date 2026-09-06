@@ -8,7 +8,7 @@ WARPELF ?= bin/minigl_ppc_r200.warpelf
 PYTHON  ?= python3
 M68K_CC ?= /opt/amiga/bin/m68k-amigaos-gcc
 
-R200_NATIVE_ROOT ?= $(HOME)/Downloads/PIStorm3D_V19_Classic/dev/MiniGL_Library_Source_Code
+R200_NATIVE_ROOT ?= $(CURDIR)/classic_68k/dev/MiniGL_Library_Source_Code
 R200_NATIVE_IMPORT := $(R200_NATIVE_ROOT)/lib/libminigl_dispatch.a
 R200_NATIVE_LIBRARY := $(R200_NATIVE_ROOT)/bin/dispatch-r200-gcc/minigl.library
 R200_HOST ?= bin/minigl_ppc_host

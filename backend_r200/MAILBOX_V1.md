@@ -6,7 +6,7 @@ glTexImage calls took 5.9 seconds and the host spent only 272 ms handling
 137 commands. No new hardware measurements or deployment accompany this change.
 
 The active host is `backend_r200/minigl_ppc_host.c`. Its native library/import
-comes from `~/Downloads/PIStorm3D_V19_Classic/dev/MiniGL_Library_Source_Code`,
+comes from `classic_68k/dev/MiniGL_Library_Source_Code`,
 including that tree's `library/` implementation, NOT its stale host source.
 The native implementation is unchanged.
 
