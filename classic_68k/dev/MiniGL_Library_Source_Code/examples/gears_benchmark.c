@@ -83,6 +83,8 @@ static GLboolean bEnvMap = GL_TRUE;
 static GLboolean running = GL_TRUE;
 static GLboolean benchmarkActive = GL_FALSE;
 static GLboolean g_windowed = GL_FALSE;
+static GLboolean g_show_title = GL_TRUE;
+static struct Window *g_render_window = NULL;
 
 #ifndef MINIGLPPC_SEMANTIC
 struct Device *TimerBase = NULL;
@@ -945,7 +947,9 @@ static void DrawPrecalculatedGear(const GearCommandBuffer *gearBuffer)
 #define FPS_SAMPLE_FRAMES 20
 static struct DateStamp g_fps_ds;
 static int g_fps_frame_count = 0;
+static ULONG g_total_frame_count = 0;
 static char g_fps_text[40] = "fps: --";
+static char g_title_text[80] = "MiniGL Gears - frame 0 - fps: --";
 
 static void UpdateFPSOverlay(void)
 {
@@ -953,6 +957,7 @@ static void UpdateFPSOverlay(void)
 	LONG elapsed_ticks;
 
 	g_fps_frame_count++;
+	g_total_frame_count++;
 	if (g_fps_frame_count < FPS_SAMPLE_FRAMES)
 		return;
 
@@ -967,6 +972,12 @@ static void UpdateFPSOverlay(void)
 		 * one decimal place (fps*10 first, then split). */
 		LONG fps_x10 = ((LONG)FPS_SAMPLE_FRAMES * 500L) / elapsed_ticks;
 		sprintf(g_fps_text, "fps: %ld.%ld", fps_x10 / 10L, fps_x10 % 10L);
+	}
+	if (g_windowed && g_show_title && g_render_window)
+	{
+		sprintf(g_title_text, "MiniGL Gears - frame %lu - %s",
+		        g_total_frame_count, g_fps_text);
+		SetWindowTitles(g_render_window, g_title_text, (STRPTR)-1);
 	}
 
 	g_fps_ds = now_ds;
@@ -1124,11 +1135,13 @@ static void oneFrame(void)
 	a4 += i4; if (a4 > 360.0f) a4 -= 360.0f;
 	AddProfileTicks(&benchmarkProfile.sceneTicks, start);
 
-	if (bShowFPS && !benchmarkActive)
+	if ((bShowFPS && !benchmarkActive && !g_windowed) ||
+	    (g_windowed && g_show_title))
 	{
 		start = ProfileStart();
 		UpdateFPSOverlay();
-		DrawFPSOverlay();
+		if (bShowFPS && !benchmarkActive && !g_windowed)
+			DrawFPSOverlay();
 		AddProfileTicks(&benchmarkProfile.overlayTicks, start);
 	}
 
@@ -1346,12 +1359,15 @@ if (!GfxBase || !IntuitionBase)
 		{
 			windowed = GL_TRUE;
 		}
+		if (0 == local_stricmp(argv[i], "-notitle"))
+			g_show_title = GL_FALSE;
 		if (0 == local_stricmp(argv[i], "-buffers") && i + 1 < argc)
 		{
 			i++;
 			mglBuffersOverride = atoi(argv[i]);
 		}
 	}
+	bShowFPS = windowed ? GL_FALSE : GL_TRUE;
 
 	if (MiniGLOpen() == GL_FALSE)
 	{
@@ -1388,6 +1404,7 @@ if (!GfxBase || !IntuitionBase)
 	}
 	{
 		struct Window *window = (struct Window *)mglGetWindowHandle();
+		g_render_window = window;
 		if (window)
 			ModifyIDCMP(window, g_windowed
 			    ? IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY
@@ -1446,6 +1463,7 @@ if (!GfxBase || !IntuitionBase)
 
 			DateStamp(&g_fps_ds);
 			g_fps_frame_count = 0;
+			g_total_frame_count = 0;
 
 			D(("gears_benchmark: setup done, starting benchmark (ESC to quit)\n"));
 
@@ -1612,7 +1630,8 @@ if (!GfxBase || !IntuitionBase)
 			       benchmarkVariant, windowed ? "window" : "fullscreen", (LONG)width,
 			       (LONG)height, (LONG)depth, (LONG)benchmarkMode,
 			       (LONG)show, (LONG)bEnvMap,
-			       (LONG)bShowFPS, (LONG)warmup, measuredFrames,
+			       (LONG)(bShowFPS && !benchmarkActive && !g_windowed),
+			       (LONG)warmup, measuredFrames,
 			       elapsedTicks, clockRate, profileClockRate, fpsX1000, (LONG)perf.frames,
 			       (LONG)perf.primitives, (LONG)perf.inputVertices,
 			       (LONG)perf.submittedVertices, (LONG)perf.drawRecords,
