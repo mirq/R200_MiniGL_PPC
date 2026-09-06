@@ -12,6 +12,8 @@ R200_NATIVE_ROOT ?= $(CURDIR)/classic_68k/dev/MiniGL_Library_Source_Code
 R200_NATIVE_IMPORT := $(R200_NATIVE_ROOT)/lib/libminigl_dispatch.a
 R200_NATIVE_LIBRARY := $(R200_NATIVE_ROOT)/bin/dispatch-r200-gcc/minigl.library
 R200_HOST ?= bin/minigl_ppc_host
+# Protocol deadlines still use the calibrated timebase; profiling is optional.
+MGLPPC_PROFILE ?= 0
 R200_PACKAGE_DIR ?= bin/r200-package
 
 R200_DIR       := backend_r200
@@ -31,7 +33,8 @@ R200_CFLAGS = $(COMMON_CFLAGS) -I$(R200_INCLUDE) -Iinclude \
               -I$(R200_LIBRARY) -I$(R200_THIRDPARTY) \
                -DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
                -DR200_FRONTEND_LIBRARY=1 -DR200_PERF_TIMING=1 \
-               -DR200_PERF_AUTOREPORT=1 \
+               -DR200_PERF_AUTOREPORT=$(MGLPPC_PROFILE) \
+               -DMGLPPC_PROFILE=$(MGLPPC_PROFILE) \
                -DR200_STREAM_COMMITS=1 -DR200_ASYNC_ROTATION=1
 
 R200_SOURCES = $(R200_LIBRARY)/minigl_r200_warpos_compile_probe.c \
@@ -79,7 +82,7 @@ package: stack $(OUT) lib/libminigl.a backend_r200/README-WarpOS-R200.txt
 $(OBJDIR) $(R200_GENERATED) bin:
 	mkdir -p $@
 
-$(OBJDIR)/r200_frontend.o: $(R200_SOURCES) Makefile.wos.gcc.common | $(OBJDIR)
+$(OBJDIR)/r200_frontend.o: $(R200_SOURCES) Makefile.dll.r200.gcc Makefile.wos.gcc.common | $(OBJDIR)
 	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
 
 $(R200_SYMBOLS): $(OBJDIR)/r200_frontend.o | $(R200_GENERATED)
@@ -122,6 +125,7 @@ $(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
               $(R200_NATIVE_IMPORT) Makefile.dll.r200.gcc | bin
 	$(M68K_CC) -std=gnu99 -O2 -mcpu=68020 -noixemul -Wall \
 		-Werror=incompatible-pointer-types \
+		-DMGLPPC_PROFILE=$(MGLPPC_PROFILE) \
 		-I$(R200_INCLUDE) -I$(R200_NATIVE_ROOT)/include \
 		-I$(R200_NATIVE_ROOT)/third_party/warp3d/include \
 		-I$(R200_THIRDPARTY) $< $(R200_NATIVE_IMPORT) -o $@

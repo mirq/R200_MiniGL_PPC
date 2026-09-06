@@ -13,9 +13,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/* DH2:wosbuild/mglppc_host.log trace logger + 2-second poll/stage console
- * reports. Default off: each emitted line costs a 68k Open/Seek/Write/Close
- * cycle and console.device writes dominate frame time. Define 1 to enable. */
+/* Diagnostic clocks/stage reports are separate from protocol probe timing. */
+#ifndef MGLPPC_PROFILE
+#define MGLPPC_PROFILE 0
+#endif
+
+/* DH2:wosbuild/mglppc_host.log trace logger. Default off: each emitted line
+ * costs a 68k Open/Seek/Write/Close cycle. Define 1 to enable file traces;
+ * MGLPPC_PROFILE also enables the 2-second poll/stage console reports. */
 #ifndef MGLPPC_HOST_TRACE
 #define MGLPPC_HOST_TRACE 0
 #endif
@@ -104,9 +109,6 @@ struct Device *TimerBase;
 static struct timerequest TimerRequest;
 static struct MsgPort TimerPort;
 static ULONG TimerClockRate;
-static struct MsgPort SleepPort;
-static struct timerequest SleepRequest;
-static struct Device *SleepTimerBase;
 
 static BOOL OpenTimerClock(void)
 {
@@ -132,46 +134,6 @@ static BOOL OpenTimerClock(void)
     CloseDevice((struct IORequest *)&TimerRequest);
     TimerBase = NULL;
     return FALSE;
-}
-
-static BOOL OpenSleepTimer(void)
-{
-    memset(&SleepPort, 0, sizeof(SleepPort));
-    memset(&SleepRequest, 0, sizeof(SleepRequest));
-    SleepPort.mp_Node.ln_Type = NT_MSGPORT;
-    SleepPort.mp_Flags = PA_SIGNAL;
-    SleepPort.mp_SigTask = FindTask(NULL);
-    SleepPort.mp_SigBit = AllocSignal(-1);
-    if (SleepPort.mp_SigBit == -1)
-        return FALSE;
-    SleepPort.mp_MsgList.lh_Head =
-        (struct Node *)&SleepPort.mp_MsgList.lh_Tail;
-    SleepPort.mp_MsgList.lh_Tail = NULL;
-    SleepPort.mp_MsgList.lh_TailPred =
-        (struct Node *)&SleepPort.mp_MsgList.lh_Head;
-    SleepRequest.tr_node.io_Message.mn_Node.ln_Type = NT_MESSAGE;
-    SleepRequest.tr_node.io_Message.mn_ReplyPort = &SleepPort;
-    SleepRequest.tr_node.io_Message.mn_Length = sizeof(SleepRequest);
-    if (OpenDevice((CONST_STRPTR)"timer.device", UNIT_MICROHZ,
-                   (struct IORequest *)&SleepRequest, 0)) {
-        FreeSignal(SleepPort.mp_SigBit);
-        SleepPort.mp_SigBit = -1;
-        return FALSE;
-    }
-    SleepTimerBase = SleepRequest.tr_node.io_Device;
-    return TRUE;
-}
-
-static void CloseSleepTimer(void)
-{
-    if (SleepTimerBase) {
-        CloseDevice((struct IORequest *)&SleepRequest);
-        SleepTimerBase = NULL;
-    }
-    if (SleepPort.mp_SigBit != -1) {
-        FreeSignal(SleepPort.mp_SigBit);
-        SleepPort.mp_SigBit = -1;
-    }
 }
 
 static ULONG ProbeTicks(void)
@@ -431,11 +393,14 @@ static void PollQueuedFence(MGLPPCHostState *state)
     state->ringControl->retired = state->ringCompleted;
 }
 
-/* Per-Execute stage attribution, printed once at shutdown. Diagnostics only:
- * EClock reads are outside the protocol and cost a few microseconds each. */
-static ULONG HostClockHz;
+/* Cheap shutdown counts are not activity latches or benchmark timings. */
 static ULONG HostExecuteCount;
 static ULONG HostPresentCount;
+
+/* Per-Execute stage attribution. Diagnostics only: EClock reads are outside
+ * the protocol and cost a few microseconds each. */
+#if MGLPPC_PROFILE
+static ULONG HostClockHz;
 static ULONG HostWaitTicks;
 static ULONG HostClearTicks;
 static ULONG HostCrcTicks;
@@ -466,6 +431,7 @@ static ULONG HostClock(void)
         HostClockHz = frequency;
     return clockValue.ev_lo;
 }
+#endif
 
 /* The stdout redirect dies in the FFS cache on every hard reset of a
  * wedged session -- exactly when the evidence matters. This companion
@@ -496,9 +462,15 @@ static void HostTraceLine(const char *line)
 #endif
 }
 
+#if MGLPPC_PROFILE
+#define HOST_START(stage) do { (stage) = HostClock(); } while (0)
 #define HOST_STAGE(field, stage) \
     do { ULONG now_ = HostClock(); (field) += now_ - (stage); (stage) = now_; } \
     while (0)
+#else
+#define HOST_START(stage) do { } while (0)
+#define HOST_STAGE(field, stage) do { } while (0)
+#endif
 
 static void DiscardSemantic(MGLPPCHostState *state)
 {
@@ -660,12 +632,15 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     state->ringDeviceToken = bridge.deviceToken;
     state->ringRadeonCaps = info.Caps;
     state->queuedSegmentMask = 0;
-    printf("MiniGLPPC host: ring caps=%08lx ordered=%lu gen=%lu\n",
-           (unsigned long)info.Caps,
-           (unsigned long)((info.Caps & RADEON3D_CAP_ORDERED_COMMITS) ? 1UL
-                                                                      : 0UL),
-           (unsigned long)info.Generation);
-    fflush(stdout);
+    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+        printf("MiniGLPPC host: ring caps=%08lx ordered=%lu gen=%lu\n",
+               (unsigned long)info.Caps,
+               (unsigned long)((info.Caps & RADEON3D_CAP_ORDERED_COMMITS)
+                               ? 1UL : 0UL),
+               (unsigned long)info.Generation);
+        fflush(stdout);
+    }
+#if MGLPPC_HOST_TRACE
     {
         char rep[128];
         sprintf(rep, "host: ring caps=%08lx ordered=%lu gen=%lu\n",
@@ -675,10 +650,13 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
                 (unsigned long)info.Generation);
         HostTraceLine(rep);
     }
+#endif
     memset(&segment, 0, sizeof(segment));
     segment.bytes = MGLPPC_RING_SEGMENT_BYTES;
-    printf("MiniGLPPC host: msg=ring_reg\n");
-    fflush(stdout);
+    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+        printf("MiniGLPPC host: msg=ring_reg\n");
+        fflush(stdout);
+    }
     glGetIntegerv(MGL_R200_PRIVATE_SEGMENT_V1_QUERY, (GLint *)&segment);
     state->ringSegmentId = segment.segmentId;
     if (glGetError() != GL_NO_ERROR ||
@@ -690,10 +668,12 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         message->status = MGLPPC_STATUS_UNSUPPORTED;
         goto failed;
     }
-    printf("MiniGLPPC host: ring_seg=ok addr=%08lx bytes=%lu\n",
-           (unsigned long)segment.cpuAddress,
-           (unsigned long)segment.bytes);
-    fflush(stdout);
+    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+        printf("MiniGLPPC host: ring_seg=ok addr=%08lx bytes=%lu\n",
+               (unsigned long)segment.cpuAddress,
+               (unsigned long)segment.bytes);
+        fflush(stdout);
+    }
     control = (volatile MGLPPCRingControlV1 *)segment.cpuAddress;
     control->magic = MGLPPC_RING_MAGIC;
     control->version = MGLPPC_RING_CONTROL_VERSION;
@@ -713,8 +693,13 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     control->syncEnabled = 0;
     control->syncSeq = 0;
     state->ringSyncSeq = 0;
-    for (index = 0; index < count; ++index)
+    for (index = 0; index < count; ++index) {
         control->slotAddrs[index] = message->payload[index];
+        /* Discard dirty cache state from a previous owner before the PPC's
+         * first publication. Registration has not granted producer access yet. */
+        CacheClearE((APTR)message->payload[index], slotDwords * sizeof(ULONG),
+                    CACRF_ClearD);
+    }
     state->ringControl = control;
     state->ringDeviceEpoch = segment.deviceEpoch;
     state->ringCompleted = 0;
@@ -769,9 +754,14 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     }
     message->value[2] = state->vertexSegmentCount;
     message->payloadWords = state->vertexSegmentCount * 3UL;
-    printf("MiniGLPPC host: ring_init_done vertex_segments=%lu\n",
-           (unsigned long)state->vertexSegmentCount);
-    fflush(stdout);
+    /* Publish the new addresses and epoch before the producer may cache any
+     * control lines (entry zero shares a line with the last slot addresses). */
+    CacheClearE((APTR)control, sizeof(*control), CACRF_ClearD);
+    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+        printf("MiniGLPPC host: ring_init_done vertex_segments=%lu\n",
+               (unsigned long)state->vertexSegmentCount);
+        fflush(stdout);
+    }
     return TRUE;
 
 failed:
@@ -823,19 +813,22 @@ static void PollContextEvents(MGLPPCHostState *state)
 /* Consume posted ring entries. The control block is non-cacheable on both
  * CPUs, so head/completed/entry reads need no maintenance; record payloads
  * are cacheable and get the same dcbf/CacheClearE discipline as the v10
- * message path. Returns nonzero when any work was processed. */
+ * message path. Returns elapsed ticks (at least one for processed work) with
+ * profiling, or the processed count without it; zero means no work. */
 static ULONG RingPoll(MGLPPCHostState *state)
 {
     volatile MGLPPCRingControlV1 *control = state->ringControl;
     MGLR200PrivateBridgeV2 bridge;
+#if MGLPPC_PROFILE
     ULONG ringStart;
+#endif
     ULONG processed = 0;
 
     if (!control || control->error)
         return 0;
     if (state->ringCompleted >= control->head)
         return 0;
-    ringStart = HostClock();
+    HOST_START(ringStart);
     while (state->ringCompleted < control->head) {
         volatile MGLPPCRingEntryV1 *source =
             &control->entries[state->ringCompleted % MGLPPC_RING_SLOTS];
@@ -843,9 +836,12 @@ static ULONG RingPoll(MGLPPCHostState *state)
         ULONG *slotAddr;
         ULONG fence = 0;
         ULONG crc;
+#if MGLPPC_PROFILE
         ULONG stageStart;
+#endif
 
-        if (!state->ringSeenEntry) {
+        if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
+            !state->ringSeenEntry) {
             state->ringSeenEntry = 1;
             printf("MiniGLPPC host: ring_first_entry\n");
             fflush(stdout);
@@ -918,7 +914,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
             }
             headerDwords = entry.dwords -
                            MGLPPC_RING_COMMIT_HEADER_DWORDS - draws * 2UL;
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!DrainForSegment(state, segmentIx)) {
                 printf("MiniGLPPC host: statebatch_drain_fail segix=%lu "
                        "fence=%lu queued=%08lx completed=%lu head=%lu\n",
@@ -941,7 +937,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 }
                 state->displayLocked = 1;
             }
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!QueryBackendBridgeV2(&bridge) ||
                 bridge.deviceEpoch != state->ringDeviceEpoch) {
                 mglUnlockDisplay();
@@ -953,7 +949,8 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 control->error = 1;
                 break;
             }
-            if (!state->headerLogged) {
+            if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
+                !state->headerLogged) {
                 ULONG hi;
                 printf("host: hdr dwords=%lu:",
                        (unsigned long)headerDwords);
@@ -983,7 +980,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                  headerDwords);
             batch.DrawCount = draws;
             batch.Flags = RADEON3D_SUBMIT_FENCE;
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!Radeon3DCommitStateBatch(
                     (struct Radeon3DDevice *)bridge.deviceToken,
                     &batch, &fence)) {
@@ -1065,7 +1062,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
             recordDwords = entry.dwords - 2UL - draws;
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!DrainForSegment(state, segmentIx)) {
                 printf("MiniGLPPC host: commit_drain_fail\n");
                 fflush(stdout);
@@ -1082,7 +1079,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 }
                 state->displayLocked = 1;
             }
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!QueryBackendBridgeV2(&bridge) ||
                 bridge.deviceEpoch != state->ringDeviceEpoch) {
                 printf("MiniGLPPC host: commit_bridge_fail epoch=%lu\n",
@@ -1107,7 +1104,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 slotAddr + MGLPPC_RING_COMMIT_HEADER_DWORDS + recordDwords;
             batch.RecordCount = draws;
             batch.Flags = RADEON3D_SUBMIT_FENCE;
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!Radeon3DCommitBatch(
                     (struct Radeon3DDevice *)bridge.deviceToken,
                     &batch, &fence)) {
@@ -1143,7 +1140,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
             state->semanticExecutes++;
             HostExecuteCount++;
         } else if (entry.dwords) {
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!DrainSemanticFence(state)) {
                 printf("MiniGLPPC host: inline_drain_fail fence=%lu "
                        "completed=%lu head=%lu\n",
@@ -1176,7 +1173,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 }
                 state->displayLocked = 1;
             }
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!QueryBackendBridgeV2(&bridge) ||
                 bridge.deviceEpoch != state->ringDeviceEpoch) {
                 mglUnlockDisplay();
@@ -1188,7 +1185,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
             /* After the CRC check: the patch changes the slot contents. */
             PatchRecordTargets(slotAddr, entry.dwords,
                                bridge.colorSurfaceToken);
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!Radeon3DExecute((struct Radeon3DDevice *)bridge.deviceToken,
                                   slotAddr, entry.dwords,
                                   RADEON3D_SUBMIT_FENCE, &fence)) {
@@ -1203,10 +1200,15 @@ static ULONG RingPoll(MGLPPCHostState *state)
             state->semanticExecutes++;
             HostExecuteCount++;
         }
+        /* PatchRecordTargets writes shared payloads on the 68k. Clean them
+         * BEFORE releasing the slot: a later CacheClearE must not write old
+         * dirty lines over the PPC's next publication into this storage. */
+        if (entry.dwords)
+            CacheClearE(slotAddr, entry.dwords * sizeof(ULONG), CACRF_ClearD);
         state->ringCompleted++;
         processed++;
         if (entry.flags & MGLPPC_SEMANTIC_FLAG_PRESENT) {
-            stageStart = HostClock();
+            HOST_START(stageStart);
             if (!DrainSemanticFence(state)) {
                 printf("MiniGLPPC host: present_drain_fail fence=%lu "
                        "completed=%lu head=%lu\n",
@@ -1218,7 +1220,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
             HOST_STAGE(HostPresentWaitTicks, stageStart);
-            stageStart = HostClock();
+            HOST_START(stageStart);
             mglSwitchDisplay();
             HOST_STAGE(HostPresentTicks, stageStart);
             HostPresentCount++;
@@ -1241,7 +1243,12 @@ static ULONG RingPoll(MGLPPCHostState *state)
         }
         control->completed = state->ringCompleted;
     }
-    return HostClock() - ringStart + (processed ? 1 : 0);
+#if MGLPPC_PROFILE
+    ringStart = HostClock() - ringStart;
+    return ringStart ? ringStart : (processed ? 1UL : 0UL);
+#else
+    return processed;
+#endif
 }
 
 static BOOL ExecuteSemanticSlot(MGLPPCMessage *message,
@@ -1253,7 +1260,9 @@ static BOOL ExecuteSemanticSlot(MGLPPCMessage *message,
     ULONG dwords = message->value[2];
     ULONG crc;
     ULONG fence = 0;
+#if MGLPPC_PROFILE
     ULONG stageStart, totalStart;
+#endif
 
     if (!state->context || message->contextId != state->contextId) {
         message->status = MGLPPC_STATUS_NO_CONTEXT;
@@ -1275,7 +1284,9 @@ static BOOL ExecuteSemanticSlot(MGLPPCMessage *message,
         message->status = MGLPPC_STATUS_STALE_GENERATION;
         return FALSE;
     }
+#if MGLPPC_PROFILE
     totalStart = stageStart = HostClock();
+#endif
     if (!DrainSemanticFence(state)) {
         message->status = MGLPPC_STATUS_GL_ERROR;
         return FALSE;
@@ -1938,6 +1949,7 @@ static void HandleMessage(MGLPPCMessage *message,
                (unsigned long)message->value[1],
                (unsigned long)message->value[2]);
         fflush(stdout);
+#if MGLPPC_HOST_TRACE
         {
             char rep[128];
             sprintf(rep, "host: create windowed=%lu w=%lu h=%lu "
@@ -1948,6 +1960,7 @@ static void HandleMessage(MGLPPCMessage *message,
                     (unsigned long)message->value[2]);
             HostTraceLine(rep);
         }
+#endif
         /* Reply value[0] is the window handle; the client runs
          * ModifyIDCMP(RAWKEY) against it, so it must be resolved now, not
          * lazily -- a NULL here silences the keyboard entirely. */
@@ -2176,7 +2189,7 @@ static void HandleMessage(MGLPPCMessage *message,
             break;
         }
         {
-        ULONG t0 = HostClock();
+        ULONG t0 = state->verboseUploads ? ProbeTicks() : 0;
         BOOL ok = BeginBackendDirectTexture(message->value[0],
                                             message->value[1],
                                             message->value[2],
@@ -2192,8 +2205,8 @@ static void HandleMessage(MGLPPCMessage *message,
                    (unsigned long)message->value[1],
                    (unsigned long)message->value[2],
                    ok ? 1 : 0,
-                    (unsigned long)(HostClock() - t0),
-                    (unsigned long)HostClockHz,
+                    (unsigned long)(ProbeTicks() - t0),
+                    (unsigned long)TimerClockRate,
                    (unsigned long)bridge.cpuAddress,
                    (unsigned long)bridge.pitch,
                    (unsigned long)bridge.flags);
@@ -2223,7 +2236,7 @@ static void HandleMessage(MGLPPCMessage *message,
          * fresh, so no in-flight record references it and installing
          * it must not wait for the pipeline. */
         {
-        ULONG t0 = HostClock();
+        ULONG t0 = state->verboseUploads ? ProbeTicks() : 0;
         ULONG srcAddress = message->value[1];
         BOOL ok = CommitBackendDirectTexture(message->value[0],
                                              srcAddress, &bridge);
@@ -2233,8 +2246,8 @@ static void HandleMessage(MGLPPCMessage *message,
                    (unsigned long)state->uploadCount,
                    (unsigned long)message->value[0],
                    ok ? 1 : 0,
-                   (unsigned long)(HostClock() - t0),
-                   (unsigned long)HostClockHz,
+                   (unsigned long)(ProbeTicks() - t0),
+                   (unsigned long)TimerClockRate,
                    (unsigned long)bridge.surfaceToken,
                    (unsigned long)bridge.deviceEpoch);
             fflush(stdout);
@@ -2485,7 +2498,8 @@ static void HandleMessage(MGLPPCMessage *message,
         }
         bytes = TextureByteCount(message->value[3], message->value[4],
                                  uploadFormat, uploadType);
-        if (!state->sharedLogged) {
+        if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
+            !state->sharedLogged) {
             printf("host: upload_shared bytes=%lu fmt=%lx type=%lx\n",
                    (unsigned long)bytes, (unsigned long)uploadFormat,
                    (unsigned long)uploadType);
@@ -2633,21 +2647,24 @@ static void HandleMessage(MGLPPCMessage *message,
     }
 }
 
-static void PollMailbox(MGLPPCHostState *state)
+static BOOL PollMailbox(MGLPPCHostState *state)
 {
     volatile MGLPPCMailboxV1 *box = state->mailbox;
     MGLPPCMessage message;
-    ULONG serial, next, index, start;
+    ULONG serial, next, index;
+#if MGLPPC_PROFILE
+    ULONG start;
+#endif
 
     if (!box)
-        return;
+        return FALSE;
     /* Never write the request lines after registration. CacheClearE also
      * invalidates them; no dirty host data can overwrite PPC publication. */
     CacheClearE((APTR)&box->reqSerial, 32, CACRF_ClearD);
     serial = box->reqSerial;
     if (serial == state->mailboxSerial)
-        return;
-    start = HostClock();
+        return FALSE;
+    HOST_START(start);
     next = state->mailboxSerial + 1UL;
     if (!next)
         next = 1;
@@ -2679,8 +2696,11 @@ static void PollMailbox(MGLPPCHostState *state)
     box->ackSerial = serial;
     CacheClearE((APTR)&box->ackSerial, 32, CACRF_ClearD);
     state->mailboxSerial = serial;
+#if MGLPPC_PROFILE
     HostMailboxCount++;
     HostMailboxTicks += HostClock() - start;
+#endif
+    return TRUE;
 }
 
 int main(int argc, char **argv)
@@ -2699,7 +2719,7 @@ int main(int argc, char **argv)
      * holds the port name but never answers, and the only recovery for that
      * is a reboot. Runs before any backend or timer setup, so the duplicate
      * launch path costs nothing. */
-    existingPort = FindPort(MGLPPC_HOST_PORT_NAME);
+    existingPort = FindPort((CONST_STRPTR)MGLPPC_HOST_PORT_NAME);
     if (existingPort != NULL) {
         /* Idempotent launch: a second host exits successfully instead of
          * adding another port. The atomic FindPort/AddPort window below is
@@ -2741,7 +2761,7 @@ int main(int argc, char **argv)
     hostPort->mp_Node.ln_Name = (char *)MGLPPC_HOST_PORT_NAME;
     hostPort->mp_Node.ln_Pri = 0;
     Forbid();
-    existingPort = FindPort(MGLPPC_HOST_PORT_NAME);
+    existingPort = FindPort((CONST_STRPTR)MGLPPC_HOST_PORT_NAME);
     if (existingPort == NULL)
         AddPort(hostPort);
     Permit();
@@ -2763,8 +2783,10 @@ int main(int argc, char **argv)
     printf("MiniGLPPC host: step=port_added\n");
     fflush(stdout);
 
+#if MGLPPC_PROFILE
     HostClockHz = TimerClockRate;
     HostWallStart = HostClock();
+#endif
     /* Hang discriminator: at priority 0 the host round-robins with every
      * other 68k task; dropping it below everything else shows whether a
      * hang is 68k CPU starvation or a wedge inside the driver/PCI. */
@@ -2782,14 +2804,17 @@ int main(int argc, char **argv)
     HostTraceLine("host: service_enter\n");
     while (state.running) {
         MGLPPCMessage *message;
-        ULONG handleStart, handleElapsed, ringBusy;
-        ULONG loopStart, mbTicks, fenceTicks, evtTicks;
-        ULONG messagesHandled;
+        ULONG ringBusy;
+        BOOL workHandled;
+        static ULONG idleLoops;
+#if MGLPPC_PROFILE
+        ULONG handleStart, handleElapsed;
+        ULONG loopStart, mbTicks, fenceTicks, evtTicks = 0;
         static ULONG lastReport, pollLoops, mbCalls;
         static ULONG fenceCalls, mbTicksAcc, fenceTicksAcc, ringAcc;
         static ULONG evtTicksAcc, lastSubmit, lastPresentWait, lastPresent;
         static ULONG lastWait, lastExecutes, lastPresents;
-        static ULONG idleLoops, samplePhase;
+        static ULONG samplePhase;
         BOOL sample = (++samplePhase & 15UL) == 0UL;
 
         loopStart = HostClock();
@@ -2810,7 +2835,9 @@ int main(int argc, char **argv)
          * they measured. */
         if (sample)
             mbTicks = HostClock();
-        PollMailbox(&state);
+#endif
+        workHandled = PollMailbox(&state);
+#if MGLPPC_PROFILE
         if (sample) {
             mbTicks = HostClock() - mbTicks;
             mbTicksAcc += mbTicks;
@@ -2818,15 +2845,16 @@ int main(int argc, char **argv)
                 ++mbCalls;
         } else
             mbTicks = 0;
-        messagesHandled = FALSE;
+#endif
         while ((message = (MGLPPCMessage *)GetMsg(hostPort)) != NULL) {
             /* Published mailbox work precedes destruction/unregister, even
              * when an Exec message arrives during the previous handler. */
-            PollMailbox(&state);
-            handleStart = HostClock();
+            (void)PollMailbox(&state);
+            HOST_START(handleStart);
             if (message->execMessage.mn_Length >=
                     MGLPPC_MESSAGE_HEADER_SIZE)
                 HandleMessage(message, &state);
+#if MGLPPC_PROFILE
             handleElapsed = HostClock() - handleStart;
             if (message->command == MGLPPC_CMD_EXECUTE_SEMANTIC_SLOT) {
                 HostExecuteMsgCount++;
@@ -2837,15 +2865,22 @@ int main(int argc, char **argv)
                 HostControlCount++;
                 HostControlTicks += handleElapsed;
             }
+#endif
             ReplyMsg(&message->execMessage);
-            messagesHandled = TRUE;
+            workHandled = TRUE;
         }
         ringBusy = RingPoll(&state);
+#if MGLPPC_PROFILE
         HostRingTicks += ringBusy;
         ringAcc += ringBusy;
         if (sample)
             fenceTicks = HostClock();
+#endif
+        /* A fence completed by this poll still counts as work this pass. */
+        if (state.semanticFence)
+            workHandled = TRUE;
         PollQueuedFence(&state);
+#if MGLPPC_PROFILE
         if (sample) {
             fenceTicks = HostClock() - fenceTicks;
             fenceTicksAcc += fenceTicks;
@@ -2855,29 +2890,35 @@ int main(int argc, char **argv)
             fenceTicks = 0;
         if (sample)
             evtTicks = HostClock();
+#endif
         PollContextEvents(&state);
+#if MGLPPC_PROFILE
         if (sample) {
             evtTicks = HostClock() - evtTicks;
             evtTicksAcc += evtTicks;
         } else
             evtTicks = 0;
         ++pollLoops;
+#endif
         /* A pure busy loop pins the 68k CPU at 100% forever, starving
          * everything else on the machine even when no client is running.
          * Once the loop has been idle for a while, sleep 20ms per pass:
-         * active frames keep the loop busy and never delay, while an idle
-         * host costs a couple of percent instead of a whole core. */
-        if (messagesHandled || ringBusy || state.semanticFence ||
-            HostExecuteCount != lastExecutes ||
-            HostPresentCount != lastPresents) {
+         * pending work keeps the loop busy and never delays, while an idle
+         * host costs a couple of percent instead of a whole core. Activity
+         * must not depend on lastExecutes/lastPresents: those report-coupled
+         * latches do not advance with profiling off. Use actual mailbox,
+         * message, ring and fence work, including newly published entries. */
+        if (workHandled || ringBusy || state.semanticFence ||
+            (state.ringControl && !state.ringControl->error &&
+             state.ringCompleted < state.ringControl->head)) {
             idleLoops = 0;
         } else if (++idleLoops > 500UL) {
             Delay(1);
         }
+#if MGLPPC_PROFILE
         if (HostClockHz &&
             loopStart - lastReport > HostClockHz * 2UL) {
             lastReport = loopStart;
-#if MGLPPC_HOST_TRACE
             char rep[256];
             sprintf(rep, "host: poll loops=%lu mb=%luus(%lu) fence=%luus(%lu) "
                    "evt=%luus ring=%luus\n",
@@ -2902,7 +2943,6 @@ int main(int argc, char **argv)
                    (unsigned long)(HostPresentCount - lastPresents));
             printf("%s", rep);
             HostTraceLine(rep);
-#endif
             lastSubmit = HostSubmitTicks;
             lastPresentWait = HostPresentWaitTicks;
             lastPresent = HostPresentTicks;
@@ -2918,8 +2958,11 @@ int main(int argc, char **argv)
             pollLoops = 0;
             fflush(stdout);
         }
+#endif
     }
+#if MGLPPC_PROFILE
     HostWallTicks = HostClock() - HostWallStart;
+#endif
 
     RemPort(hostPort);
     DeleteMsgPort(hostPort);
@@ -2934,6 +2977,7 @@ int main(int argc, char **argv)
     }
     if (state.backendOpen)
         MiniGLClose();
+#if MGLPPC_PROFILE
     if (HostClockHz) {
         ULONG busy = HostControlTicks + HostBarrierTicks +
                      HostTotalTicks + HostRingTicks + HostMailboxTicks;
@@ -2969,6 +3013,12 @@ int main(int argc, char **argv)
                (unsigned long)HostTotalTicks);
         fflush(stdout);
     }
+#else
+    if (HostExecuteCount)
+        printf("MiniGLPPC host: executes=%lu presents=%lu\n",
+               (unsigned long)HostExecuteCount,
+               (unsigned long)HostPresentCount);
+#endif
     printf("MiniGLPPC host: stopped\n");
     return 0;
 }

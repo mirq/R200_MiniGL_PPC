@@ -46,6 +46,8 @@ python3 tests/test_r200_texture_order.py
 python3 tests/test_r200_readback.py
 python3 tests/test_r200_context_lifecycle.py
 python3 tests/test_r200_context_lifecycle.py --regress-crc
+python3 tests/test_r200_context_lifecycle.py --regress-cache
+python3 tests/test_r200_context_lifecycle.py --regress-register
 ```
 
 `r200_texture_layout_test.c` contains the former protocol-header test program:
@@ -78,6 +80,12 @@ It verifies fresh mailbox/ring counters, context IDs and registration epochs
 advancing 1 to 2, stale lifecycle request rejection, first/repeat submissions,
 and complete teardown/shutdown. No state-wide test reset occurs between the
 two contexts. Registration deliberately reuses the same shared ring address.
+The quiet-path test also wraps all eight payload slots twice with a dirty-host-
+cache model. `--regress-cache` removes the host release clean and verifies that
+stale writeback corrupts the next payload. `--regress-register` removes the
+registration control-block clean and checks that an unpublished registration
+is rejected by the test. Normal execution checks the PPC invalidates all new
+control lines before use. These models do not prove physical cache visibility.
 
 `--regress-crc` removes only the frontend CreateContext CRC rearm in the generated
 test translation unit. This reproduces the original second-context failure:

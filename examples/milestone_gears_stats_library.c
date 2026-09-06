@@ -1,52 +1,7 @@
-/*
- * Shared-library stats variant of milestone_gears.c -- identical scene/geometry/setup,
- * PLUS a live, on-screen FPS overlay (real 68k port of the original
- * gears.c's own bShowFPS/GetSysTimePPC mechanism, drawn directly onto the
- * screen's RastPort each time it updates -- see UpdateFPSOverlay/
- * DrawFPSOverlay below). Real keyboard interaction (1/2/3/f/e/ESC) and
- * MGLMainLoop, matching milestone_gears.c -- 'f' has a REAL effect here
- * (toggles whether the overlay draws), unlike milestone_gears.c where
- * bShowFPS is inert (no overlay code there at all).
- *
- * Real gears.c (MiniGL/demos/gears.c) hardware milestone -- the actual
- * motivation for Phase J's texgen work. Gear geometry-generation code
- * (gear/tooth_side/flat_face/draw_inside/draw_outside) is copied
- * VERBATIM from the original -- pure math + glBegin/glVertex3f/glNormal3f/
- * glEnd calls, zero MGL/backend-specific risk, already proven by every
- * earlier milestone in this project.
- *
- * Three things this project has NEVER hardware-tested before, all genuinely
- * exercised here:
- *  - GL_RGB (3-byte, no alpha) texture upload -- tex_GLFormatToSrcFmt maps
- *    it to V3D_SRCFMT_RGB8, v3d_texture_convert_row forces alpha=0xff. Real,
- *    documented, but never run on hardware until now.
- *  - glFrustum real perspective projection -- every demo so far used
- *    glOrtho. GLHint(MGL_W_ONE_HINT, GL_FASTEST) is also used, verified by
- *    reading v_Transform's own two branches: the "fast" path still computes
- *    the true perspective w via the matrix's bottom row, it only skips
- *    multiplying by an incoming w known to be 1 -- safe, not an
- *    approximation that breaks perspective.
- *  - GL_TEXTURE_ENV_MODE (GL_REPLACE for gear 1, GL_MODULATE + glColor3f for
- *    gear 2) -- confirmed real and GPU-consulted (tex_SetEnv writes
- *    V3DTexture's own texenv_mode field, v3d_texture_emit_state reads it),
- *    not yet exercised end-to-end on hardware.
- *
- * PPM texture loading (LoadPPM) is a faithful, real port of the original's
- * own function -- reads a real P6 file from disk (default
- * "data/chrome.ppm", or -envmap <name>), no procedural fallback. If the
- * file can't be found/read, this fails the SAME way the original does:
- * prints a D() error and tears down without ever entering MGLMainLoop.
- * The file itself is not shipped by this project -- deploy one alongside
- * the binary on the Amiga side before running.
- *
- * Deliberately DIFFERENT from the original's own main(), to avoid stacking
- * untested risk on top of the above three real things:
- *  - No mglChoosePixelDepth(16)/mglChooseNumberOfBuffers(3) -- untested
- *    combinations unrelated to what this milestone is actually about.
- * MGLLockMode(MGL_LOCK_MANUAL)/MGLLockDisplay() (Phase K) now called,
- * matching the original exactly -- see milestone_gears.c's own header
- * comment and oneFrame()'s own comment below for the full account of
- * why this is confirmed harmless/no-op re: hardware.
+/* PPC DLL gears client. Interactive runs retain keyboard input and a title
+ * readout; -frames N uses a quiet fixed loop, timed once including its final
+ * drain but excluding setup and teardown. MGL_GEARS_PRECALC records the same
+ * immediate-mode geometry before timing and replays it without repeated trig.
  */
 
 #include <proto/minigl.h>
@@ -71,8 +26,7 @@ struct IntuitionBase *IntuitionBase;
 
 /* Diagnostic output gate (default off): per-line teardown marker log on
  * DH2: and the console FPS fallback both cost console/FFS writes that
- * dominate frame time. Define 1 to re-enable. The GEARS_RUN summary and
- * the window-title FPS readout stay on. */
+ * dominate frame time. Define 1 to re-enable outside the measured loop. */
 #ifndef MGL_GEARS_DIAG
 #define MGL_GEARS_DIAG 0
 #endif
@@ -111,8 +65,7 @@ static int show = 1;
  * transition per FPS_SAMPLE_FRAMES) -- cheap enough to leave on. 'f'
  * still toggles it. */
 static int bShowFPS = 1;
-/* -frames N: stop after N presented frames through the ordinary ESC
- * teardown path (mglExit); 0 = run until ESC. Benchmark default: 300. */
+/* A positive frame limit selects the input/overlay-free benchmark loop. */
 static int frameLimit = 0;
 static int framesDone = 0;
 static GLboolean bEnvMap = GL_TRUE;
@@ -128,6 +81,58 @@ typedef struct {
 
 int circle_subdiv;
 #define MIN_SUBDIV 30
+
+#ifdef MGL_GEARS_PRECALC
+enum GearCommandType { GEAR_BEGIN, GEAR_NORMAL, GEAR_VERTEX, GEAR_END };
+struct GearCommand {
+	unsigned int type;
+	GLenum mode;
+	GLfloat x, y, z;
+};
+struct GearCommands {
+	struct GearCommand *commands;
+	unsigned int count, capacity;
+};
+static struct GearCommands precalculatedGears[2];
+static struct GearCommands *recordingGear;
+static int gearRecordingFailed;
+
+static void RecordGearCommand(unsigned int type, GLenum mode,
+                              GLfloat x, GLfloat y, GLfloat z)
+{
+	struct GearCommand *command;
+	if (gearRecordingFailed)
+		return;
+	if (recordingGear->count == recordingGear->capacity) {
+		unsigned int capacity = recordingGear->capacity ?
+			recordingGear->capacity * 2U : 1024U;
+		struct GearCommand *commands = realloc(recordingGear->commands,
+			capacity * sizeof(*commands));
+		if (!commands) {
+			gearRecordingFailed = 1;
+			return;
+		}
+		recordingGear->commands = commands;
+		recordingGear->capacity = capacity;
+	}
+	command = &recordingGear->commands[recordingGear->count++];
+	command->type = type;
+	command->mode = mode;
+	command->x = x;
+	command->y = y;
+	command->z = z;
+}
+
+/* Record this client's geometry, not the differently rounded static variant. */
+#undef glBegin
+#undef glNormal3f
+#undef glVertex3f
+#undef glEnd
+#define glBegin(mode) RecordGearCommand(GEAR_BEGIN, (mode), 0, 0, 0)
+#define glNormal3f(x,y,z) RecordGearCommand(GEAR_NORMAL, 0, (x), (y), (z))
+#define glVertex3f(x,y,z) RecordGearCommand(GEAR_VERTEX, 0, (x), (y), (z))
+#define glEnd() RecordGearCommand(GEAR_END, 0, 0, 0, 0)
+#endif
 
 void
 flat_face(float ir, float or, float wd)
@@ -393,13 +398,39 @@ gear(int nt, float wd, float ir, float or, float tp, float tip, int ns, Profile 
   tooth_side(nt, ir, or, tp, tip, wd);
 }
 
+#ifdef MGL_GEARS_PRECALC
+#undef glBegin
+#undef glNormal3f
+#undef glVertex3f
+#undef glEnd
+#define glBegin MGLD_glBegin
+#define glNormal3f MGLD_glNormal3f
+#define glVertex3f MGLD_glVertex3f
+#define glEnd MGLD_glEnd
+
+static void DrawPrecalculatedGear(unsigned int gearIndex)
+{
+	unsigned int index;
+	const struct GearCommands *buffer = &precalculatedGears[gearIndex];
+	for (index = 0; index < buffer->count; ++index) {
+		const struct GearCommand *command = &buffer->commands[index];
+		switch (command->type) {
+		case GEAR_BEGIN: glBegin(command->mode); break;
+		case GEAR_NORMAL: glNormal3f(command->x, command->y, command->z); break;
+		case GEAR_VERTEX: glVertex3f(command->x, command->y, command->z); break;
+		case GEAR_END: glEnd(); break;
+		}
+	}
+}
+#endif
+
 Profile gear_profile[] =
-{0.000, 0.0,
-  0.300, 7.0,
-  0.340, 0.4,
-  0.550, 0.64,
-  0.600, 0.4,
-  0.950, 1.0
+{ {0.000, 0.0},
+  {0.300, 7.0},
+  {0.340, 0.4},
+  {0.550, 0.64},
+  {0.600, 0.4},
+  {0.950, 1.0}
 };
 
 /* ================= Demo-specific setup (not from the original) ================= */
@@ -487,6 +518,7 @@ static void UpdateFPSOverlay(void)
 {
 	struct DateStamp now_ds;
 	LONG elapsed_ticks;
+	struct Window *win;
 
 	g_fps_frame_count++;
 	if (g_fps_frame_count < FPS_SAMPLE_FRAMES)
@@ -507,21 +539,7 @@ static void UpdateFPSOverlay(void)
 
 	g_fps_ds = now_ds;
 	g_fps_frame_count = 0;
-}
-
-static void DrawFPSOverlay(void)
-{
-	/*
-	 * Shared-library-safe version:
-	 * no access to mini_CurrentContext/v3dScreen/v3dWindow.
-	 *
-	 * The RastPort Text() overlay cost ~11 s/frame here: five PPC->68k
-	 * transitions (SetAPen/SetDrMd/Move/Text/DateStamp) onto a 68k side
-	 * kept saturated by the busy-poll R200 host. SetWindowTitles is ONE
-	 * transition and only fires once per FPS_SAMPLE_FRAMES, so the FPS
-	 * readout lives in the window title instead.
-	 */
-	struct Window *win = (struct Window *)mglGetWindowHandle();
+	win = (struct Window *)mglGetWindowHandle();
 
 	if (win)
 	{
@@ -538,21 +556,7 @@ static void DrawFPSOverlay(void)
 
 static void oneFrame(void)
 {
-	/* -frames N: stop after N fully presented frames. mglExit() is the
-	 * ESC path in keys(); the ABI-3 main loop re-resolves the context
-	 * each iteration and returns once it is gone, landing in the normal
-	 * teardown (delete + platform close + MiniGLClose). */
-	if (frameLimit && framesDone >= frameLimit)
-	{
-		D(("milestone_gears_stats_library: frame limit %d reached, exiting\n",
-		   frameLimit));
-		mglExit();
-		return;
-	}
-
-	/* Restored (Phase K) -- see milestone_gears.c's own oneFrame()
-	 * comment for the full account of why this is confirmed harmless/
-	 * no-op re: hardware. */
+	/* Required by the bundled Warp3D backend; a local context check on R200. */
 	mglLockDisplay();
 
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -565,8 +569,12 @@ static void oneFrame(void)
 			glRotatef(a4, 0.0f, 0.0f, -1.0f);
 			glTranslatef(0.14f, 0.2f, 0.0f);
 			glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+#ifdef MGL_GEARS_PRECALC
+			DrawPrecalculatedGear(0);
+#else
 			gear(40, 0.4f, 2.0f, 1.1f, 0.8f, 0.4f,
 			     sizeof(gear_profile) / sizeof(Profile), gear_profile);
+#endif
 		glPopMatrix();
 	}
 
@@ -579,8 +587,12 @@ static void oneFrame(void)
 			glTranslatef(0.0f, -0.2f, 0.0f);
 			glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 			glColor3f(1.0f, 0.8f, 0.0f);
+#ifdef MGL_GEARS_PRECALC
+			DrawPrecalculatedGear(1);
+#else
 			gear(36, 0.4f, 2.0f, 1.1f, 0.7f, 0.2f,
 			     sizeof(gear_profile) / sizeof(Profile), gear_profile);
+#endif
 		glPopMatrix();
 	}
 
@@ -589,21 +601,15 @@ static void oneFrame(void)
 	a3 += i3; if (a3 > 360.0f) a3 -= 360.0f;
 	a4 += i4; if (a4 > 360.0f) a4 -= 360.0f;
 
-	/* mglSwitchDisplay() is what actually submits this frame's binned
-	 * geometry for the GPU to bin+render -- the real pixel writes happen
-	 * during/at that call, not before it. Drawing the text overlay
-	 * BEFORE this would just get painted over by the GPU's own tile
-	 * render right after. Draw it AFTER, directly onto the now-rendered,
-	 * currently-visible buffer (single-buffered mode -- no separate
-	 * buffer-swap step needed after this). */
 	mglSwitchDisplay();
-	++framesDone;
+}
 
+
+static void interactiveFrame(void)
+{
+	oneFrame();
 	if (bShowFPS)
-	{
 		UpdateFPSOverlay();
-		DrawFPSOverlay();
-	}
 }
 
 /* Real keyboard handler -- see milestone_gears.c's own comment on the
@@ -662,100 +668,91 @@ static void keys(char c)
 int main(int argc, char *argv[])
 {
 	GLint width = MILESTONE_WIDTH, height = MILESTONE_HEIGHT;
-	int depth = 0;
+	int depth = 32;
+	int buffers = 2;
 	int noSync = 0;
-	int i;
+	int i, result = 20, opened = 0;
 	char *name = 0;
 	GLuint texname;
 	double d_near = 1.0, d_far = 2000.0;
 	GLboolean windowed = GL_FALSE;
-	
-GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0);
-if (!GfxBase)
-{
-    printf("Can't open graphics.library\n");
-    return 20;
-}	
+	GLenum error;
 
-	/* Same arg set as milestone_gears.c -- see its own comment on -envmap
-	 * (real PPM path now) and -window's real limitations here. */
 	for (i = 1; i < argc; i++)
 	{
-		if (0 == local_stricmp(argv[i], "-width"))
-		{
-			i++;
-			width = atoi(argv[i]);
-		}
-		if (0 == local_stricmp(argv[i], "-height"))
-		{
-			i++;
-			height = atoi(argv[i]);
-		}
-		if (0 == local_stricmp(argv[i], "-envmap"))
-		{
-			i++;
-			name = argv[i];
-		}
-		if (0 == local_stricmp(argv[i], "-window"))
-		{
+		const char *option = argv[i];
+		if (0 == local_stricmp(option, "-window")) {
 			windowed = GL_TRUE;
+			continue;
 		}
-		if (0 == local_stricmp(argv[i], "-depth"))
-		{
-			i++;
-			depth = atoi(argv[i]);
-		}
-		if (0 == local_stricmp(argv[i], "-nosync"))
-		{
+		if (0 == local_stricmp(option, "-nosync")) {
 			noSync = 1;
+			continue;
 		}
-		if (0 == local_stricmp(argv[i], "-frames") && i + 1 < argc)
-		{
-			i++;
+		if (0 == local_stricmp(option, "-nofps")) {
+			bShowFPS = 0;
+			continue;
+		}
+		if (++i == argc)
+			goto usage;
+		if (0 == local_stricmp(option, "-width"))
+			width = atoi(argv[i]);
+		else if (0 == local_stricmp(option, "-height"))
+			height = atoi(argv[i]);
+		else if (0 == local_stricmp(option, "-depth"))
+			depth = atoi(argv[i]);
+		else if (0 == local_stricmp(option, "-buffers"))
+			buffers = atoi(argv[i]);
+		else if (0 == local_stricmp(option, "-envmap"))
+			name = argv[i];
+		else if (0 == local_stricmp(option, "-frames")) {
 			frameLimit = atoi(argv[i]);
-		}
+			if (frameLimit <= 0 || frameLimit > 1000000)
+				goto usage;
+		} else
+			goto usage;
+	}
+	if (width <= 0 || height <= 0 || (depth != 16 && depth != 32) ||
+	    buffers < 1 || buffers > 3)
+		goto usage;
+
+	GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0);
+	if (!GfxBase) {
+		printf("Can't open graphics.library\n");
+		goto cleanup;
 	}
 
 	if (MiniGLOpen() == GL_FALSE)
 	{
-		D(("milestone_gears_stats_library: could not open minigl.library\n"));
-		return -1;
+		D(("milestone_gears_stats_library: could not open minigl_ppc.dll\n"));
+		goto cleanup;
 	}
+	opened = 1;
 
-	IntuitionBase = (struct IntuitionBase *)
-		OpenLibrary((CONST_STRPTR)"intuition.library", 39UL);
-	if (!IntuitionBase)
-	{
-		D(("milestone_gears_stats_library: no intuition.library\n"));
-		MiniGLClose();
-		return -1;
+	if (!frameLimit) {
+		IntuitionBase = (struct IntuitionBase *)
+			OpenLibrary((CONST_STRPTR)"intuition.library", 39UL);
+		if (!IntuitionBase) {
+			D(("milestone_gears_stats_library: no intuition.library\n"));
+			goto cleanup;
+		}
 	}
 
 	if (windowed)
 		mglChooseWindowMode(GL_TRUE);
 	mglChooseVertexBufferSize(1000);
-	if (depth)
-		mglChoosePixelDepth(depth);
+	mglChoosePixelDepth(depth);
+	mglChooseNumberOfBuffers(buffers);
 
 	if (!mglCreateContext(0, 0, width, height))
 	{
 		D(("milestone_gears_stats_library: mglCreateContext failed\n"));
-		MiniGLClose();
-		return -2;
+		goto cleanup;
 	}
 
-
-
-	/* Sync ON for benchmark validity: with sync off the R200 fullscreen
-	 * present skips screen-buffer switches when one is still outstanding
-	 * ("latest completed frame wins"), so the frame counter races ahead
-	 * of what the monitor actually scans out. With sync on every frame
-	 * is vblank-locked and the counted frames equal visible frames.
-	 * -nosync restores the old tear/skip behaviour. */
-	if (!noSync)
-		mglEnableSync(GL_TRUE);
-	else
-		mglEnableSync(GL_FALSE);
+	/* R200 defaults to blit when sync is off; MINIGL_PRESENT can override
+	 * the native host's present mode. Unsynced FPS is throughput, not refresh. */
+	mglEnableSync(noSync ? GL_FALSE : GL_TRUE);
 
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -769,6 +766,7 @@ if (!GfxBase)
 			/* Fails the same way the original does: no fallback texture,
 			 * no MGLMainLoop entry, just tear down cleanly. */
 			D(("milestone_gears_stats_library: can't find texture %s\n", name ? name : "data/chrome.ppm"));
+			goto cleanup;
 		}
 		else
 		{
@@ -790,7 +788,6 @@ if (!GfxBase)
 			glColor3f(1.0f, 0.0f, 0.0f);
 
 			glDisable(GL_CULL_FACE);
-			glHint(MGL_W_ONE_HINT, GL_FASTEST);
 			glEnable(GL_DEPTH_TEST);
 
 			glViewport(0, 0, width, height);
@@ -800,70 +797,95 @@ if (!GfxBase)
 			glMatrixMode(GL_MODELVIEW);
 			glLoadIdentity();
 
-			DateStamp(&g_fps_ds);
-			g_fps_frame_count = 0;
-
-			D(("milestone_gears_stats_library: setup done, entering MGLMainLoop (ESC to quit, 1/2/3 to pick gear(s), f toggles FPS overlay, e toggles envmap)\n"));
-
-			/* Restored (Phase K) -- matches the original's own main()
-			 * exactly; see milestone_gears.c's own comment. */
 			mglLockMode(MGL_LOCK_MANUAL);
 
+#ifdef MGL_GEARS_PRECALC
+			recordingGear = &precalculatedGears[0];
+			gear(40, 0.4f, 2.0f, 1.1f, 0.8f, 0.4f,
+			     sizeof(gear_profile) / sizeof(Profile), gear_profile);
+			recordingGear = &precalculatedGears[1];
+			gear(36, 0.4f, 2.0f, 1.1f, 0.7f, 0.2f,
+			     sizeof(gear_profile) / sizeof(Profile), gear_profile);
+			recordingGear = NULL;
+			if (gearRecordingFailed) {
+				puts("gears: precalculation allocation failed");
+				goto cleanup;
+			}
+#endif
+			glFinish();
+			error = glGetError();
+			if (error != GL_NO_ERROR) {
+				printf("gears: setup error=%lu\n", (unsigned long)error);
+				goto cleanup;
+			}
 
-			mglIdleFunc(oneFrame);
-			mglKeyFunc(keys);
-			DateStamp(&g_run_ds);
-			MarkLog("mainloop enter\n");
-			mglMainLoop();
-			MarkLog("mainloop returned\n");
-			/* Console-independent run summary: frames and true
-			 * wall time, independent of MGLPPC_VERBOSE. Measured
-			 * against g_run_ds (set once before mglMainLoop) --
-			 * NOT g_fps_ds, which UpdateFPSOverlay() rewrites
-			 * every FPS_SAMPLE_FRAMES frames and which used to
-			 * reduce this summary to the last sample's tail. */
-			{
+			if (frameLimit) {
 				struct DateStamp run_ds;
-				LONG run_ticks;
+				LONG run_ticks, fps_x1000;
+				/* No event, title, timer or logging calls in the fixed loop.
+				 * Finish includes the final asynchronous PRESENT in wall time. */
+				DateStamp(&g_run_ds);
+				for (framesDone = 0; framesDone < frameLimit; ++framesDone)
+					oneFrame();
+				glFinish();
 				DateStamp(&run_ds);
+				error = glGetError();
 				run_ticks = (run_ds.ds_Days - g_run_ds.ds_Days)
 					    * 1440L * 3000L
 					  + (run_ds.ds_Minute - g_run_ds.ds_Minute)
 					    * 3000L
 					  + (run_ds.ds_Tick - g_run_ds.ds_Tick);
-				if (run_ticks > 0)
-				{
-					LONG fps_x10 = ((LONG)framesDone * 500L)
-						       / run_ticks;
-					printf("GEARS_RUN frames=%d ticks=%ld "
-					       "fps=%ld.%ld\n",
-					       framesDone, (long)run_ticks,
-					       (long)(fps_x10 / 10L),
-					       (long)(fps_x10 % 10L));
-					fflush(stdout);
-				}
+				fps_x1000 = run_ticks > 0 ?
+					(LONG)((unsigned long long)framesDone * 50000ULL /
+					       (unsigned long)run_ticks) : 0;
+				printf("GEARS_RUN frames=%d ticks=%ld fps=%ld.%03ld "
+				       "variant=ppc-dll precalc=%d mode=%s depth=%d "
+				       "buffers=%d sync=%d error=%lu\n",
+				       framesDone, (long)run_ticks,
+				       (long)(fps_x1000 / 1000L), (long)(fps_x1000 % 1000L),
+#ifdef MGL_GEARS_PRECALC
+				       1,
+#else
+				       0,
+#endif
+				       windowed ? "window" : "fullscreen", depth,
+				       windowed ? 0 : buffers, !noSync, (unsigned long)error);
+				fflush(stdout);
+				result = error == GL_NO_ERROR && run_ticks > 0 ? 0 : 20;
+			} else {
+				DateStamp(&g_fps_ds);
+				g_fps_frame_count = 0;
+				mglIdleFunc(interactiveFrame);
+				mglKeyFunc(keys);
+				D(("gears: ESC quits, 1/2/3 selects gears, f toggles FPS, e toggles envmap\n"));
+				MarkLog("mainloop enter\n");
+				mglMainLoop();
+				MarkLog("mainloop returned\n");
+				result = 0;
 			}
-
-			D(("milestone_gears_stats_library: MGLMainLoop returned, tearing down\n"));
 		}
 	}
 
-	MarkLog("before mglDeleteContext\n");
-	mglDeleteContext();
-	MarkLog("after mglDeleteContext\n");
-	MiniGLClose();
-	MarkLog("after MiniGLClose\n");
+cleanup:
+	if (opened) {
+		MarkLog("before mglDeleteContext\n");
+		mglDeleteContext();
+		MarkLog("after mglDeleteContext\n");
+		MiniGLClose();
+		MarkLog("after MiniGLClose\n");
+	}
+#ifdef MGL_GEARS_PRECALC
+	free(precalculatedGears[0].commands);
+	free(precalculatedGears[1].commands);
+#endif
+	if (GfxBase)
+		CloseLibrary((struct Library *)GfxBase);
+	if (IntuitionBase)
+		CloseLibrary((struct Library *)IntuitionBase);
+	return result;
 
-if (GfxBase)
-{
-    CloseLibrary((struct Library *)GfxBase);
-    GfxBase = NULL;
-}
-if (IntuitionBase)
-{
-    CloseLibrary((struct Library *)IntuitionBase);
-    IntuitionBase = NULL;
-}
-
-	return 0;
+usage:
+	puts("usage: gears [-frames N] [-window] [-width N] [-height N] "
+	     "[-depth 16|32] [-buffers 1|2|3] [-nosync] [-nofps] [-envmap file]");
+	return 20;
 }

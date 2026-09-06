@@ -19,7 +19,7 @@ OBJS = $(OBJDIR)/minigl_ppc_base.o \
 DEPS = $(OBJS:.o=.d)
 EXAMPLE_NAMES = library_test milestone_ballonly_library \
                  milestone_bounce_interactive_library \
-                 milestone_gears_stats_library r200_legacy_smoke \
+                 milestone_gears_stats_library milestone_gears_precalc r200_legacy_smoke \
                  r200_texture_upload_smoke r200_triangle_smoke warp_library \
                   r200_mapping_bench r200_texture_update_test
 EXAMPLE_OBJS = $(addprefix $(EXOBJDIR)/,$(addsuffix .o,$(EXAMPLE_NAMES)))
@@ -54,6 +54,13 @@ $(DROPINLIB): $(OUTLIB) | lib
 # Elf2Exe2. These files exercise the public headers and import archive and are
 # ready for conversion on Amiga/WarpOS, just like the DLL's warpelf target.
 testprograms: importlib $(EXAMPLE_WARPELFS)
+
+.PHONY: gears-benchmarks
+gears-benchmarks: $(BINDIR)/milestone_gears_stats_library_ppc.warpelf \
+                  $(BINDIR)/milestone_gears_precalc_ppc.warpelf
+
+$(EXOBJDIR)/milestone_gears_precalc.o: examples/milestone_gears_stats_library.c Makefile.import.gcc Makefile.wos.gcc.common | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -DMGL_GEARS_PRECALC=1 -MMD -MP -c $< -o $@
 
 # Standalone protocol client: no MiniGL dispatch archive or driver linkage.
 $(EXOBJDIR)/r200_mapping_bench.o: EX_CFLAGS += -Ibackend_r200/include

@@ -2,6 +2,8 @@
 
 python3 tests/test_r200_context_lifecycle.py
 python3 tests/test_r200_context_lifecycle.py --regress-crc
+python3 tests/test_r200_context_lifecycle.py --regress-cache
+python3 tests/test_r200_context_lifecycle.py --regress-register
 
 GPU services and allocation are mocked. RingPoll retains its actual inline path
 and CRC/error/completion logic; unused streamed-commit branches are excluded.
@@ -9,7 +11,6 @@ and CRC/error/completion logic; unused streamed-commit branches are excluded.
 No SDK, native library or hardware is loaded. Test binaries stay in /tmp/opencode.
 """
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
@@ -48,15 +49,21 @@ typedef int32_t LONG, GLint;
 typedef ULONG GLenum;
 typedef unsigned char UBYTE;
 typedef void *APTR;
-typedef const char *CONST_STRPTR;
+typedef UBYTE *STRPTR;
+typedef const UBYTE *CONST_STRPTR;
 typedef int BOOL;
 #define TRUE 1
 #define FALSE 0
+#define MGLPPC_PROFILE 0
+#define MGLPPC_HOST_TRACE 0
+#define MGLPPC_CLIENT_TRACE 0
 #define GL_TRUE 1
 #define GL_FALSE 0
 #define GL_NO_ERROR 0
 #define GL_INVALID_OPERATION 0x59
 #define CACRF_ClearD 1
+#define GVF_GLOBAL_ONLY 0x100
+#define MEMF_PUBLIC 1
 #define SUBMIT_SLOT_COUNT 2
 #define SEGMENT_HALF_BYTES 32768
 #define RADEON3D_LIBRARY_VERSION 1
@@ -71,7 +78,14 @@ typedef int BOOL;
 #define MGL_R200_PRIVATE_SEGMENT_FREE_V1_QUERY 2
 #define MGL_R200_PRIVATE_BRIDGE_COMPACT_TCL 1
 #define R200PPCTimelineMark(...) ((void)0)
+#define R200PPCTraceOpen(...) ((void)0)
+#define R200PPCTraceClose(...) ((void)0)
+#define R200PPCTraceStr(...) ((void)0)
+#define R200PPCTraceUL(...) ((void)0)
+#define R200PPCTraceUL2(...) ((void)0)
+static void R200PPCConsolePrintf(const char *fmt, ...) { (void)fmt; }
 struct Message { UBYTE pad[18]; unsigned short mn_Length; };
+struct Window { ULONG IDCMPFlags; };
 '''
 code += section(P, "#define MGLPPC_HOST_PORT_NAME", "/* Exec sees this structure").replace(
     "#ifndef MGLPPC_TEXTURE_VALIDATION_TEST", "")
@@ -88,6 +102,8 @@ typedef MGLR200PrivateBridgeV1 MGLR200PrivateBridgeV2;
 struct SubmitSlot { ULONG *records; ULONG recordCount, drawCount, segmentCursor;
     BOOL commitMode, stateBatch; ULONG *stateBatchDraws, *vertexOffsets; };
 struct MiniGLR200Context {
+    struct Window *window;
+    ULONG baseIDCMP;
     ULONG width, height, pixelDepth, radeonCaps, batchDwords, deviceEpoch;
     BOOL compactTclVertex, insideBegin, streamSegments, syncEnabled;
     struct { APTR Handle; } surfaces[1], depthSurface;
@@ -99,33 +115,67 @@ struct MiniGLR200Context {
 '''
 code += section(H, "typedef struct MGLPPCHostState", "static const GLenum HostUnpackNames")
 code += section(F, "typedef struct R200PPCFrontendPlatform", "#define MGLPPC_REPLAY_BATCHES_PER_FRAME")
-code += "static struct { ULONG " + ", ".join(sorted(set(re.findall(r"PlatformProfile\.(\w+)", F)))) + "; } PlatformProfile;\n"
-code += section(H, "static ULONG HostClockHz;", "static ULONG HostClock(void)")
+# Keep both unconditional counters, but not the opening profile-only guard.
+code += section(H, "static ULONG HostExecuteCount;", "#if MGLPPC_PROFILE")
 code += r'''
 static struct MiniGLR200Context proofContext, *R200PPCContext;
 static MGLPPCHostState host;
+static struct Window window;
+static struct IntuitionBase *IntuitionBase;
+static ULONG FrontendConsoleVerbose;
 static APTR Radeon9200Base;
-static ULONG PlatformClockRate = 1000000, PlatformSessionStart, clockTicks;
+static ULONG PlatformClockRate = 1000000, clockTicks;
 static ULONG nativeCreates, nativeDeletes, nativeExecutes, subimages, shutdowns, transportCloses;
 static ULONG error, allocations, frees, segmentAlloc;
 static BOOL ringMode = TRUE, polling;
 static UBYTE sharedRing[65536] __attribute__((aligned(64)));
 static UBYTE vertexMemory[4][65536] __attribute__((aligned(64)));
-static ULONG slots[8][8192], buildRecords[2][8192];
+static ULONG slots[8][8192] __attribute__((aligned(32))), buildRecords[2][8192];
+/* Model dirty 68k lines: CacheClearE pushes old contents before invalidating.
+ * A PPC overwrite before the host releases those lines must lose data. */
+static ULONG hostCache[8][16], expectedClearColor;
+static BOOL hostDirty[8];
+static BOOL controlPublished;
+static ULONG controlInvalidated;
 static ULONG RingPoll(MGLPPCHostState *state);
-static void PollMailbox(MGLPPCHostState *state);
+static BOOL PollMailbox(MGLPPCHostState *state);
 static void HandleMessage(MGLPPCMessage *message, MGLPPCHostState *state);
 static ULONG PerfClock(void) { return ++clockTicks; }
 static ULONG PerfClockRate(void) { return 1000000; }
-static ULONG HostClock(void) { return PerfClock(); }
-static void CacheClearE(APTR p, ULONG n, int f) { (void)p; (void)n; (void)f; }
+static void CacheClearE(APTR p, ULONG n, int f) {
+    (void)n; (void)f;
+    if (p == sharedRing && n == sizeof(MGLPPCRingControlV1)) {
+        MGLPPCRingControlV1 *c = (void *)sharedRing;
+        assert(c->magic == MGLPPC_RING_MAGIC && c->slotCount == 8 && !c->head);
+        for (ULONG i = 0; i < 8; ++i) assert(c->slotAddrs[i] == (ULONG)(uintptr_t)slots[i]);
+        controlPublished = TRUE;
+    }
+    for (ULONG i = 0; i < 8; ++i) {
+        if (p == slots[i] && hostDirty[i]) {
+            memcpy(p, hostCache[i], sizeof(hostCache[i]));
+            hostDirty[i] = FALSE;
+        }
+    }
+}
 static void poll(void) {
     if (!polling) { polling = TRUE; RingPoll(&host); PollMailbox(&host); polling = FALSE; }
 }
-static void MGLPPCInvalidateLine32(APTR p) { (void)p; poll(); }
+static void Delay(LONG ticks) { (void)ticks; poll(); }
+static LONG GetVar(CONST_STRPTR name, STRPTR buffer, LONG size, LONG flags) {
+    (void)name; (void)buffer; (void)size; (void)flags; return -1;
+}
+static void MoveWindow(struct Window *w, LONG dx, LONG dy) {
+    assert(w == &window); (void)dx; (void)dy;
+}
+static void MGLPPCInvalidateLine32(APTR p) {
+    uintptr_t address = (uintptr_t)p, base = (uintptr_t)sharedRing;
+    if (address >= base && address < base + sizeof(MGLPPCRingControlV1))
+        controlInvalidated |= 1UL << ((address - base) / 32);
+    poll();
+}
 static void MGLPPCFlushDataRange(APTR p, ULONG n) { (void)p; (void)n; }
 static APTR AllocVec(ULONG bytes, ULONG flags) {
-    (void)flags; assert(bytes == sizeof(slots[0]));
+    assert(flags == MEMF_PUBLIC && bytes == sizeof(slots[0]) + 31);
     return slots[allocations++ % 8];
 }
 static void FreeVec(APTR p) { assert(p); ++frees; }
@@ -142,7 +192,7 @@ static APTR mglCreateContext(int x, int y, int w, int h) {
     ++nativeCreates; segmentAlloc = 0; return &host;
 }
 static void mglDeleteContext(void) { assert(host.context); ++nativeDeletes; }
-static APTR mglGetWindowHandle(void) { return &host; }
+static APTR mglGetWindowHandle(void) { return &window; }
 static BOOL mglLockDisplay(void) { return TRUE; }
 static void mglUnlockDisplay(void) {}
 static void mglSwitchDisplay(void) {}
@@ -161,9 +211,19 @@ static BOOL Radeon3DWaitFence(struct Radeon3DDevice *d, ULONG f, ULONG timeout) 
     (void)d; (void)timeout; assert(f); return TRUE;
 }
 static BOOL Radeon3DExecute(struct Radeon3DDevice *d, ULONG *p, ULONG n, ULONG flags, ULONG *fence) {
-    (void)d; (void)p; (void)flags; assert(n == 11); *fence = ++nativeExecutes; return TRUE;
+    (void)d; (void)flags; assert(n == 11);
+    assert(p[5] == expectedClearColor); *fence = ++nativeExecutes; return TRUE;
 }
-static void PatchRecordTargets(ULONG *p, ULONG n, ULONG target) { (void)p; (void)n; (void)target; }
+static void PatchRecordTargets(ULONG *p, ULONG n, ULONG target) {
+    (void)n;
+    p[2] = target;
+    for (ULONG i = 0; i < 8; ++i) {
+        if (p == slots[i]) {
+            memcpy(hostCache[i], p, sizeof(hostCache[i]));
+            hostDirty[i] = TRUE;
+        }
+    }
+}
 static void glGetIntegerv(ULONG query, GLint *p) {
     if (query == MGL_R200_PRIVATE_SEGMENT_FREE_V1_QUERY) return;
     assert(query == MGL_R200_PRIVATE_SEGMENT_V1_QUERY);
@@ -177,13 +237,23 @@ static void glGetIntegerv(ULONG query, GLint *p) {
 static void DiscardProbe(MGLPPCHostState *s) { (void)s; }
 static void DiscardUpload(MGLPPCHostState *s) { (void)s; }
 '''
-code += section(H, "#define HOST_STAGE", "static void DiscardSemantic")
+code += section(H, "#if MGLPPC_PROFILE\n#define HOST_START", "static void DiscardSemantic")
 code += section(H, "static ULONG SemanticCRCTable[256];", "static BOOL QueryBackendBridge(")
 for name in ("static BOOL DrainSemanticFence(", "static void DiscardSemantic(",
              "static BOOL RegisterSemanticSlots(", "static BOOL RegisterSemanticRing(",
              "static BOOL ExecuteSemanticSlot("):
-    code += function(H, name)
+    body = function(H, name)
+    if "--regress-register" in sys.argv and name == "static BOOL RegisterSemanticRing(":
+        publication = "    CacheClearE((APTR)control, sizeof(*control), CACRF_ClearD);\n"
+        assert body.count(publication) == 1
+        body = body.replace(publication, "")
+    code += body
 ring = function(H, "static ULONG RingPoll(")
+if "--regress-cache" in sys.argv:
+    release = ("        if (entry.dwords)\n"
+               "            CacheClearE(slotAddr, entry.dwords * sizeof(ULONG), CACRF_ClearD);\n")
+    assert ring.count(release) == 1
+    ring = ring.replace(release, "")
 start = ring.index("        if (entry.flags & MGLPPC_SEMANTIC_FLAG_STATE_BATCH)")
 end = ring.index(" else if (entry.dwords)", start)
 ring = ring[:start] + "        if (entry.dwords)" + ring[end + len(" else if (entry.dwords)"):]
@@ -220,13 +290,18 @@ code += r'''
     }
 }
 '''
-code += function(H, "static void PollMailbox(")
+code += function(H, "static BOOL PollMailbox(")
 code += section(F, "static ULONG PlatformCRCTable[256];", "/* A late completion")
 code += r'''
 static BOOL MGLPPCTransportOpen(MGLPPCTransport *t) { t->protocolVersion = 15; return TRUE; }
 static void MGLPPCTransportClose(MGLPPCTransport *t) { (void)t; ++transportCloses; }
 static BOOL MGLPPCTransportCall(MGLPPCTransport *t, MGLPPCMessage *m) {
-    poll(); m->protocolVersion = t->protocolVersion; HandleMessage(m, &host); return TRUE;
+    BOOL registration = m->command == MGLPPC_CMD_REGISTER_SEMANTIC_RING;
+    poll(); m->protocolVersion = t->protocolVersion;
+    if (registration) { controlPublished = FALSE; controlInvalidated = 0; }
+    HandleMessage(m, &host);
+    if (registration && m->status == MGLPPC_STATUS_OK) assert(controlPublished);
+    return TRUE;
 }
 static BOOL MGLPPCTransportSend(MGLPPCTransport *t, MGLPPCMessage *m) { return MGLPPCTransportCall(t, m); }
 static BOOL MGLPPCTransportWait(MGLPPCTransport *t, MGLPPCMessage *m) { (void)t; (void)m; return TRUE; }
@@ -239,7 +314,8 @@ static BOOL FlushScreenVertices(struct MiniGLR200Context *c) { (void)c; return T
 static BOOL SubmitAndWait(struct MiniGLR200Context *c);
 '''
 for signature in ("static BOOL PlatformMailboxReady(", "static BOOL PlatformMailboxWait(",
-                  "static BOOL PlatformCall(", "static void CopyRecordToRingSlot(",
+                  "static BOOL PlatformCallFail(", "static BOOL PlatformCall(",
+                  "static void CopyRecordToRingSlot(", "void R200PPCPlatformResetClientDefaults(",
                   "BOOL R200PPCPlatformOpen(", "BOOL R200PPCPlatformPublishSlot(",
                   "BOOL R200PPCPlatformWaitSlot(", "BOOL R200PPCPlatformBarrier(",
                   "void *R200PPCDispatchCreateContext(", "void R200PPCDispatchDeleteContext(",
@@ -260,6 +336,7 @@ static void clearPrefix(void) {
     /* Same inline record shape as glClear before a streamed state-batch draw. */
     static const ULONG clear[11] = {1,11,2,0,1,0xff102030,0,0,0,320,240};
     memcpy(buildRecords[0], clear, sizeof(clear));
+    buildRecords[0][5] = ++expectedClearColor;
     proofContext.submitSlots[0].recordCount = 11;
 }
 static void texture(ULONG cmd) {
@@ -302,6 +379,7 @@ int main(int argc, char **argv) {
                    !FrontendPlatform.mailboxPoisoned && !FrontendPlatform.ringPostSerial);
             assert(!FrontendPlatform.mailboxSerial && !FrontendPlatform.pending[0]);
             if (ringMode) {
+                assert(controlInvalidated == (1UL << ((sizeof(MGLPPCRingControlV1) + 31) / 32)) - 1UL);
                 assert(host.mailbox && FrontendPlatform.mailbox == host.mailbox && !host.mailboxSerial);
                 assert(!host.ringControl->head && !host.ringControl->completed && !host.ringControl->retired);
                 for (ULONG i = 0; i < 8; ++i) assert(!host.ringLastGen[i]);
@@ -335,6 +413,12 @@ int main(int argc, char **argv) {
             if (ringMode) {
                 assert(host.mailboxSerial == 5 && FrontendPlatform.mailboxSerial == 5);
                 assert(host.ringCompleted == 2 && FrontendPlatform.ringPostSerial == 2);
+                /* Wrap the ring twice: every slot must be reusable without
+                 * a later 68k writeback overwriting the new PPC payload. */
+                for (ULONG i = 0; i < 16; ++i) {
+                    clearPrefix(); assert(FrontendTextureBarrier(&proofContext));
+                }
+                for (ULONG i = 0; i < 8; ++i) assert(!hostDirty[i]);
                 assert(R200PPCPlatformBarrier(&proofContext, TRUE)); poll();
             }
             printf("PASS: %s context%u id=%u epoch=%u first/repeat submit + mailbox/Exec updates\n",
@@ -362,4 +446,13 @@ with tempfile.TemporaryDirectory(prefix="r200-lifecycle-", dir="/tmp/opencode") 
                     "-Wno-unused-variable", "-Wno-pointer-to-int-cast", "-Wno-int-to-pointer-cast",
                     "-fno-pie", "-no-pie", "-fsanitize=address,undefined",
                     str(source), "-o", str(binary)], check=True)
-    subprocess.run([str(binary)] + (["expect-fault"] if "--regress-crc" in sys.argv else []), check=True)
+    if "--regress-register" in sys.argv:
+        completed = subprocess.run([str(binary)], capture_output=True, text=True)
+        assert completed.returncode != 0 and "controlPublished" in completed.stderr
+        print("REPRO: registration must publish the control block before replying")
+    elif "--regress-cache" in sys.argv:
+        completed = subprocess.run([str(binary)], capture_output=True, text=True)
+        assert completed.returncode != 0 and "p[5] == expectedClearColor" in completed.stderr
+        print("REPRO: missing host cache release corrupts the next payload after ring wrap")
+    else:
+        subprocess.run([str(binary)] + (["expect-fault"] if "--regress-crc" in sys.argv else []), check=True)

@@ -12,7 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def source(path):
     text = (ROOT / path).read_text()
-    return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.S)
+    text = re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.S)
+    # Ignore only standalone profile blocks, never other/nested guards or else branches.
+    return re.sub(r"^[ \t]*#if MGLPPC_PROFILE[ \t]*\n"
+                  r"(?:(?![ \t]*#)[^\n]*\n)*[ \t]*#endif[ \t]*$",
+                  "", text, flags=re.M)
 
 
 class TextureOrder(unittest.TestCase):

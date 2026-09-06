@@ -44,7 +44,8 @@ static ULONG TimerRate;
                           (defined(__GNUC__) && defined(__PPC__)))
 /* The WarpOS PPC frontend has no 68k timer.device context; ReadEClock would
  * be a cross-CPU bridge call inside every measured section. Sample the
- * on-chip timebase instead and calibrate it once against dos.library Delay(). */
+ * on-chip timebase instead and calibrate it once against dos.library Delay().
+ * This clock also bounds mailbox waits: MGLPPC_PROFILE must not disable it. */
 #if defined(__VBCC__)
 extern void Delay(LONG ticks);
 static ULONG PPCRawClock(void) = "\tmftb\tr3";
@@ -247,8 +248,11 @@ void InitializeFrontendContext(struct MiniGLR200Context *context)
     context->deviceEpoch = 1;
     context->semanticStateSerial = 1;
     ResetPerf(context);
+    /* Autoreport sets the default; glHint can still enable runtime counters. */
 #if R200_PERF_AUTOREPORT
     context->perfEnabled = TRUE;
+#else
+    context->perfEnabled = FALSE;
 #endif
     for (textureIndex = 0; textureIndex < MAX_TEXTURES; ++textureIndex) {
         context->textures[textureIndex].minFilter = GL_NEAREST;

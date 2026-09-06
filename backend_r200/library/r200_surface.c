@@ -1416,30 +1416,31 @@ void Lib_mglSwitchDisplay(void)
         perfStart = PerfClock();
     }
     {
-        /* Same short-circuit order as the && chain below, but recording
-         * which stage failed: the failure path is otherwise completely
-         * silent and the frame counters never advance (the PPCPERF_LIVE
-         * gate then never fires), so logs show a wedge with no cause. */
-        static ULONG sdEnters, sdFails;
+        /* Preserve short-circuit submission order; trace builds also record
+         * which stage failed, even when perf frame counters are disabled. */
         BOOL flushOk, submitOk, barrierOk;
+#if MGLPPC_PROFILE || MGLPPC_CLIENT_TRACE
+        static ULONG sdEnters;
         ++sdEnters;
         if (sdEnters <= 8UL || (sdEnters & 511UL) == 0UL)
             R200PPCConsolePrintf("RING sd enter n=%lu\n",
                                  (unsigned long)sdEnters);
         R200PPCTraceUL("sd enter n", sdEnters);
+#endif
         flushOk = FlushScreenVertices(context);
         submitOk = flushOk ? SubmitAndWait(context) : FALSE;
         barrierOk = (flushOk && submitOk) ?
             R200PPCPlatformBarrier(context, TRUE) : FALSE;
         if (!barrierOk) {
+#if MGLPPC_CLIENT_TRACE
+            static ULONG sdFails;
             ++sdFails;
             if (sdFails <= 16UL || (sdFails & 1023UL) == 0UL) {
                 R200PPCTraceUL("sd FAIL n", sdFails);
                 R200PPCTraceUL2("sd FAIL flush", flushOk ? 1UL : 0UL,
                                 "submit", submitOk ? 1UL : 0UL);
             }
-        }
-        if (!barrierOk) {
+#endif
             SetError(context, GL_INVALID_OPERATION);
             return;
         }
