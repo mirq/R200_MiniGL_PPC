@@ -17,9 +17,13 @@ void MGLPPCTransportClose(MGLPPCTransport *transport)
      * There is no safe local cancellation; host loss requires the same cold
      * recovery as any other interrupted hardware command. */
     if (transport->pendingMessage != NULL) {
+#if MGLPPC_CLIENT_TRACE
         R200PPCTraceStr("tclose drain enter");
+#endif
         (void)MGLPPCTransportWait(transport, transport->pendingMessage);
+#if MGLPPC_CLIENT_TRACE
         R200PPCTraceStr("tclose drain exit");
+#endif
     }
     if (transport->replyPort != NULL)
         DeleteMsgPort(transport->replyPort);
@@ -77,8 +81,10 @@ BOOL MGLPPCTransportWait(MGLPPCTransport *transport, MGLPPCMessage *message)
     struct Message *reply;
     ULONG sequence;
     ULONG version;
+#if MGLPPC_CLIENT_TRACE
     static ULONG twWaits;
     BOOL traced;
+#endif
 
     if (transport->replyPort == NULL || transport->pendingMessage != message)
         return FALSE;
@@ -90,17 +96,23 @@ BOOL MGLPPCTransportWait(MGLPPCTransport *transport, MGLPPCMessage *message)
     /* WaitPort() below is unbounded: a lost host reply blocks this task
      * forever at zero CPU. Trace the first waits so a wedged process's
      * trace file ends on a "twait enter" line with no matching exit. */
+#if MGLPPC_CLIENT_TRACE
     traced = ++twWaits <= 8UL;
     if (traced)
         R200PPCTraceUL("twait enter seq", sequence);
+#endif
     WaitPort(transport->replyPort);
     reply = GetMsg(transport->replyPort);
     transport->pendingMessage = NULL;
+#if MGLPPC_CLIENT_TRACE
     if (traced)
         R200PPCTraceUL("twait exit seq", sequence);
+#endif
     if (reply != &message->execMessage) {
+#if MGLPPC_CLIENT_TRACE
         if (traced)
             R200PPCTraceStr("twait foreign reply");
+#endif
         return FALSE;
     }
 

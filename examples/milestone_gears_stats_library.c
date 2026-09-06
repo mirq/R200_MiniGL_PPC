@@ -69,6 +69,14 @@ struct IntuitionBase *IntuitionBase;
 #define D(x) do { printf x; } while (0)
 #endif
 
+/* Diagnostic output gate (default off): per-line teardown marker log on
+ * DH2: and the console FPS fallback both cost console/FFS writes that
+ * dominate frame time. Define 1 to re-enable. The GEARS_RUN summary and
+ * the window-title FPS readout stay on. */
+#ifndef MGL_GEARS_DIAG
+#define MGL_GEARS_DIAG 0
+#endif
+
 
 #ifndef M_PI
 #define M_PI 3.14159265
@@ -518,11 +526,13 @@ static void DrawFPSOverlay(void)
 	{
 		SetWindowTitles(win, g_fps_text, (UBYTE *)~0UL);
 	}
+#if MGL_GEARS_DIAG
 	else
 	{
 		printf("\r%s   ", g_fps_text);
 		fflush(stdout);
 	}
+#endif
 }
 
 static void oneFrame(void)
@@ -605,12 +615,16 @@ static void oneFrame(void)
  * MiniGLClose never returned. */
 static void MarkLog(const char *line)
 {
+#if MGL_GEARS_DIAG
 	BPTR fh = Open((STRPTR)"DH2:wosbuild/gears_client.log", MODE_OLDFILE);
 	if (!fh)
 		return;
 	Seek(fh, 0, OFFSET_END);
 	Write(fh, (APTR)line, (LONG)strlen(line));
 	Close(fh);
+#else
+	(void)line;
+#endif
 }
 
 static void keys(char c)

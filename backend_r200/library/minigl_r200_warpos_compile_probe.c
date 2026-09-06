@@ -1,5 +1,10 @@
 /* Compile/link probe for the production R200 source under vbcc/WarpOS. */
 #define NO_INLINE_LIBCALLS 1
+/* DH2:wosbuild/mglppc_client.log trace logger. Default off: every emitted
+ * line costs a 68k-side Open/Seek/Write/Close cycle. Define 1 to re-enable. */
+#ifndef MGLPPC_CLIENT_TRACE
+#define MGLPPC_CLIENT_TRACE 0
+#endif
 /* The configured NDK clib headers annotate m68k entry points with this token.
  * For a compile-only PPC pass they are declarations, never linked calls. */
 #ifndef __stdargs
@@ -108,6 +113,7 @@ static ULONG TraceLines;
 
 void R200PPCTraceOpen(void)
 {
+#if MGLPPC_CLIENT_TRACE
     BPTR fh;
     if (TraceCreated == TRACE_CREATED)
         return;
@@ -117,6 +123,9 @@ void R200PPCTraceOpen(void)
         Close(fh);
     TraceCreated = TRACE_CREATED;
     TraceLines = 0;
+#else
+    TraceCreated = TRACE_CREATED;
+#endif
 }
 
 void R200PPCTraceClose(void)
@@ -143,6 +152,7 @@ static void TraceHex(char **p, ULONG value)
 static void TraceEmit(const char *label1, ULONG value1,
                       const char *label2, ULONG value2, int mode)
 {
+#if MGLPPC_CLIENT_TRACE
     char buf[208];
     char *p = buf;
     ULONG len;
@@ -191,6 +201,13 @@ static void TraceEmit(const char *label1, ULONG value1,
     Seek(fh, 0, OFFSET_END);
     (void)Write(fh, buf, len);
     Close(fh);
+#else
+    (void)label1;
+    (void)value1;
+    (void)label2;
+    (void)value2;
+    (void)mode;
+#endif
 }
 
 void R200PPCTraceStr(const char *line)

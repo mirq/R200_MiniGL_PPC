@@ -13,6 +13,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/* DH2:wosbuild/mglppc_host.log trace logger + 2-second poll/stage console
+ * reports. Default off: each emitted line costs a 68k Open/Seek/Write/Close
+ * cycle and console.device writes dominate frame time. Define 1 to enable. */
+#ifndef MGLPPC_HOST_TRACE
+#define MGLPPC_HOST_TRACE 0
+#endif
+
 #include <libraries/minigl_ppc_protocol.h>
 #include <dos/dos.h>
 #include <proto/dos.h>
@@ -466,14 +473,17 @@ static ULONG HostClock(void)
  * readable while the host lives. */
 static void HostTraceOpen(void)
 {
+#if MGLPPC_HOST_TRACE
     BPTR fh = Open((STRPTR)"DH2:wosbuild/mglppc_host.log",
                    MODE_NEWFILE);
     if (fh)
         Close(fh);
+#endif
 }
 
 static void HostTraceLine(const char *line)
 {
+#if MGLPPC_HOST_TRACE
     BPTR fh = Open((STRPTR)"DH2:wosbuild/mglppc_host.log",
                    MODE_OLDFILE);
     if (!fh)
@@ -481,6 +491,9 @@ static void HostTraceLine(const char *line)
     Seek(fh, 0, OFFSET_END);
     Write(fh, (APTR)line, (LONG)strlen(line));
     Close(fh);
+#else
+    (void)line;
+#endif
 }
 
 #define HOST_STAGE(field, stage) \
@@ -2863,8 +2876,9 @@ int main(int argc, char **argv)
         }
         if (HostClockHz &&
             loopStart - lastReport > HostClockHz * 2UL) {
-            char rep[256];
             lastReport = loopStart;
+#if MGLPPC_HOST_TRACE
+            char rep[256];
             sprintf(rep, "host: poll loops=%lu mb=%luus(%lu) fence=%luus(%lu) "
                    "evt=%luus ring=%luus\n",
                    (unsigned long)pollLoops,
@@ -2888,6 +2902,7 @@ int main(int argc, char **argv)
                    (unsigned long)(HostPresentCount - lastPresents));
             printf("%s", rep);
             HostTraceLine(rep);
+#endif
             lastSubmit = HostSubmitTicks;
             lastPresentWait = HostPresentWaitTicks;
             lastPresent = HostPresentTicks;
