@@ -23,6 +23,11 @@
 #define MGLPPC_PACING 0
 #endif
 
+/* Set 0 only for an otherwise identical lookup-cost comparison. */
+#ifndef MGLPPC_HOST_TARGET_CACHE
+#define MGLPPC_HOST_TARGET_CACHE 1
+#endif
+
 /* DH2:wosbuild/mglppc_host.log trace logger. Default off: each emitted line
  * costs a 68k Open/Seek/Write/Close cycle. Define 1 to enable file traces;
  * MGLPPC_PROFILE also enables the 2-second poll/stage console reports. */
@@ -277,8 +282,15 @@ static BOOL QueryBackendBridge(MGLR200PrivateBridgeV1 *bridge)
            bridge->batchDwords;
 }
 
+#if MGLPPC_PROFILE
+static ULONG HostBridgeQueries, HostBridgeCacheHits;
+#endif
+
 static BOOL QueryBackendBridgeV2(MGLR200PrivateBridgeV2 *bridge)
 {
+#if MGLPPC_PROFILE
+    ++HostBridgeQueries;
+#endif
     memset(bridge, 0, sizeof(*bridge));
     glGetIntegerv(MGL_R200_PRIVATE_BRIDGE_V2_QUERY, (GLint *)bridge);
     return bridge->version == MGL_R200_PRIVATE_BRIDGE_V2_VERSION &&
@@ -898,6 +910,10 @@ static ULONG RingPoll(MGLPPCHostState *state)
 {
     volatile MGLPPCRingControlV1 *control = state->ringControl;
     MGLR200PrivateBridgeV2 bridge;
+    /* No native control handler runs inside this burst. PRESENT can change
+     * TargetSurface, so it invalidates below. Returning drops the snapshot
+     * before mailbox, lifecycle, resize or other native calls can run. */
+    BOOL bridgeValid = FALSE;
 #if MGLPPC_PROFILE
     ULONG ringStart;
 #endif
@@ -940,6 +956,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
          * apply changes before executing the slot so the present mode
          * (blit vs vblank-locked flip) follows the client's mglEnableSync. */
         if (control->syncSeq != state->ringSyncSeq) {
+            bridgeValid = FALSE;
             state->ringSyncSeq = control->syncSeq;
             mglEnableSync(control->syncEnabled ? GL_TRUE : GL_FALSE);
         }
@@ -1017,7 +1034,11 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 state->displayLocked = 1;
             }
             HOST_START(stageStart);
-            if (!QueryBackendBridgeV2(&bridge) ||
+#if MGLPPC_PROFILE
+            if (bridgeValid)
+                ++HostBridgeCacheHits;
+#endif
+            if ((!bridgeValid && !QueryBackendBridgeV2(&bridge)) ||
                 bridge.deviceEpoch != state->ringDeviceEpoch) {
                 mglUnlockDisplay();
                 state->displayLocked = 0;
@@ -1028,6 +1049,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 control->error = 1;
                 break;
             }
+            bridgeValid = MGLPPC_HOST_TARGET_CACHE;
             if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
                 !state->headerLogged) {
                 ULONG hi;
@@ -1066,6 +1088,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 struct Radeon3DInfo info;
                 BOOL retry = FALSE;
 
+                bridgeValid = FALSE;
                 memset(&info, 0, sizeof(info));
                 info.Size = sizeof(info);
                 if (Radeon3DGetInfo(
@@ -1159,7 +1182,11 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 state->displayLocked = 1;
             }
             HOST_START(stageStart);
-            if (!QueryBackendBridgeV2(&bridge) ||
+#if MGLPPC_PROFILE
+            if (bridgeValid)
+                ++HostBridgeCacheHits;
+#endif
+            if ((!bridgeValid && !QueryBackendBridgeV2(&bridge)) ||
                 bridge.deviceEpoch != state->ringDeviceEpoch) {
                 printf("MiniGLPPC host: commit_bridge_fail epoch=%lu\n",
                        (unsigned long)bridge.deviceEpoch);
@@ -1169,6 +1196,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 control->error = 1;
                 break;
             }
+            bridgeValid = MGLPPC_HOST_TARGET_CACHE;
             HOST_STAGE(HostQueryTicks, stageStart);
             memset(&batch, 0, sizeof(batch));
             batch.Size = sizeof(batch);
@@ -1253,13 +1281,18 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 state->displayLocked = 1;
             }
             HOST_START(stageStart);
-            if (!QueryBackendBridgeV2(&bridge) ||
+#if MGLPPC_PROFILE
+            if (bridgeValid)
+                ++HostBridgeCacheHits;
+#endif
+            if ((!bridgeValid && !QueryBackendBridgeV2(&bridge)) ||
                 bridge.deviceEpoch != state->ringDeviceEpoch) {
                 mglUnlockDisplay();
                 state->displayLocked = 0;
                 control->error = 1;
                 break;
             }
+            bridgeValid = MGLPPC_HOST_TARGET_CACHE;
             HOST_STAGE(HostQueryTicks, stageStart);
             /* After the CRC check: the patch changes the slot contents. */
             PatchRecordTargets(slotAddr, entry.dwords,
@@ -1287,6 +1320,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
         state->ringCompleted++;
         processed++;
         if (entry.flags & MGLPPC_SEMANTIC_FLAG_PRESENT) {
+            bridgeValid = FALSE;
             HOST_START(stageStart);
             if (!DrainSemanticFence(state)) {
                 printf("MiniGLPPC host: present_drain_fail fence=%lu "
@@ -3104,6 +3138,11 @@ int main(int argc, char **argv)
         printf("MiniGLPPC host: mailbox=%lu mailbox_us=%lu\n",
                (unsigned long)HostMailboxCount,
                (unsigned long)ProbeMicros(0, HostMailboxTicks));
+        printf("HOST_BRIDGE_CACHE enabled=%lu scope=ring_poll_burst "
+               "v2_queries_including_registration=%lu hits=%lu\n",
+               (unsigned long)MGLPPC_HOST_TARGET_CACHE,
+               (unsigned long)HostBridgeQueries,
+               (unsigned long)HostBridgeCacheHits);
     }
     if (HostExecuteCount && HostClockHz) {
         printf("MiniGLPPC host: executes=%lu presents=%lu eclock_hz=%lu\n",
