@@ -118,17 +118,27 @@ void ReleaseStreamSegment(struct MiniGLR200Context *context)
 void ReapDeferredSegments(struct MiniGLR200Context *context)
 {
 #if R200_ASYNC_ROTATION
-    ULONG index, kept;
+    ULONG index, kept, slotIndex;
     if (!context->deferredSegmentCount)
         return;
     for (index = 0, kept = 0; index < context->deferredSegmentCount;
          ++index) {
         struct DeferredSegment *entry = &context->deferredSegments[index];
-        if (entry->deviceEpoch != context->deviceEpoch ||
-            Radeon3DTestFence(context->device, entry->fence)) {
-            (void)Radeon3DFreeSegment(context->device, entry->segmentId);
-        } else {
+        BOOL pending = FALSE;
+        if (!context->device || entry->deviceEpoch != context->deviceEpoch)
+            continue; /* The closed device already released this lease. */
+        /* A slot is reset only after retirement (or device invalidation).
+         * Historical public fence tokens cannot be polled after a new submit. */
+        for (slotIndex = 0; slotIndex < SUBMIT_SLOT_COUNT; ++slotIndex) {
+            struct SubmitSlot *slot = &context->submitSlots[slotIndex];
+            if (slot->inFlight && slot->deviceEpoch == entry->deviceEpoch &&
+                slot->fence == entry->fence)
+                pending = TRUE;
+        }
+        if (pending) {
             context->deferredSegments[kept++] = *entry;
+        } else {
+            (void)Radeon3DFreeSegment(context->device, entry->segmentId);
         }
     }
     context->deferredSegmentCount = kept;
@@ -317,6 +327,7 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
 
     Radeon3DClose(context->device);
     context->device=NULL;
+    ReapDeferredSurfaces(context);
     InvalidateSubmissionState(context);
     /* Every captured surface handle belongs to the old device. Submitted
      * work is already lost on recovery, so do not retain an unflushable

@@ -23,14 +23,23 @@
 #define MGLPPC_PACING 0
 #endif
 
+#ifndef MGLPPC_IDLE_DIAG
+#define MGLPPC_IDLE_DIAG 0
+#endif
+
+#if MGLPPC_IDLE_DIAG
+static ULONG IdleEmptySleeps, IdleActiveSleeps, IdleRenderSleeps;
+static ULONG IdleActiveTicks, IdleRenderTicks, IdleWakeBacklog;
+#endif
+
 /* Set 0 only for an otherwise identical lookup-cost comparison. */
 #ifndef MGLPPC_HOST_TARGET_CACHE
 #define MGLPPC_HOST_TARGET_CACHE 1
 #endif
 
 /* DH2:wosbuild/mglppc_host.log trace logger. Default off: each emitted line
- * costs a 68k Open/Seek/Write/Close cycle. Define 1 to enable file traces;
- * MGLPPC_PROFILE also enables the 2-second poll/stage console reports. */
+ * costs a 68k Open/Seek/Write/Close cycle. Define 1 to enable file traces.
+ * MGLPPC_PROFILE keeps counters in RAM and reports after shutdown cleanup. */
 #ifndef MGLPPC_HOST_TRACE
 #define MGLPPC_HOST_TRACE 0
 #endif
@@ -42,6 +51,11 @@
 #include <proto/radeon3d.h>
 #include <proto/minigl.h>
 #include <clib/minigl_open_protos.h>
+#include <libraries/minigl_ppc_ib_trace.h>
+
+#if MGLPPC_PROFILE
+#include <libraries/minigl_perf.h>
+#endif
 
 typedef struct MGLPPCHostState {
     int backendOpen;
@@ -54,6 +68,11 @@ typedef struct MGLPPCHostState {
     UBYTE *uploadPixels;
     ULONG uploadBytes;
     ULONG uploadReceived;
+    ULONG indirectProbeOk;
+    int ibDryRun;
+    BOOL cpEnabled, cpSegmentLeased, cpFailed;
+    struct Radeon3DSegment cpSegment;
+    ULONG cpColorToken, cpDispatches, cpDwords;
     ULONG uploadArgs[8];
     /* Native glGetIntegerv exposes neither pack nor unpack. Track host writes. */
     GLint unpack[4];
@@ -79,6 +98,7 @@ typedef struct MGLPPCHostState {
     ULONG mailboxSerial;
     int mailboxDisabled;
     ULONG ringSegmentId;
+    int ringSegmentLeased;
     ULONG ringDeviceEpoch;
     ULONG ringDeviceGeneration;
     ULONG ringDeviceToken;
@@ -98,6 +118,7 @@ typedef struct MGLPPCHostState {
     int sharedLogged;
     int directDisabled;
     int headerLogged;
+    int indirectOkLogged;
     ULONG uploadCount;
     ULONG uploadFails;
     ULONG lastHeartbeat;
@@ -300,15 +321,8 @@ static BOOL QueryBackendBridgeV2(MGLR200PrivateBridgeV2 *bridge)
            bridge->batchDwords;
 }
 
-/* Stamp the live color target into every draw record of a client batch.
- * The client builds its records against the surface handle it learned at
- * context create and caches them across frames; only the host runs the
- * fullscreen flip machine and knows which screen buffer is the drawing
- * buffer now. Without this the client keeps painting one buffer while the
- * display rotates through all of them, so the un-rendered buffers show up
- * as grey frames. Records are chained by their dword[1] length and carry
- * the target in dword[2]; the slot is host-owned until it completes, so
- * patching in place is safe and keeps the zero-copy submit path. */
+/* Stamp the live target while the host owns the slot. Fullscreen presents can
+ * rotate away from the target token originally mirrored by the PPC. */
 static void PatchRecordTargets(ULONG *records, ULONG recordDwords,
                                ULONG targetToken)
 {
@@ -329,6 +343,18 @@ static void PatchRecordTargets(ULONG *records, ULONG recordDwords,
         records[offset + 2UL] = targetToken;
         offset += length;
     }
+}
+
+/* Sonnet's legacy LoadSeg heuristic scans every hunk for the uppercase RACE
+ * signature. Embedding the full upload-trace option name misclassifies this
+ * 68k host as PPC, redirecting loading/allocations to PPC memory. Volatile
+ * construction preserves the public option name without emitting that marker.
+ * check_68k_host.py verifies the linked executable, not just this source. */
+static LONG ReadUploadTraceOption(UBYTE *value, LONG bytes)
+{
+    volatile UBYTE name[] = "MGLPPC_UPLOAD_T?ACE";
+    name[15] = 'R';
+    return GetVar((CONST_STRPTR)name, value, bytes, GVF_GLOBAL_ONLY);
 }
 
 static BOOL QueryBackendSubimage(BOOL hasContext)
@@ -463,7 +489,7 @@ static void PollQueuedFence(MGLPPCHostState *state)
         state->ringControl->retired = state->ringCompleted;
         return;
     }
-    if (!(state->ringRadeonCaps & RADEON3D_CAP_ORDERED_COMMITS)) {
+    if (!state->cpEnabled && !(state->ringRadeonCaps & RADEON3D_CAP_ORDERED_COMMITS)) {
         /* Without ordered commits every entry executes synchronously on
          * this task, so a drained ring means all reads are done. */
         state->semanticFence = 0;
@@ -472,7 +498,7 @@ static void PollQueuedFence(MGLPPCHostState *state)
         return;
     }
     fullMask = (1UL << state->vertexSegmentCount) - 1UL;
-    if ((state->queuedSegmentMask & fullMask) != fullMask &&
+    if (!state->cpEnabled && (state->queuedSegmentMask & fullMask) != fullMask &&
         !(state->queuedSegmentMask))
         return;
     if (!Radeon3DTestFence(
@@ -482,6 +508,8 @@ static void PollQueuedFence(MGLPPCHostState *state)
     state->semanticFence = 0;
     state->queuedSegmentMask = 0;
     state->ringControl->retired = state->ringCompleted;
+    if (state->cpEnabled)
+        CacheClearE((APTR)&state->ringControl->retired, sizeof(ULONG), CACRF_ClearD);
 }
 
 /* Cheap shutdown counts are not activity latches or benchmark timings. */
@@ -511,6 +539,12 @@ static ULONG HostMailboxTicks;
 static ULONG HostIdleTicks;
 static ULONG HostWallStart;
 static ULONG HostWallTicks;
+static ULONG HostPollLoops;
+static ULONG HostMailboxPollTicks, HostMailboxPollCalls;
+static ULONG HostFencePollTicks, HostFencePollCalls;
+static ULONG HostEventPollTicks, HostEventPollCalls;
+static GLenum HostNativeEnableError;
+static BOOL HostNativeReported;
 
 static ULONG HostClock(void)
 {
@@ -521,6 +555,104 @@ static ULONG HostClock(void)
     if (!HostClockHz)
         HostClockHz = frequency;
     return clockValue.ev_lo;
+}
+
+static const struct { GLenum name; const char *label; } HostNativeCounters[] = {
+    { MGL_PERF_CLOCK_RATE, "clock_hz" },
+    { MGL_PERF_FRAMES, "frames" },
+    { MGL_PERF_SERIALIZE_TICKS, "serialize_ticks" },
+    { MGL_PERF_EXECUTE_TICKS, "execute_ticks" },
+    { MGL_PERF_WAIT_TICKS, "wait_ticks" },
+    { MGL_PERF_PRESENT_TICKS, "present_ticks" },
+    { MGL_PERF_TEXTURE_RESIDENCY_TICKS, "residency_ticks" },
+    { MGL_PERF_TEXTURE_UPLOAD_TICKS, "upload_ticks" },
+    { MGL_PERF_TEXTURE_UPLOAD_BYTES, "upload_bytes" },
+    { MGL_PERF_TEXTURE_UPLOAD_COPIES, "upload_copies" },
+    { MGL_PERF_TEXTURE_UPLOAD_UPDATES, "upload_updates" },
+    { MGL_PERF_TEXTURE_UPLOAD_COALESCED, "upload_coalesced" },
+    { MGL_PERF_TEXTURE_UPLOAD_BARRIERS, "upload_barriers" },
+    { MGL_PERF_TEXTURE_UPLOAD_DEFERRED, "upload_deferred" },
+    { MGL_PERF_TEXTURE_EVICTIONS, "texture_evictions" },
+    { MGL_PERF_SUBMITS, "submits" },
+    { MGL_PERF_ASYNC_SUBMITS, "async_submits" },
+    { MGL_PERF_FENCE_WAITS, "fence_waits" },
+    { MGL_PERF_FENCE_POLL_HITS, "fence_poll_hits" },
+    { MGL_PERF_TEXTURE_WAITS, "texture_waits" },
+    { MGL_PERF_BUFFER_WAITS, "buffer_waits" },
+    { MGL_PERF_DRAIN_WAITS, "drain_waits" },
+    { MGL_PERF_EXECUTE_FAILURES, "execute_failures" },
+    { MGL_PERF_WAIT_FAILURES, "wait_failures" }
+};
+enum { HOST_NATIVE_COUNTER_COUNT =
+    sizeof(HostNativeCounters) / sizeof(HostNativeCounters[0]) };
+static struct HostNativeProfileRecord {
+    ULONG contextId;
+    GLenum enableError, pendingError;
+    GLint values[HOST_NATIVE_COUNTER_COUNT];
+    GLenum queryErrors[HOST_NATIVE_COUNTER_COUNT];
+} HostNativeRecords[8];
+static ULONG HostNativeRecordCount, HostNativeOverflow;
+
+static void HostNativeProfileCapture(const MGLPPCHostState *state)
+{
+    struct HostNativeProfileRecord *record;
+    ULONG index;
+
+    if (!state->context || HostNativeReported)
+        return;
+    /* Keep the per-context guard even for an overflowed snapshot. */
+    HostNativeReported = TRUE;
+    if (HostNativeRecordCount >=
+        sizeof(HostNativeRecords) / sizeof(HostNativeRecords[0])) {
+        ++HostNativeOverflow;
+        return;
+    }
+    record = &HostNativeRecords[HostNativeRecordCount++];
+    record->contextId = state->contextId;
+    record->enableError = HostNativeEnableError;
+    /* Teardown only, before DiscardSemantic can clear a pending GL error.
+     * Separate rendering errors from query errors without doing any I/O. */
+    record->pendingError = glGetError();
+    for (index = 0; index < HOST_NATIVE_COUNTER_COUNT; ++index) {
+        record->values[index] = 0;
+        glGetIntegerv(HostNativeCounters[index].name, &record->values[index]);
+        record->queryErrors[index] = glGetError();
+    }
+}
+
+static void HostNativeProfileReport(void)
+{
+    ULONG slot, index;
+
+    printf("HOST_NATIVE cache_capacity=%lu records=%lu overflow_contexts=%lu "
+           "overflow_policy=drop_new output=after_cleanup\n",
+           (unsigned long)(sizeof(HostNativeRecords) / sizeof(HostNativeRecords[0])),
+           (unsigned long)HostNativeRecordCount, (unsigned long)HostNativeOverflow);
+    for (slot = 0; slot < HostNativeRecordCount; ++slot) {
+        const struct HostNativeProfileRecord *record = &HostNativeRecords[slot];
+        ULONG queryErrors = 0;
+
+        printf("HOST_NATIVE context=%lu scope=whole_context_including_setup "
+               "end=before_teardown counter_bits=32 "
+               "coverage=native_backend_only excludes=host_direct_service_calls "
+               "overlaps_host_stages=1 "
+               "enable_error=%lu pending_gl_error=%lu\n",
+               (unsigned long)record->contextId,
+               (unsigned long)record->enableError,
+               (unsigned long)record->pendingError);
+        for (index = 0; index < HOST_NATIVE_COUNTER_COUNT; ++index) {
+            if (record->queryErrors[index] != GL_NO_ERROR)
+                ++queryErrors;
+            printf("HOST_NATIVE context=%lu %s=%lu query_error=%lu\n",
+                   (unsigned long)record->contextId,
+                   HostNativeCounters[index].label,
+                   (unsigned long)(ULONG)record->values[index],
+                   (unsigned long)record->queryErrors[index]);
+        }
+        printf("HOST_NATIVE context=%lu query_errors=%lu\n",
+               (unsigned long)record->contextId, (unsigned long)queryErrors);
+    }
+    fflush(stdout);
 }
 #endif
 
@@ -563,11 +695,28 @@ static void HostTraceLine(const char *line)
 #define HOST_STAGE(field, stage) do { } while (0)
 #endif
 
-static void DiscardSemantic(MGLPPCHostState *state)
+static BOOL DiscardSemantic(MGLPPCHostState *state)
 {
+    /* A lifecycle request is the producer's quiescence handshake. Never
+     * release GPU-readable leases after an error or an unconsumed publish. */
+    if (state->cpSegmentLeased &&
+        (state->cpFailed || (state->ringControl &&
+         (state->ringControl->error || state->ringCompleted != state->ringControl->head)) ||
+         !DrainSemanticFence(state)))
+        return FALSE;
     /* Main loop drains published mailbox work before any lifecycle message. */
     state->mailbox = NULL;
     (void)DrainSemanticFence(state);
+    if (state->cpSegmentLeased) {
+        ULONG index;
+        for (index = 0; index < state->vertexSegmentCount; ++index)
+            (void)Radeon3DFreeSegment((struct Radeon3DDevice *)state->ringDeviceToken,
+                                     state->vertexSegmentIds[index]);
+        (void)Radeon3DFreeSegment((struct Radeon3DDevice *)state->ringDeviceToken,
+                                 state->cpSegment.Id);
+        state->cpSegmentLeased = FALSE;
+    }
+    state->cpEnabled = FALSE;
     if (state->displayLocked) {
         mglUnlockDisplay();
         state->displayLocked = 0;
@@ -585,7 +734,7 @@ static void DiscardSemantic(MGLPPCHostState *state)
         state->hostEventsEnabled = 0;
     }
     /* A registration can acquire a lease before its CPU view is validated. */
-    if (state->context && state->ringSegmentId) {
+    if (state->context && state->ringSegmentLeased) {
         MGLR200PrivateSegmentFreeV1 segmentFree;
         memset(&segmentFree, 0, sizeof(segmentFree));
         segmentFree.segmentId = state->ringSegmentId;
@@ -594,6 +743,8 @@ static void DiscardSemantic(MGLPPCHostState *state)
         (void)glGetError();
     }
     state->ringSegmentId = 0;
+    state->ringSegmentLeased = 0;
+    state->indirectProbeOk = 0;
     memset(state->semanticSlots, 0, sizeof(state->semanticSlots));
     memset(state->semanticGeneration, 0, sizeof(state->semanticGeneration));
     state->semanticRegistered = 0;
@@ -610,6 +761,7 @@ static void DiscardSemantic(MGLPPCHostState *state)
         Radeon9200Base = NULL;
         state->semanticDriverOpen = 0;
     }
+    return TRUE;
 }
 
 static BOOL RegisterSemanticSlots(MGLPPCMessage *message,
@@ -664,6 +816,35 @@ static BOOL RegisterSemanticSlots(MGLPPCMessage *message,
     return TRUE;
 }
 
+static BOOL QueryBackendIndirect(void)
+{
+    MGLR200PrivateIndirectDispatchV1 probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.flags = MGL_R200_PRIVATE_INDIRECT_PROBE;
+    (void)glGetError();
+    glGetIntegerv(MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_QUERY,
+                  (GLint *)&probe);
+    return glGetError() == GL_NO_ERROR &&
+           probe.version == MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_VERSION &&
+           probe.structSize == sizeof(probe) &&
+           probe.flags == MGL_R200_PRIVATE_INDIRECT_SUPPORTED &&
+           !probe.fenceOut;
+}
+
+static BOOL QueryCpSurface(MGLPPCHostState *state, ULONG token,
+                           MGLR200PrivateSurfaceV1 *surface)
+{
+    memset(surface, 0, sizeof(*surface));
+    surface->surfaceToken = token;
+    (void)glGetError();
+    glGetIntegerv(MGL_R200_PRIVATE_SURFACE_V1_QUERY, (GLint *)surface);
+    return glGetError() == GL_NO_ERROR &&
+        surface->version == MGL_R200_PRIVATE_SURFACE_V1_VERSION &&
+        surface->structSize == sizeof(*surface) && surface->surfaceToken == token &&
+        surface->deviceEpoch == state->ringDeviceEpoch &&
+        surface->generation == state->ringDeviceGeneration && surface->cpuAddress;
+}
+
 static BOOL RegisterSemanticRing(MGLPPCMessage *message,
                                  MGLPPCHostState *state)
 {
@@ -674,6 +855,7 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     ULONG count = message->value[0];
     ULONG slotDwords = message->value[1];
     ULONG index;
+    BOOL cpRequested = (message->value[3] & MGLPPC_RING_REGISTER_CP_EMIT) != 0;
 
     /* A failed first registration must never leave an enabled mailbox. A
      * duplicate registration preserves the live session and is rejected. */
@@ -692,6 +874,11 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         slotDwords != MGLPPC_SEMANTIC_SLOT_DWORDS ||
         message->payloadWords != count) {
         message->status = MGLPPC_STATUS_BAD_PAYLOAD;
+        return FALSE;
+    }
+    if (cpRequested && (message->protocolVersion != MGLPPC_PROTOCOL_VERSION ||
+        (message->value[3] & MGLPPC_RING_REGISTER_INDIRECT) || !state->contextWindowed)) {
+        message->status = MGLPPC_STATUS_UNSUPPORTED;
         return FALSE;
     }
     for (index = 0; index < count; ++index) {
@@ -723,7 +910,17 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     state->ringDeviceToken = bridge.deviceToken;
     state->ringRadeonCaps = info.Caps;
     state->queuedSegmentMask = 0;
-    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+    state->indirectProbeOk =
+        (message->value[3] & MGLPPC_RING_REGISTER_INDIRECT) &&
+        (info.Caps & RADEON3D_CAP_INDIRECT_DISPATCH) && QueryBackendIndirect();
+    if (cpRequested && (info.Caps & (RADEON3D_CAP_INDIRECT_DISPATCH |
+                                   RADEON3D_CAP_INDIRECT_RENDER)) !=
+                                  (RADEON3D_CAP_INDIRECT_DISPATCH |
+                                   RADEON3D_CAP_INDIRECT_RENDER)) {
+        message->status = MGLPPC_STATUS_UNSUPPORTED;
+        goto failed;
+    }
+    if (MGLPPC_HOST_TRACE || state->verboseUploads) {
         printf("MiniGLPPC host: ring caps=%08lx ordered=%lu gen=%lu\n",
                (unsigned long)info.Caps,
                (unsigned long)((info.Caps & RADEON3D_CAP_ORDERED_COMMITS)
@@ -744,12 +941,15 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
 #endif
     memset(&segment, 0, sizeof(segment));
     segment.bytes = MGLPPC_RING_SEGMENT_BYTES;
-    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+    if (MGLPPC_HOST_TRACE || state->verboseUploads) {
         printf("MiniGLPPC host: msg=ring_reg\n");
         fflush(stdout);
     }
     glGetIntegerv(MGL_R200_PRIVATE_SEGMENT_V1_QUERY, (GLint *)&segment);
     state->ringSegmentId = segment.segmentId;
+    state->ringSegmentLeased =
+        segment.version == MGL_R200_PRIVATE_SEGMENT_V1_VERSION &&
+        segment.cpuAddress != 0;
     if (glGetError() != GL_NO_ERROR ||
         segment.version != MGL_R200_PRIVATE_SEGMENT_V1_VERSION ||
         !segment.cpuAddress ||
@@ -759,7 +959,7 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         message->status = MGLPPC_STATUS_UNSUPPORTED;
         goto failed;
     }
-    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+    if (MGLPPC_HOST_TRACE || state->verboseUploads) {
         printf("MiniGLPPC host: ring_seg=ok addr=%08lx bytes=%lu\n",
                (unsigned long)segment.cpuAddress,
                (unsigned long)segment.bytes);
@@ -824,10 +1024,62 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         ? MGLPPC_RING_REGISTER_HOST_EVENTS : 0;
     if (state->mailbox)
         message->value[3] |= MGLPPC_RING_REGISTER_MAILBOX;
+    if (state->indirectProbeOk) {
+        message->value[3] |= MGLPPC_RING_REGISTER_INDIRECT;
+        if (state->ibDryRun)
+            message->value[3] |= MGLPPC_RING_REGISTER_IB_DRY;
+    }
     message->value[4] = segment.bytes;
     state->vertexSegmentCount = 0;
+    if (cpRequested) {
+        MGLR200PrivateSurfaceV1 surface;
+        if (!QueryCpSurface(state, bridge.colorSurfaceToken, &surface)) {
+            message->status = MGLPPC_STATUS_UNSUPPORTED;
+            goto failed;
+        }
+        state->cpColorToken = bridge.colorSurfaceToken;
+        memset(&state->cpSegment, 0, sizeof(state->cpSegment));
+        state->cpSegment.Size = sizeof(state->cpSegment);
+        if (!Radeon3DAllocSegment((struct Radeon3DDevice *)state->ringDeviceToken,
+                                  MGLPPC_CP_SEGMENT_BYTES, &state->cpSegment)) {
+            message->status = MGLPPC_STATUS_NO_MEMORY;
+            goto failed;
+        }
+        state->cpSegmentLeased = TRUE;
+        if (state->cpSegment.Version != RADEON3D_SEGMENT_VERSION ||
+            !state->cpSegment.CpuAddress || ((ULONG)state->cpSegment.CpuAddress & 31UL) ||
+            state->cpSegment.Bytes < MGLPPC_CP_SEGMENT_BYTES ||
+            (ULONG)state->cpSegment.CpuAddress > 0xffffffffUL - state->cpSegment.Bytes) {
+            message->status = MGLPPC_STATUS_BAD_PAYLOAD;
+            goto failed;
+        }
+        message->value[5] = (ULONG)state->cpSegment.CpuAddress;
+        message->value[6] = state->cpSegment.Id;
+        message->value[7] = state->cpSegment.Bytes;
+    }
     for (index = 0; index < MGLPPC_VERTEX_SEGMENTS; ++index) {
         MGLR200PrivateSegmentV1 vertexSegment;
+        if (cpRequested) {
+            struct Radeon3DSegment vertex;
+            memset(&vertex, 0, sizeof(vertex));
+            vertex.Size = sizeof(vertex);
+            if (!Radeon3DAllocSegment((struct Radeon3DDevice *)state->ringDeviceToken,
+                                      RADEON3D_MAX_SEGMENT_BYTES, &vertex))
+                break;
+            state->vertexSegmentIds[state->vertexSegmentCount++] = vertex.Id;
+            if (!vertex.CpuAddress || ((ULONG)vertex.CpuAddress & 31UL) ||
+                vertex.Bytes != RADEON3D_MAX_SEGMENT_BYTES ||
+                (ULONG)vertex.CpuAddress > 0xffffffffUL - vertex.Bytes ||
+                vertex.GpuAddress > 0xffffffffUL - vertex.Bytes) {
+                message->status = MGLPPC_STATUS_BAD_PAYLOAD;
+                goto failed;
+            }
+            message->payload[index * 4UL] = (ULONG)vertex.CpuAddress;
+            message->payload[index * 4UL + 1UL] = vertex.Bytes;
+            message->payload[index * 4UL + 2UL] = vertex.Id;
+            message->payload[index * 4UL + 3UL] = vertex.GpuAddress;
+            continue;
+        }
         memset(&vertexSegment, 0, sizeof(vertexSegment));
         vertexSegment.bytes = RADEON3D_MAX_SEGMENT_BYTES;
         glGetIntegerv(MGL_R200_PRIVATE_SEGMENT_V1_QUERY,
@@ -844,11 +1096,27 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         message->payload[index * 3UL + 2UL] = vertexSegment.segmentId;
     }
     message->value[2] = state->vertexSegmentCount;
-    message->payloadWords = state->vertexSegmentCount * 3UL;
+    message->payloadWords = state->vertexSegmentCount * (cpRequested ? 4UL : 3UL);
+    if (cpRequested) {
+        if (state->vertexSegmentCount != MGLPPC_VERTEX_SEGMENTS) {
+            message->status = MGLPPC_STATUS_NO_MEMORY;
+            goto failed;
+        }
+        state->cpEnabled = TRUE;
+        state->cpFailed = FALSE;
+        message->value[3] |= MGLPPC_RING_REGISTER_CP_EMIT;
+    }
     /* Publish the new addresses and epoch before the producer may cache any
      * control lines (entry zero shares a line with the last slot addresses). */
     CacheClearE((APTR)control, sizeof(*control), CACRF_ClearD);
-    if (MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) {
+    if (state->indirectProbeOk) {
+        char line[160];
+        sprintf(line, "IBHOST registered mode=%s ctrl=%08lx segment=%lu epoch=%lu\n",
+                state->ibDryRun ? "dry" : "gpu", (unsigned long)control,
+                (unsigned long)state->ringSegmentId, (unsigned long)state->ringEpoch);
+        MGLPPCIBTrace("DH2:ibhost.log", line);
+    }
+    if (MGLPPC_HOST_TRACE || state->verboseUploads) {
         printf("MiniGLPPC host: ring_init_done vertex_segments=%lu\n",
                (unsigned long)state->vertexSegmentCount);
         fflush(stdout);
@@ -906,6 +1174,127 @@ static void PollContextEvents(MGLPPCHostState *state)
  * are cacheable and get the same dcbf/CacheClearE discipline as the v10
  * message path. Returns elapsed ticks (at least one for processed work) with
  * profiling, or the processed count without it; zero means no work. */
+static BOOL ExecuteIndirectSmoke(MGLPPCHostState *state,
+                                  const MGLPPCRingEntryV1 *entry,
+                                  ULONG *slotAddr)
+{
+    MGLR200PrivateIndirectDispatchV1 dispatch;
+    MGLR200PrivateBridgeV2 bridge;
+    volatile ULONG *words;
+    ULONG offset, count, i;
+    char line[256];
+    const char *failure = "descriptor";
+
+    /* This is a single startup smoke, not the future general IB producer. */
+    if (!state->indirectProbeOk || !state->ringSegmentLeased ||
+        entry->flags != MGLPPC_SEMANTIC_FLAG_INDIRECT || entry->dwords != 2UL ||
+        state->ringCompleted || state->ringControl->head != 1UL)
+        goto failed;
+    CacheClearE(slotAddr, 2UL * sizeof(ULONG), CACRF_ClearD);
+    offset = slotAddr[0];
+    count = slotAddr[1];
+    if (offset != MGLPPC_IB_OFFSET || count != MGLPPC_IB_SMOKE_DWORDS)
+        goto failed;
+    failure = "epoch_or_drain";
+    if (!QueryBackendBridgeV2(&bridge) ||
+        bridge.deviceEpoch != state->ringDeviceEpoch || !DrainSemanticFence(state))
+        goto failed;
+    words = (volatile ULONG *)((UBYTE *)state->ringControl + offset);
+    CacheClearE((APTR)words, count * sizeof(ULONG), CACRF_ClearD);
+    sprintf(line, "IBHOST payload slot=%lu offset=%lu dwords=%lu generation=%lu mode=%s\n",
+            (unsigned long)entry->slot, (unsigned long)offset,
+            (unsigned long)count, (unsigned long)entry->generation,
+            state->ibDryRun ? "dry" : "gpu");
+    MGLPPCIBTrace("DH2:ibhost.log", line);
+    /* One fixed smoke is checked before trusting any PPC-authored GPU work. */
+    for (i = 0; i < count; ++i) {
+        ULONG expected = i == 0 ? 0x79050000UL :
+                         i == 1 ? 0xefbeaddeUL : 0x00000080UL;
+        if (words[i] != expected) {
+            sprintf(line, "IBHOST bytes_fail word=%lu got=%08lx expected=%08lx\n",
+                    (unsigned long)i, (unsigned long)words[i],
+                    (unsigned long)expected);
+            MGLPPCIBTrace("DH2:ibhost.log", line);
+            return FALSE;
+        }
+    }
+    MGLPPCIBTrace("DH2:ibhost.log", "IBHOST bytes=79050000,efbeadde,00000080x6 ok\n");
+    if (!state->ibDryRun) {
+        memset(&dispatch, 0, sizeof(dispatch));
+        dispatch.version = MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_VERSION;
+        dispatch.structSize = sizeof(dispatch);
+        dispatch.segmentId = state->ringSegmentId;
+        dispatch.byteOffset = offset;
+        dispatch.dwordCount = count;
+        (void)glGetError();
+        glGetIntegerv(MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_QUERY,
+                      (GLint *)&dispatch);
+        failure = "dispatch";
+        if (glGetError() != GL_NO_ERROR || !dispatch.fenceOut)
+            goto failed;
+        state->semanticFence = dispatch.fenceOut;
+        sprintf(line, "IBHOST submitted fence=%lu\n", (unsigned long)dispatch.fenceOut);
+        MGLPPCIBTrace("DH2:ibhost.log", line);
+        failure = "retirement";
+        if (!DrainSemanticFence(state))
+            goto failed;
+        MGLPPCIBTrace("DH2:ibhost.log", "IBHOST gpu_retired=1\n");
+    } else {
+        MGLPPCIBTrace("DH2:ibhost.log", "IBHOST dry_validated=1 gpu_submitted=0\n");
+    }
+    state->ringLastGen[entry->slot] = entry->generation;
+    return TRUE;
+
+failed:
+    sprintf(line, "IBHOST failed stage=%s no_ack=1\n", failure);
+    MGLPPCIBTrace("DH2:ibhost.log", line);
+    return FALSE;
+}
+
+static BOOL ExecuteCpEntry(MGLPPCHostState *state,
+                           const MGLPPCRingEntryV1 *entry, ULONG *payload)
+{
+    struct Radeon3DIndirect indirect;
+    MGLR200PrivateBridgeV2 bridge;
+    ULONG mask, fence = 0;
+    if (!state->cpEnabled || state->cpFailed || !state->cpSegmentLeased ||
+        entry->flags != MGLPPC_SEMANTIC_FLAG_CP_EMIT || entry->dwords != 3UL ||
+        entry->slot != state->ringCompleted % MGLPPC_RING_SLOTS)
+        return FALSE;
+    CacheClearE(payload, 3UL * sizeof(ULONG), CACRF_ClearD);
+    memset(&indirect, 0, sizeof(indirect));
+    indirect.Size = sizeof(indirect);
+    indirect.Version = RADEON3D_INDIRECT_VERSION;
+    indirect.SegmentId = state->cpSegment.Id;
+    indirect.ByteOffset = payload[0];
+    indirect.DwordCount = payload[1];
+    mask = payload[2];
+    if (indirect.ByteOffset != entry->slot * MGLPPC_CP_SLICE_BYTES ||
+        !indirect.DwordCount || (indirect.DwordCount & 1UL) ||
+        indirect.DwordCount > RADEON3D_MAX_BATCH_DWORDS ||
+        indirect.ByteOffset >= state->cpSegment.Bytes ||
+        indirect.DwordCount > (state->cpSegment.Bytes - indirect.ByteOffset) / 4UL ||
+        (mask & ~((1UL << state->vertexSegmentCount) - 1UL)))
+        return FALSE;
+    /* One outstanding fence. Retire before its token is superseded, while
+     * the PPC emits into other immutable slices. Driver owns CP transitions. */
+    if (!DrainSemanticFence(state) || !QueryBackendBridgeV2(&bridge) ||
+        bridge.deviceEpoch != state->ringDeviceEpoch ||
+        bridge.deviceToken != state->ringDeviceToken ||
+        bridge.colorSurfaceToken != state->cpColorToken ||
+        !Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
+                                  &indirect, &fence) || !fence)
+        return FALSE;
+    state->semanticFence = fence;
+    state->queuedSegmentMask = mask;
+    state->ringLastGen[entry->slot] = entry->generation;
+    ++state->semanticExecutes;
+    ++state->cpDispatches;
+    state->cpDwords += indirect.DwordCount;
+    ++HostExecuteCount;
+    return TRUE;
+}
+
 static ULONG RingPoll(MGLPPCHostState *state)
 {
     volatile MGLPPCRingControlV1 *control = state->ringControl;
@@ -935,7 +1324,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
         ULONG stageStart;
 #endif
 
-        if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
+        if ((MGLPPC_HOST_TRACE || state->verboseUploads) &&
             !state->ringSeenEntry) {
             state->ringSeenEntry = 1;
             printf("MiniGLPPC host: ring_first_entry\n");
@@ -961,6 +1350,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
             mglEnableSync(control->syncEnabled ? GL_TRUE : GL_FALSE);
         }
         if (entry.slot >= MGLPPC_RING_SLOTS ||
+            entry.dwords > MGLPPC_SEMANTIC_SLOT_DWORDS ||
             entry.dwords > control->slotDwords ||
             entry.generation <= state->ringLastGen[entry.slot]) {
             printf("MiniGLPPC host: ring_bad_entry slot=%lu dwords=%lu "
@@ -976,7 +1366,22 @@ static ULONG RingPoll(MGLPPCHostState *state)
             break;
         }
         slotAddr = (ULONG *)control->slotAddrs[entry.slot];
-        if (entry.flags & MGLPPC_SEMANTIC_FLAG_STATE_BATCH) {
+        if (entry.flags & MGLPPC_SEMANTIC_FLAG_CP_EMIT) {
+            if (!ExecuteCpEntry(state, &entry, slotAddr)) {
+                state->cpFailed = TRUE;
+                control->error = 1;
+                CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
+                break;
+            }
+            bridgeValid = FALSE;
+        } else if (entry.flags & MGLPPC_SEMANTIC_FLAG_INDIRECT) {
+            if (!ExecuteIndirectSmoke(state, &entry, slotAddr)) {
+                control->error = 1;
+                CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
+                break;
+            }
+            bridgeValid = FALSE;
+        } else if (entry.flags & MGLPPC_SEMANTIC_FLAG_STATE_BATCH) {
             struct Radeon3DStateBatch batch;
             ULONG draws, segmentIx, headerDwords;
 
@@ -1050,7 +1455,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
             bridgeValid = MGLPPC_HOST_TARGET_CACHE;
-            if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
+            if ((MGLPPC_HOST_TRACE || state->verboseUploads) &&
                 !state->headerLogged) {
                 ULONG hi;
                 printf("host: hdr dwords=%lu:",
@@ -1312,9 +1717,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
             state->semanticExecutes++;
             HostExecuteCount++;
         }
-        /* PatchRecordTargets writes shared payloads on the 68k. Clean them
-         * BEFORE releasing the slot: a later CacheClearE must not write old
-         * dirty lines over the PPC's next publication into this storage. */
+        /* Release host-dirty target patches before the next PPC publication. */
         if (entry.dwords)
             CacheClearE(slotAddr, entry.dwords * sizeof(ULONG), CACRF_ClearD);
         state->ringCompleted++;
@@ -1356,6 +1759,19 @@ static ULONG RingPoll(MGLPPCHostState *state)
             control->presentSeq = state->ringCompleted;
         }
         control->completed = state->ringCompleted;
+        if (state->cpEnabled && !state->semanticFence) {
+            control->retired = state->ringCompleted;
+            CacheClearE((APTR)&control->retired, sizeof(control->retired), CACRF_ClearD);
+        }
+        if (entry.flags & MGLPPC_SEMANTIC_FLAG_INDIRECT) {
+            char line[128];
+            control->retired = state->ringCompleted;
+            CacheClearE((APTR)&control->retired, sizeof(control->retired), CACRF_ClearD);
+            CacheClearE((APTR)&control->completed, sizeof(control->completed), CACRF_ClearD);
+            sprintf(line, "IBHOST ack=%lu mode=%s\n", (unsigned long)state->ringCompleted,
+                    state->ibDryRun ? "dry" : "gpu");
+            MGLPPCIBTrace("DH2:ibhost.log", line);
+        }
     }
 #if MGLPPC_PROFILE
     ringStart = HostClock() - ringStart;
@@ -1975,6 +2391,12 @@ static void HandleMessage(MGLPPCMessage *message,
     }
 
     message->status = MGLPPC_STATUS_OK;
+    if (state->cpSegmentLeased && (state->cpFailed ||
+        (state->ringControl && state->ringControl->error))) {
+        state->cpFailed = TRUE;
+        message->status = MGLPPC_STATUS_GL_ERROR;
+        return;
+    }
     switch (message->command) {
     case MGLPPC_CMD_HELLO:
         if (!state->backendOpen) {
@@ -1996,9 +2418,15 @@ static void HandleMessage(MGLPPCMessage *message,
         GetVar((CONST_STRPTR)"MGLPPC_NODIRECT", nodirect,
                (LONG)sizeof(nodirect), GVF_GLOBAL_ONLY);
         state->directDisabled = nodirect[0] ? 1 : 0;
-        GetVar((CONST_STRPTR)"MGLPPC_UPLOAD_TRACE", trace,
-               (LONG)sizeof(trace), GVF_GLOBAL_ONLY);
+        ReadUploadTraceOption(trace, (LONG)sizeof(trace));
         state->verboseUploads = trace[0] ? 1 : 0;
+        {
+            UBYTE ibdry[8];
+            ibdry[0] = 0;
+            state->ibDryRun =
+                GetVar((CONST_STRPTR)"MGLPPC_IBDRY", ibdry,
+                       (LONG)sizeof(ibdry), GVF_GLOBAL_ONLY) > 0 && ibdry[0] == '1';
+        }
         }
         message->value[3] = MGLPPC_CAP_REPLAY_V9 |
                             MGLPPC_CAP_SEMANTIC_INLINE |
@@ -2012,6 +2440,7 @@ static void HandleMessage(MGLPPCMessage *message,
                              MGLPPC_CAP_TEXTURE_DIRECT_V1)
 #ifndef MGLPPC_DISABLE_RING
                             | MGLPPC_CAP_SEMANTIC_RING
+                            | MGLPPC_CAP_INDIRECT | MGLPPC_CAP_CP_EMIT
                             | (state->mailboxDisabled ? 0UL :
                                MGLPPC_CAP_MAILBOX_V1)
 #endif
@@ -2022,7 +2451,17 @@ static void HandleMessage(MGLPPCMessage *message,
 #endif
         break;
     case MGLPPC_CMD_SHUTDOWN:
-        DiscardSemantic(state);
+        if (state->cpSegmentLeased && state->context) {
+            message->status = MGLPPC_STATUS_BUSY;
+            break;
+        }
+#if MGLPPC_PROFILE
+        HostNativeProfileCapture(state);
+#endif
+        if (!DiscardSemantic(state)) {
+            message->status = MGLPPC_STATUS_GL_ERROR;
+            break;
+        }
         DiscardProbe(state);
         state->running = 0;
         break;
@@ -2110,6 +2549,13 @@ static void HandleMessage(MGLPPCMessage *message,
             message->value[7] =
                 (bridge.flags & MGL_R200_PRIVATE_BRIDGE_COMPACT_TCL) != 0;
         }
+#if MGLPPC_PROFILE
+        /* The successful bridge check consumed GL_NO_ERROR. Clear only the
+         * hint's own error here; diagnostics must not fail context creation. */
+        glHint(MGL_PERF_COUNTERS_HINT, GL_NICEST);
+        HostNativeEnableError = glGetError();
+        HostNativeReported = FALSE;
+#endif
         break;
     case MGLPPC_CMD_CLEAR_PRESENT:
         if (state->context == NULL || message->contextId != state->contextId) {
@@ -2139,7 +2585,13 @@ static void HandleMessage(MGLPPCMessage *message,
             message->status = MGLPPC_STATUS_NO_CONTEXT;
             break;
         }
-        DiscardSemantic(state);
+#if MGLPPC_PROFILE
+        HostNativeProfileCapture(state);
+#endif
+        if (!DiscardSemantic(state)) {
+            message->status = MGLPPC_STATUS_GL_ERROR;
+            break;
+        }
         mglDeleteContext();
         DiscardUpload(state);
         state->context = NULL;
@@ -2613,7 +3065,7 @@ static void HandleMessage(MGLPPCMessage *message,
         }
         bytes = TextureByteCount(message->value[3], message->value[4],
                                  uploadFormat, uploadType);
-        if ((MGLPPC_PROFILE || MGLPPC_HOST_TRACE || state->verboseUploads) &&
+        if ((MGLPPC_HOST_TRACE || state->verboseUploads) &&
             !state->sharedLogged) {
             printf("host: upload_shared bytes=%lu fmt=%lx type=%lx\n",
                    (unsigned long)bytes, (unsigned long)uploadFormat,
@@ -2655,8 +3107,10 @@ static void HandleMessage(MGLPPCMessage *message,
             message->status = MGLPPC_STATUS_NO_CONTEXT;
             break;
         }
-        if (message->value[0] == MGL_R200_PRIVATE_BRIDGE_V1_QUERY ||
-            message->value[0] == MGL_R200_PRIVATE_TEXTURE_V1_QUERY) {
+        /* Only the tagged texture-capability query is scalar in this private
+         * namespace. Descriptor queries must never receive a four-byte local. */
+        if ((message->value[0] & 0xfffff000UL) == 0x4d475000UL &&
+            message->value[0] != MGL_R200_PRIVATE_TEXTURE_CAPS_V1_QUERY) {
             message->status = MGLPPC_STATUS_UNSUPPORTED;
             break;
         }
@@ -2741,7 +3195,27 @@ static void HandleMessage(MGLPPCMessage *message,
             break;
         }
         message->value[0] = state->semanticExecutes;
-        DiscardSemantic(state);
+        if (!DiscardSemantic(state))
+            message->status = MGLPPC_STATUS_GL_ERROR;
+        break;
+    case MGLPPC_CMD_CP_SURFACE:
+        {
+            MGLR200PrivateSurfaceV1 surface;
+            if (!state->cpEnabled || state->cpFailed || !state->context ||
+                message->contextId != state->contextId || message->payloadWords ||
+                !QueryCpSurface(state, message->value[0], &surface)) {
+                message->status = MGLPPC_STATUS_UNSUPPORTED;
+                break;
+            }
+            message->value[0] = GL_NO_ERROR;
+            message->value[1] = surface.cpuAddress;
+            message->value[2] = surface.gpuAddress;
+            message->value[3] = surface.pitch;
+            message->value[4] = surface.width;
+            message->value[5] = surface.height;
+            message->value[6] = surface.format;
+            message->value[7] = surface.deviceEpoch;
+        }
         break;
     case MGLPPC_CMD_BIND_TEXTURE:
         if (!state->context || message->contextId != state->contextId) {
@@ -2950,42 +3424,21 @@ int main(int argc, char **argv)
         static ULONG idleLoops;
 #if MGLPPC_PROFILE
         ULONG handleStart, handleElapsed;
-        ULONG loopStart, mbTicks, fenceTicks, evtTicks = 0;
-        static ULONG lastReport, pollLoops, mbCalls;
-        static ULONG fenceCalls, mbTicksAcc, fenceTicksAcc, ringAcc;
-        static ULONG evtTicksAcc, lastSubmit, lastPresentWait, lastPresent;
-        static ULONG lastWait, lastExecutes, lastPresents;
-        static ULONG samplePhase;
-        BOOL sample = (++samplePhase & 15UL) == 0UL;
+        ULONG pollStart = 0;
+        BOOL sample = (++HostPollLoops & 15UL) == 0UL;
 
-        loopStart = HostClock();
-        {
-        ULONG now = loopStart;
-        if (state.verboseUploads &&
-            now - state.lastHeartbeat > HostClockHz / 2UL) {
-            state.lastHeartbeat = now;
-            printf("host: hb t=%lu up=%lu fail=%lu\n",
-                   (unsigned long)(now - HostWallStart),
-                   (unsigned long)state.uploadCount,
-                   (unsigned long)state.uploadFails);
-            fflush(stdout);
-        }
-        }
-        /* Stage timing is sampled every 16th loop: ReadEClock is a syscall
-         * and six calls per idle loop were burning more CPU than the work
-         * they measured. */
+        /* RAM-only, unscaled samples of top-level polls every 16th loop.
+         * Count sampled calls even when elapsed ticks are zero. The extra
+         * PollMailbox before each Exec message is not sampled here. */
         if (sample)
-            mbTicks = HostClock();
+            pollStart = HostClock();
 #endif
         workHandled = PollMailbox(&state);
 #if MGLPPC_PROFILE
         if (sample) {
-            mbTicks = HostClock() - mbTicks;
-            mbTicksAcc += mbTicks;
-            if (mbTicks)
-                ++mbCalls;
-        } else
-            mbTicks = 0;
+            HostMailboxPollTicks += HostClock() - pollStart;
+            ++HostMailboxPollCalls;
+        }
 #endif
         while ((message = (MGLPPCMessage *)GetMsg(hostPort)) != NULL) {
             /* Published mailbox work precedes destruction/unregister, even
@@ -3013,9 +3466,8 @@ int main(int argc, char **argv)
         ringBusy = RingPoll(&state);
 #if MGLPPC_PROFILE
         HostRingTicks += ringBusy;
-        ringAcc += ringBusy;
         if (sample)
-            fenceTicks = HostClock();
+            pollStart = HostClock();
 #endif
         /* A fence completed by this poll still counts as work this pass. */
         if (state.semanticFence)
@@ -3023,23 +3475,18 @@ int main(int argc, char **argv)
         PollQueuedFence(&state);
 #if MGLPPC_PROFILE
         if (sample) {
-            fenceTicks = HostClock() - fenceTicks;
-            fenceTicksAcc += fenceTicks;
-            if (fenceTicks)
-                ++fenceCalls;
-        } else
-            fenceTicks = 0;
+            HostFencePollTicks += HostClock() - pollStart;
+            ++HostFencePollCalls;
+        }
         if (sample)
-            evtTicks = HostClock();
+            pollStart = HostClock();
 #endif
         PollContextEvents(&state);
 #if MGLPPC_PROFILE
         if (sample) {
-            evtTicks = HostClock() - evtTicks;
-            evtTicksAcc += evtTicks;
-        } else
-            evtTicks = 0;
-        ++pollLoops;
+            HostEventPollTicks += HostClock() - pollStart;
+            ++HostEventPollCalls;
+        }
 #endif
         /* A pure busy loop pins the 68k CPU at 100% forever, starving
          * everything else on the machine even when no client is running.
@@ -3054,52 +3501,29 @@ int main(int argc, char **argv)
              state.ringCompleted < state.ringControl->head)) {
             idleLoops = 0;
         } else if (++idleLoops > 500UL) {
-            Delay(1);
-        }
-#if MGLPPC_PROFILE
-        if (HostClockHz &&
-            loopStart - lastReport > HostClockHz * 2UL) {
-            lastReport = loopStart;
-            char rep[256];
-            sprintf(rep, "host: poll loops=%lu mb=%luus(%lu) fence=%luus(%lu) "
-                   "evt=%luus ring=%luus\n",
-                   (unsigned long)pollLoops,
-                   (unsigned long)ProbeMicros(0, mbTicksAcc),
-                   (unsigned long)mbCalls,
-                   (unsigned long)ProbeMicros(0, fenceTicksAcc),
-                   (unsigned long)fenceCalls,
-                   (unsigned long)ProbeMicros(0, evtTicksAcc),
-                   (unsigned long)ProbeMicros(0, ringAcc));
-            printf("%s", rep);
-            HostTraceLine(rep);
-            sprintf(rep, "host: stage submit=%luus presentwait=%luus "
-                   "present=%luus wait=%luus executes=%lu presents=%lu\n",
-                   (unsigned long)ProbeMicros(0, HostSubmitTicks - lastSubmit),
-                   (unsigned long)ProbeMicros(0,
-                        HostPresentWaitTicks - lastPresentWait),
-                   (unsigned long)ProbeMicros(0,
-                        HostPresentTicks - lastPresent),
-                   (unsigned long)ProbeMicros(0, HostWaitTicks - lastWait),
-                   (unsigned long)(HostExecuteCount - lastExecutes),
-                   (unsigned long)(HostPresentCount - lastPresents));
-            printf("%s", rep);
-            HostTraceLine(rep);
-            lastSubmit = HostSubmitTicks;
-            lastPresentWait = HostPresentWaitTicks;
-            lastPresent = HostPresentTicks;
-            lastWait = HostWaitTicks;
-            lastExecutes = HostExecuteCount;
-            lastPresents = HostPresentCount;
-            mbTicksAcc = 0;
-            fenceTicksAcc = 0;
-            mbCalls = 0;
-            fenceCalls = 0;
-            ringAcc = 0;
-            evtTicksAcc = 0;
-            pollLoops = 0;
-            fflush(stdout);
-        }
+#if MGLPPC_IDLE_DIAG
+            ULONG sleepStart = ProbeTicks();
+            BOOL active = state.semanticRegistered != 0;
+            BOOL rendering = active && HostExecuteCount != 0;
 #endif
+            Delay(1);
+#if MGLPPC_IDLE_DIAG
+            ULONG elapsed = ProbeTicks() - sleepStart;
+            if (active) {
+                ++IdleActiveSleeps;
+                IdleActiveTicks += elapsed;
+                if (rendering) {
+                    ++IdleRenderSleeps;
+                    IdleRenderTicks += elapsed;
+                }
+                if (state.ringControl &&
+                    state.ringControl->head != state.ringCompleted)
+                    ++IdleWakeBacklog;
+            } else {
+                ++IdleEmptySleeps;
+            }
+#endif
+        }
     }
 #if MGLPPC_PROFILE
     HostWallTicks = HostClock() - HostWallStart;
@@ -3107,7 +3531,15 @@ int main(int argc, char **argv)
 
     RemPort(hostPort);
     DeleteMsgPort(hostPort);
-    DiscardSemantic(&state);
+#if MGLPPC_PROFILE
+    HostNativeProfileCapture(&state);
+#endif
+    if (!DiscardSemantic(&state))
+        return 20; /* Normal SHUTDOWN cannot reach here with a live CP context. */
+    if (state.cpDispatches)
+        printf("CP_RUN dispatches=%lu dwords=%lu failed=%lu\n",
+               (unsigned long)state.cpDispatches, (unsigned long)state.cpDwords,
+               (unsigned long)state.cpFailed);
     if (state.context != NULL)
         mglDeleteContext();
     DiscardProbe(&state);
@@ -3119,10 +3551,19 @@ int main(int argc, char **argv)
     if (state.backendOpen)
         MiniGLClose();
 #if MGLPPC_PROFILE
+    HostNativeProfileReport();
     if (HostClockHz) {
         ULONG busy = HostControlTicks + HostBarrierTicks +
                      HostTotalTicks + HostRingTicks + HostMailboxTicks;
         HostIdleTicks = HostWallTicks > busy ? HostWallTicks - busy : 0;
+        printf("MiniGLPPC host: attribution "
+               "scope=host_session_including_setup_idle_context_teardown "
+               "inclusive=1 mutually_exclusive=0 counter_bits=32 "
+               "busy=control+barrier+total+ring+mailbox "
+               "idle=max(wall-busy,0) idle_is_cpu_idle=0\n");
+        printf("MiniGLPPC host: session_ticks wall=%lu busy=%lu idle=%lu\n",
+               (unsigned long)HostWallTicks, (unsigned long)busy,
+               (unsigned long)HostIdleTicks);
         printf("MiniGLPPC host: session wall_us=%lu idle_us=%lu "
                "msgs control=%lu control_us=%lu barrier=%lu barrier_us=%lu "
                "execute_msgs=%lu ring_us=%lu\n",
@@ -3138,19 +3579,35 @@ int main(int argc, char **argv)
         printf("MiniGLPPC host: mailbox=%lu mailbox_us=%lu\n",
                (unsigned long)HostMailboxCount,
                (unsigned long)ProbeMicros(0, HostMailboxTicks));
+        printf("MiniGLPPC host: uploads=%lu upload_fails=%lu\n",
+               (unsigned long)state.uploadCount,
+               (unsigned long)state.uploadFails);
         printf("HOST_BRIDGE_CACHE enabled=%lu scope=ring_poll_burst "
                "v2_queries_including_registration=%lu hits=%lu\n",
                (unsigned long)MGLPPC_HOST_TARGET_CACHE,
                (unsigned long)HostBridgeQueries,
                (unsigned long)HostBridgeCacheHits);
+        printf("HOST_POLL scope=host_session polls=top_level_only "
+               "sample_period_loops=16 ticks=sampled_unscaled "
+               "calls=sampled_including_zero_tick loops=%lu eclock_hz=%lu\n",
+               (unsigned long)HostPollLoops, (unsigned long)HostClockHz);
+        printf("HOST_POLL mailbox_ticks=%lu mailbox_calls=%lu "
+               "fence_ticks=%lu fence_calls=%lu event_ticks=%lu event_calls=%lu\n",
+               (unsigned long)HostMailboxPollTicks,
+               (unsigned long)HostMailboxPollCalls,
+               (unsigned long)HostFencePollTicks,
+               (unsigned long)HostFencePollCalls,
+               (unsigned long)HostEventPollTicks,
+               (unsigned long)HostEventPollCalls);
     }
-    if (HostExecuteCount && HostClockHz) {
+    if (HostClockHz) {
         printf("MiniGLPPC host: executes=%lu presents=%lu eclock_hz=%lu\n",
                (unsigned long)HostExecuteCount,
                (unsigned long)HostPresentCount,
                (unsigned long)HostClockHz);
         printf("MiniGLPPC host: stage_ticks wait=%lu clear=%lu crc=%lu "
-               "query=%lu submit=%lu presentwait=%lu present=%lu total=%lu\n",
+               "query=%lu submit=%lu presentwait=%lu present=%lu total=%lu "
+               "inclusive=1 mutually_exclusive=0 total_scope=execute_slot_only\n",
                (unsigned long)HostWaitTicks, (unsigned long)HostClearTicks,
                (unsigned long)HostCrcTicks, (unsigned long)HostQueryTicks,
                (unsigned long)HostSubmitTicks,
@@ -3166,6 +3623,16 @@ int main(int argc, char **argv)
                (unsigned long)HostPresentCount);
 #endif
     HOST_PACING_REPORT();
+#if MGLPPC_IDLE_DIAG
+    printf("HOST_IDLE scope=whole_host render_scope=registered_after_first_execute "
+           "empty_sleeps=%lu active_sleeps=%lu active_us=%lu "
+           "render_sleeps=%lu render_us=%lu wake_backlog=%lu\n",
+           (unsigned long)IdleEmptySleeps, (unsigned long)IdleActiveSleeps,
+           (unsigned long)ProbeMicros(0, IdleActiveTicks),
+           (unsigned long)IdleRenderSleeps,
+           (unsigned long)ProbeMicros(0, IdleRenderTicks),
+           (unsigned long)IdleWakeBacklog);
+#endif
     printf("MiniGLPPC host: stopped\n");
     return 0;
 }

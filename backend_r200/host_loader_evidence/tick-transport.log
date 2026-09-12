@@ -1,0 +1,10 @@
+PPC_TRANSPORT_PROFILE scope=whole_context_including_setup snapshot=after_destroy counters_since=platform_open overlapping_nested=1 mutually_exclusive=0 counter_bits=32 ticks=raw_timebase
+PPC_TRANSPORT_CLOCK clock_hz_legacy=39086800 session_ticks=268262158 clock_hz_legacy_trusted=0 conversion=client_whole_run_tb_hz
+PPC_TRANSPORT_LIFETIME elapsed_ticks_hi=0 elapsed_ticks_lo=270982243 counter_wrap_risk=0 lifetime_since=profile_reset
+PPC_PUBLISH count=2631 send_ticks=145012379 stall_ticks=144296618 flush_ticks=41046 crc_ticks=577
+PPC_BARRIER count=604 ticks=58327644 stall_ticks=57264382 ring_stall_ticks=201561000 drain_ticks=950518
+PPC_REPLY_WAIT count=0 ticks=0 max_ticks=0
+PPC_CONTROL count=8 ticks=15285402
+PPC_CHUNK count=0 ticks=0
+PPC_TEXTURE calls=1 successes=1 bytes=196608 ticks=1684595 direct_calls=1 direct_ticks=1684215 shared_calls=0 chunked_calls=0 barrier_calls=1 barrier_ticks=285
+PPC_STALL_SPLIT publish_enters=223 publish_nosleep=58 publish_sleeps=186 barrier_enters=68 barrier_nosleep=4 barrier_sleeps=76 drain_enters=1 drain_nosleep=0 drain_sleeps=1 rotate_enters=0 rotate_nosleep=0 rotate_sleeps=0 rotate_ticks=0

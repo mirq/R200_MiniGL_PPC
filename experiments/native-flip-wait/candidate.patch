@@ -1,0 +1,1691 @@
+diff --git a/backend_r200/minigl_ppc_host.c b/backend_r200/minigl_ppc_host.c
+index 1e0cde1..dadc796 100644
+--- a/backend_r200/minigl_ppc_host.c
++++ b/backend_r200/minigl_ppc_host.c
+@@ -1989,6 +1989,16 @@ static void HandleMessage(MGLPPCMessage *message,
+         break;
+     case MGLPPC_CMD_SHUTDOWN:
+         DiscardSemantic(state);
++        if (state->context) {
++            mglDeleteContext();
++            if (mglGetWindowHandle()) {
++                message->status = MGLPPC_STATUS_BUSY;
++                break;
++            }
++            state->context = NULL;
++            state->contextId = 0;
++            state->contextWindow = NULL;
++        }
+         DiscardProbe(state);
+         state->running = 0;
+         break;
+@@ -2107,6 +2117,12 @@ static void HandleMessage(MGLPPCMessage *message,
+         }
+         DiscardSemantic(state);
+         mglDeleteContext();
++        /* Native display timeouts retain their ports/buffers. Do not report
++         * destruction or let this owning task exit while they remain live. */
++        if (mglGetWindowHandle()) {
++            message->status = MGLPPC_STATUS_BUSY;
++            break;
++        }
+         DiscardUpload(state);
+         state->context = NULL;
+         state->contextId = 0;
+diff --git a/classic_68k/dev/MiniGL_Library_Source_Code/Makefile_dispatch_r200.gcc b/classic_68k/dev/MiniGL_Library_Source_Code/Makefile_dispatch_r200.gcc
+index 5e84ec9..f613725 100644
+--- a/classic_68k/dev/MiniGL_Library_Source_Code/Makefile_dispatch_r200.gcc
++++ b/classic_68k/dev/MiniGL_Library_Source_Code/Makefile_dispatch_r200.gcc
+@@ -19,6 +19,8 @@ LIB_CFLAGS = $(COMMON_CFLAGS) -I$(RADEON3D_INC) -I$(WARP3D_INC) -Iinclude -Ilibr
+ 	-D__M68K__ -DMINIGL_BACKEND_R200 -DMINIGL_LIBRARY_BUILD -fno-baserel -Wall -Wextra
+ 
+ LIB_CFLAGS += -DR200_PERF_TIMING=$(PERF_TIMING)
++DISPLAY_WAIT_DIAG ?= 0
++LIB_CFLAGS += -DR200_DISPLAY_WAIT_DIAG=$(DISPLAY_WAIT_DIAG)
+ # Segment streaming is the accepted default as of the T5 acceptance run
+ # (see R200_STREAM_COMMITS in library/minigl_r200_internal.h). Build with
+ # STREAM_COMMITS=0 to fall back to the inline Execute path.
+diff --git a/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200.c b/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200.c
+index 2381448..97bf730 100644
+--- a/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200.c
++++ b/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200.c
+@@ -267,12 +267,43 @@ void SetError(struct MiniGLR200Context *context, GLenum error)
+ }
+ 
+ 
+-static void DestroyContext(struct MiniGLR200Context *context)
++static BOOL DestroyContext(struct MiniGLR200Context *context)
+ {
+     ULONG index;
+ 
+     if (!context)
+-        return;
++        return TRUE;
++    if ((context->safePort && context->safePort->mp_SigTask != FindTask(NULL)) ||
++        (context->displayPort && context->displayPort->mp_SigTask != FindTask(NULL))) {
++        SetError(context, GL_INVALID_OPERATION);
++        return FALSE;
++    }
++    /* A graphics timeout is not cancellation. Keep all context resources
++     * and message storage live until both notifications can be retired. */
++    if (context->displayWaitFailed) {
++        if (!WaitAllSubmissions(context))
++            return FALSE;
++    } else if (!FlushScreenVertices(context) || !SubmitAndWait(context)) {
++        context->displayWaitFailed = TRUE;
++        SetError(context, GL_INVALID_OPERATION);
++        return FALSE;
++    }
++    if (!RestorePrimaryBuffer(context)) {
++        context->displayWaitFailed = TRUE;
++        SetError(context, GL_INVALID_OPERATION);
++        return FALSE;
++    }
++    ReapDeferredSurfaces(context);
++#if R200_DISPLAY_WAIT_DIAG
++    if (context->fullscreen) {
++        dbg_puts("[mgl] flipdiag change_calls="); dbg_u32(context->displayChangeCalls);
++        dbg_puts(" change_ticks="); dbg_u32(context->displayChangeTicks);
++        dbg_puts(" notify_calls="); dbg_u32(context->displayNotifyCalls);
++        dbg_puts(" notify_ticks="); dbg_u32(context->displayNotifyTicks);
++        dbg_puts(" clock="); dbg_u32(PerfClockRate()); dbg_newline();
++    }
++#endif
++    CloseDisplayWaitTimer(context);
+     if (context->activeFastPath) {
+         context->activeFastPath->privateData = NULL;
+         context->activeFastPath->currentVertex = NULL;
+@@ -289,12 +320,6 @@ static void DestroyContext(struct MiniGLR200Context *context)
+     if (context->indexCacheStamp)
+         FreeMem(context->indexCacheStamp,
+                 context->indexCacheSize * sizeof(ULONG));
+-    (void)FlushScreenVertices(context);
+-    (void)SubmitAndWait(context);
+-    /* Everything retired: deferred texture surfaces can be freed before
+-     * the generic texture release pass below runs. */
+-    ReapDeferredSurfaces(context);
+-    RestorePrimaryBuffer(context);
+     if (context->device) {
+         for (index = 0; index < R200_SCREEN_BUFFERS; ++index) {
+             if (context->surfaces[index].Handle)
+@@ -331,6 +356,9 @@ static void DestroyContext(struct MiniGLR200Context *context)
+                     context->textures[index].levelCount *
+                         sizeof(struct TextureDirtyRect));
+     }
++    /* Dequeue embedded messages while their ScreenBuffer storage is live. */
++    DrainNotifications(context->safePort);
++    DrainNotifications(context->displayPort);
+     for (index = R200_SCREEN_BUFFERS; index-- > 0;) {
+         if (context->screenBuffers[index]) {
+             context->screenBuffers[index]->sb_DBufInfo
+@@ -342,8 +370,6 @@ static void DestroyContext(struct MiniGLR200Context *context)
+     }
+     if (context->screenOwned)
+         CloseScreen(context->screen);
+-    DrainNotifications(context->safePort);
+-    DrainNotifications(context->displayPort);
+     if (context->safePort)
+         DeleteMsgPort(context->safePort);
+     if (context->displayPort)
+@@ -353,6 +379,7 @@ static void DestroyContext(struct MiniGLR200Context *context)
+         Radeon3DClose(context->device);
+     }
+     FreeMem(context, sizeof(*context));
++    return TRUE;
+ }
+ 
+ /*
+@@ -436,9 +463,34 @@ void MGLBackendTaskClose(struct Task *task)
+         return;
+     ObtainSemaphore(&LibraryBase->lock);
+     if (LibraryBase->owner == task) {
+-        DestroyContext(LibraryBase->context);
+-        LibraryBase->context = NULL;
+-        LibraryBase->owner = NULL;
++        if (DestroyContext(LibraryBase->context)) {
++            LibraryBase->context = NULL;
++            LibraryBase->owner = NULL;
++            mini_CurrentContext = (struct GLcontext_t *)0;
++        } else if (task == FindTask(NULL)) {
++            struct MiniGLR200Context *context = LibraryBase->context;
++            /* LibClose cannot keep its caller alive. Quarantine the graphics
++             * storage, but stop late replies/IDCMP from signalling that task. */
++            CloseDisplayWaitTimer(context);
++            if (context->window) {
++                CloseWindow(context->window);
++                context->window = NULL;
++            }
++            Disable();
++            if (context->safePort) {
++                context->safePort->mp_Flags = PA_IGNORE;
++                context->safePort->mp_SigTask = NULL;
++            }
++            if (context->displayPort) {
++                context->displayPort->mp_Flags = PA_IGNORE;
++                context->displayPort->mp_SigTask = NULL;
++            }
++            Enable();
++            context->displayWaitFailed = TRUE;
++            LibraryBase->owner = NULL;
++            mini_CurrentContext = (struct GLcontext_t *)0;
++            dbg_puts("[mgl] display context quarantined; cold restart required\n");
++        }
+     }
+     ReleaseSemaphore(&LibraryBase->lock);
+ }
+@@ -488,8 +540,10 @@ static void *CreateContext(int width, int height, ULONG requestedMode,
+         return NULL;
+     }
+     if (LibraryBase->context) {
++        void *existing = LibraryBase->context->displayWaitFailed
++            ? NULL : LibraryBase->context;
+         ReleaseSemaphore(&LibraryBase->lock);
+-        return LibraryBase->context;
++        return existing;
+     }
+     if (!SurfaceFormatForDepth(LibraryBase->pixelDepth) ||
+         (LibraryBase->pixelDepth == 8UL && LibraryBase->windowMode &&
+@@ -599,7 +653,9 @@ static void *CreateContext(int width, int height, ULONG requestedMode,
+     return context;
+ 
+ fail:
+-    DestroyContext(context);
++    /* Creation has not requested any screen-buffer switch, so no graphics
++     * notifications are outstanding during this partial-resource unwind. */
++    (void)DestroyContext(context);
+     ReleaseSemaphore(&LibraryBase->lock);
+     return NULL;
+ }
+@@ -631,9 +687,15 @@ void Lib_mglDeleteContext(void)
+         return;
+     ObtainSemaphore(&LibraryBase->lock);
+     if (LibraryBase->owner == FindTask(NULL)) {
+-        DestroyContext(LibraryBase->context);
+-        LibraryBase->context = NULL;
+-        LibraryBase->owner = NULL;
++        if (DestroyContext(LibraryBase->context)) {
++            LibraryBase->context = NULL;
++            LibraryBase->owner = NULL;
++            mini_CurrentContext = (struct GLcontext_t *)0;
++        } else {
++            /* The released public wrapper clears this slot before calling
++             * us; republish it so a later delete can retire late replies. */
++            mini_CurrentContext = (struct GLcontext_t *)LibraryBase->context;
++        }
+     }
+     ReleaseSemaphore(&LibraryBase->lock);
+ }
+@@ -658,10 +720,13 @@ void Lib_mglEmergencyCloseScreen(void)
+         return;
+     ObtainSemaphore(&LibraryBase->lock);
+     if (LibraryBase->owner == FindTask(NULL)) {
+-        DestroyContext(LibraryBase->context);
+-        LibraryBase->context = NULL;
+-        LibraryBase->owner = NULL;
+-        mini_CurrentContext = (struct GLcontext_t *)0;
++        if (DestroyContext(LibraryBase->context)) {
++            LibraryBase->context = NULL;
++            LibraryBase->owner = NULL;
++            mini_CurrentContext = (struct GLcontext_t *)0;
++        } else {
++            mini_CurrentContext = (struct GLcontext_t *)LibraryBase->context;
++        }
+     }
+     ReleaseSemaphore(&LibraryBase->lock);
+ }
+diff --git a/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200_internal.h b/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200_internal.h
+index 41b8928..a039c34 100644
+--- a/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200_internal.h
++++ b/classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200_internal.h
+@@ -13,6 +13,7 @@
+ #include <devices/timer.h>
+ #include <dos/dos.h>
+ #include <exec/execbase.h>
++#include <exec/errors.h>
+ #include <exec/memory.h>
+ #include <exec/resident.h>
+ #include <graphics/displayinfo.h>
+@@ -47,6 +48,10 @@
+ #define R200_PERF_TIMING 1
+ #endif
+ 
++#ifndef R200_DISPLAY_WAIT_DIAG
++#define R200_DISPLAY_WAIT_DIAG 0
++#endif
++
+ #ifndef R200_RSQRT_NEWTON_STEPS
+ #define R200_RSQRT_NEWTON_STEPS 1
+ #endif
+@@ -752,10 +757,10 @@ struct MiniGLR200Context {
+      * display message ports, so message arrival order never matters and a
+      * stale foreign message cannot abort a wait (the old 2-buffer
+      * WaitForNotification returned failure on any unexpected message).
+-     * bufferSafe bit i: buffer i's SafeMessage has arrived since it last
+-     * left the display (or it was never displayed) -- only a safe buffer
+-     * may be submitted as a render target. bufferDisplayed bit i: buffer
+-     * i's DispMessage arrived since its switch was requested. */
++     * bufferSafe bit i: the old bitmap has been released by the SafeMessage
++     * for the pending switch (or was never displayed). Both replies belong
++     * to the new buffer's DBufInfo. bufferDisplayed bit i: buffer i's
++     * DispMessage arrived since its switch was requested. */
+     ULONG pendingBuffer;
+     ULONG pendingValid;
+     ULONG bufferSafe;
+@@ -799,6 +804,17 @@ struct MiniGLR200Context {
+     struct Radeon3DSegment segmentPool[4];
+     ULONG segmentPoolCount;
+     ULONG segmentPoolNext;
++#endif
++    /* Native fullscreen waits own their signal port/request on the context
++     * task, independently of the library-wide PA_IGNORE EClock request. */
++    struct MsgPort *displayTimerPort;
++    TimeRequest_Type displayTimerRequest;
++    ULONG displayTimerOpen;
++    ULONG displayTimerPending;
++    ULONG displayWaitFailed;
++#if R200_DISPLAY_WAIT_DIAG
++    ULONG displayChangeCalls, displayChangeTicks;
++    ULONG displayNotifyCalls, displayNotifyTicks;
+ #endif
+ };
+ 
+@@ -980,7 +996,8 @@ ULONG P96FormatMaskForDepth(ULONG depth);
+ BOOL ChangeBuffer(struct MiniGLR200Context *context,
+                   struct ScreenBuffer *buffer);
+ void DrainNotifications(struct MsgPort *port);
+-void RestorePrimaryBuffer(struct MiniGLR200Context *context);
++BOOL RestorePrimaryBuffer(struct MiniGLR200Context *context);
++void CloseDisplayWaitTimer(struct MiniGLR200Context *context);
+ BOOL CreateWindowTarget(struct MiniGLR200Context *context, ULONG width,
+                         ULONG height);
+ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
+diff --git a/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_state.c b/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_state.c
+index b8d3ac3..88cb887 100644
+--- a/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_state.c
++++ b/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_state.c
+@@ -1578,6 +1578,11 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
+         {
+             MGLR200PrivateBridgeV1 *bridge =
+                 (MGLR200PrivateBridgeV1 *)value;
++            if (context->displayWaitFailed) {
++                ZeroMemory(bridge, sizeof(*bridge));
++                SetError(context, GL_INVALID_OPERATION);
++                break;
++            }
+             bridge->version = MGL_R200_PRIVATE_BRIDGE_V1_VERSION;
+             bridge->structSize = sizeof(*bridge);
+             bridge->deviceToken = (ULONG)context->device;
+@@ -1601,6 +1606,11 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
+         {
+             MGLR200PrivateBridgeV2 *bridge =
+                 (MGLR200PrivateBridgeV2 *)value;
++            if (context->displayWaitFailed) {
++                ZeroMemory(bridge, sizeof(*bridge));
++                SetError(context, GL_INVALID_OPERATION);
++                break;
++            }
+             bridge->version = MGL_R200_PRIVATE_BRIDGE_V2_VERSION;
+             bridge->structSize = sizeof(*bridge);
+             bridge->deviceToken = (ULONG)context->device;
+diff --git a/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_submit.c b/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_submit.c
+index 9eac9f8..0680f4b 100644
+--- a/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_submit.c
++++ b/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_submit.c
+@@ -575,6 +575,10 @@ BOOL Submit(struct MiniGLR200Context *context)
+     ULONG fence = 0, index, nextIndex;
+     ULONG start = 0;
+ 
++    if (context->displayWaitFailed) {
++        SetError(context, GL_INVALID_OPERATION);
++        return FALSE;
++    }
+     if (!slot->recordCount)
+         return TRUE;
+     /* Radeon3D's semantic Execute path has one hardware command stream. Keep
+diff --git a/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_surface.c b/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_surface.c
+index cd2db9e..ea50e36 100644
+--- a/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_surface.c
++++ b/classic_68k/dev/MiniGL_Library_Source_Code/library/r200_surface.c
+@@ -293,6 +293,49 @@ BOOL DrawRectangle(const struct MiniGLR200Context *context,
+     return TRUE;
+ }
+ 
++static BOOL OpenDisplayWaitTimer(struct MiniGLR200Context *context)
++{
++    struct IORequest *request = &context->displayTimerRequest.tr_node;
++
++    context->displayTimerPort = CreateMsgPort();
++    if (!context->displayTimerPort)
++        return FALSE;
++    request->io_Message.mn_Node.ln_Type = NT_MESSAGE;
++    request->io_Message.mn_ReplyPort = context->displayTimerPort;
++    request->io_Message.mn_Length = sizeof(context->displayTimerRequest);
++    if (OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, request, 0))
++        return FALSE;
++    context->displayTimerOpen = TRUE;
++    return TRUE;
++}
++
++static LONG ReapDisplayWaitTimer(struct MiniGLR200Context *context)
++{
++    struct IORequest *request = &context->displayTimerRequest.tr_node;
++    LONG error;
++
++    if (!context->displayTimerPending)
++        return 0;
++    if (!CheckIO(request))
++        AbortIO(request);
++    error = WaitIO(request);
++    context->displayTimerPending = FALSE;
++    return error;
++}
++
++void CloseDisplayWaitTimer(struct MiniGLR200Context *context)
++{
++    (void)ReapDisplayWaitTimer(context);
++    if (context->displayTimerOpen) {
++        CloseDevice(&context->displayTimerRequest.tr_node);
++        context->displayTimerOpen = FALSE;
++    }
++    if (context->displayTimerPort) {
++        DeleteMsgPort(context->displayTimerPort);
++        context->displayTimerPort = NULL;
++    }
++}
++
+ /* Drain both fullscreen notification ports, matching every message against
+  * the per-buffer DBufInfo messages. Arrival order is irrelevant: each match
+  * sets that buffer's bit in bufferSafe/bufferDisplayed. Messages that match
+@@ -307,7 +350,10 @@ static void PumpBufferMessages(struct MiniGLR200Context *context)
+             if (context->screenBuffers[index] &&
+                 message == &context->screenBuffers[index]->sb_DBufInfo
+                                ->dbi_SafeMessage) {
+-                context->bufferSafe |= 1UL << index;
++                /* ChangeVPBitMap's SafeMessage releases the OLD bitmap,
++                 * not the bitmap whose DBufInfo contains the message. */
++                if (context->pendingValid && index == context->pendingBuffer)
++                    context->bufferSafe |= 1UL << context->displayedBuffer;
+                 break;
+             }
+         }
+@@ -317,48 +363,111 @@ static void PumpBufferMessages(struct MiniGLR200Context *context)
+             if (context->screenBuffers[index] &&
+                 message == &context->screenBuffers[index]->sb_DBufInfo
+                                ->dbi_DispMessage) {
+-                context->bufferDisplayed |= 1UL << index;
++                if (context->pendingValid && index == context->pendingBuffer)
++                    context->bufferDisplayed |= 1UL << index;
+                 break;
+             }
+         }
+     }
+ }
+ 
++static BOOL WaitBufferNotifications(struct MiniGLR200Context *context,
++                                    ULONG safeMask, ULONG displayMask,
++                                    BOOL block)
++{
++    struct IORequest *request = &context->displayTimerRequest.tr_node;
++    struct Task *task = FindTask(NULL);
++    ULONG signals, timerSignal;
++    BOOL ready = FALSE, expired;
++    LONG error;
++
++    if (!context->safePort || !context->displayPort ||
++        context->safePort->mp_SigTask != task ||
++        context->displayPort->mp_SigTask != task)
++        return FALSE;
++    PumpBufferMessages(context);
++    if ((context->bufferSafe & safeMask) == safeMask &&
++        (context->bufferDisplayed & displayMask) == displayMask)
++        return TRUE;
++    if (!block || !context->displayTimerOpen || !context->displayTimerPort ||
++        context->displayTimerPort->mp_SigTask != task ||
++        context->safePort->mp_Flags != PA_SIGNAL ||
++        context->displayPort->mp_Flags != PA_SIGNAL ||
++        context->displayTimerPort->mp_Flags != PA_SIGNAL ||
++        context->safePort->mp_SigBit >= 32 ||
++        context->displayPort->mp_SigBit >= 32 ||
++        context->displayTimerPort->mp_SigBit >= 32 ||
++        context->displayTimerPending)
++        return FALSE;
++
++    timerSignal = 1UL << context->displayTimerPort->mp_SigBit;
++    signals = timerSignal | (1UL << context->safePort->mp_SigBit) |
++              (1UL << context->displayPort->mp_SigBit);
++    /* Clear only the reaped timer's stale signal. Notification arrivals
++     * between the pump and Wait must remain latched. Arm once, not per wake. */
++    SetSignal(0, timerSignal);
++    request->io_Command = TR_ADDREQUEST;
++    request->io_Error = 0;
++    request->io_Flags = 0;
++    context->displayTimerRequest.tr_time.tv_secs = 2;
++    context->displayTimerRequest.tr_time.tv_micro = 0;
++    context->displayTimerPending = TRUE;
++    SendIO(request);
++    for (;;) {
++        expired = CheckIO(request) != NULL;
++        PumpBufferMessages(context);
++        if ((context->bufferSafe & safeMask) == safeMask &&
++            (context->bufferDisplayed & displayMask) == displayMask) {
++            ready = TRUE;
++            break;
++        }
++        if (expired)
++            break;
++        Wait(signals);
++    }
++    error = ReapDisplayWaitTimer(context);
++    return ready && (error == 0 || error == IOERR_ABORTED);
++}
++
+ /* Complete an outstanding screen-buffer switch. When the pending buffer's
+  * DispMessage arrives, that buffer becomes displayed and the previously
+  * displayed buffer retires at the same vblank: its SafeMessage is consumed
+  * by the same pump, so it can become the next drawing buffer immediately.
+- * With block, waits up to ~2 seconds (100 TOFs) like the old code; without,
++ * Both messages must have returned before reusing the DBufInfo. With block,
++ * waits up to two seconds for notification signals; without,
+  * returns FALSE when the switch has not taken effect yet, and the caller
+  * skips the flip -- the drawing buffer is neither displayed nor pending, so
+  * the next frame may simply overwrite it (latest completed frame wins). */
+ static BOOL CompletePendingFlip(struct MiniGLR200Context *context, BOOL block)
+ {
+-    ULONG attempts;
++    ULONG retired;
++    BOOL completed;
++#if R200_DISPLAY_WAIT_DIAG
++    ULONG start;
++#endif
+ 
+     if (!context->pendingValid)
+         return TRUE;
+-    for (attempts = 0; attempts < 100; ++attempts) {
+-        ULONG retired;
+-        ULONG completed;
+-
+-        PumpBufferMessages(context);
+-        completed = context->bufferDisplayed &
+-                    (1UL << context->pendingBuffer);
+-        if (completed) {
+-            retired = context->displayedBuffer;
+-            context->displayedBuffer = context->pendingBuffer;
+-            context->pendingValid = FALSE;
+-            context->bufferDisplayed &= ~(1UL << context->displayedBuffer);
+-            context->bufferSafe &= ~(1UL << context->displayedBuffer);
+-            context->bufferSafe |= 1UL << retired;
+-            context->drawingBuffer = retired;
+-            return TRUE;
+-        }
+-        if (!block)
+-            return FALSE;
+-        WaitTOF();
++#if R200_DISPLAY_WAIT_DIAG
++    start = PerfClock();
++#endif
++    completed = WaitBufferNotifications(context, 1UL << context->displayedBuffer,
++                                        1UL << context->pendingBuffer, block);
++#if R200_DISPLAY_WAIT_DIAG
++    context->displayNotifyTicks += PerfClock() - start;
++    context->displayNotifyCalls++;
++#endif
++    if (completed) {
++        retired = context->displayedBuffer;
++        context->displayedBuffer = context->pendingBuffer;
++        context->pendingValid = FALSE;
++        context->bufferDisplayed &= ~(1UL << context->displayedBuffer);
++        context->bufferSafe &= ~(1UL << context->displayedBuffer);
++        context->drawingBuffer = retired;
++        return TRUE;
+     }
++    if (!block)
++        return FALSE;
+     dbg_puts("[mgl] cpf=timeout pend=");
+     dbg_u32(context->pendingBuffer);
+     dbg_puts(" disp=");
+@@ -369,27 +478,15 @@ static BOOL CompletePendingFlip(struct MiniGLR200Context *context, BOOL block)
+     return FALSE;
+ }
+ 
+-/* The frame about to be submitted targets TargetSurface(): the drawing
+- * buffer, or the displayed buffer for glDrawBuffer(GL_FRONT). It must have
+- * left the display (or never been displayed). Steady state always satisfies
+- * this for the drawing buffer -- the bit was pumped when the buffer
+- * retired -- so this only waits in the rare window right after a rotation,
+- * on the first frames, or for front-buffer rendering. */
++/* Back-buffer rendering requires retirement. GL_FRONT intentionally targets
++ * the visible bitmap and cannot wait for a transition that was never posted;
++ * its GPU completion still goes through the ordinary submission drain. */
+ static BOOL WaitTargetBufferSafe(struct MiniGLR200Context *context)
+ {
+-    ULONG target = context->fullscreen &&
+-                           context->drawBuffer == GL_FRONT
+-                       ? context->displayedBuffer
+-                       : context->drawingBuffer;
+-    ULONG attempts;
+-
+-    for (attempts = 0; attempts < 100; ++attempts) {
+-        PumpBufferMessages(context);
+-        if (context->bufferSafe & (1UL << target))
+-            return TRUE;
+-        WaitTOF();
+-    }
+-    return FALSE;
++    if (context->drawBuffer == GL_FRONT)
++        return TRUE;
++    return WaitBufferNotifications(context, 1UL << context->drawingBuffer,
++                                    0, TRUE);
+ }
+ 
+ BOOL ChangeBuffer(struct MiniGLR200Context *context,
+@@ -398,7 +495,16 @@ BOOL ChangeBuffer(struct MiniGLR200Context *context,
+     ULONG attempts;
+ 
+     for (attempts = 0; attempts < 100; ++attempts) {
+-        if (ChangeScreenBuffer(context->screen, buffer))
++        BOOL changed;
++#if R200_DISPLAY_WAIT_DIAG
++        ULONG start = PerfClock();
++#endif
++        changed = ChangeScreenBuffer(context->screen, buffer);
++#if R200_DISPLAY_WAIT_DIAG
++        context->displayChangeTicks += PerfClock() - start;
++        context->displayChangeCalls++;
++#endif
++        if (changed)
+             return TRUE;
+         WaitTOF();
+     }
+@@ -411,24 +517,26 @@ void DrainNotifications(struct MsgPort *port)
+         while (GetMsg(port)) {}
+ }
+ 
+-void RestorePrimaryBuffer(struct MiniGLR200Context *context)
++BOOL RestorePrimaryBuffer(struct MiniGLR200Context *context)
+ {
+     if (!context->fullscreen || !context->screenOwned ||
+         !context->screenBuffers[0])
+-        return;
++        return TRUE;
+     /* Finish any outstanding switch so exactly one switch (back to buffer
+      * 0) is requested, then wait for it to take effect. */
+-    (void)CompletePendingFlip(context, TRUE);
++    if (!CompletePendingFlip(context, TRUE))
++        return FALSE;
+     if (context->displayedBuffer != 0) {
+-        while (!ChangeScreenBuffer(context->screen,
+-                                   context->screenBuffers[0]))
+-            WaitTOF();
++        if (!ChangeBuffer(context, context->screenBuffers[0]))
++            return FALSE;
+         context->pendingValid = TRUE;
+         context->pendingBuffer = 0;
+         context->bufferSafe &= ~(1UL << 0);
+         context->bufferDisplayed &= ~(1UL << 0);
+-        (void)CompletePendingFlip(context, TRUE);
++        if (!CompletePendingFlip(context, TRUE))
++            return FALSE;
+     }
++    return TRUE;
+ }
+ 
+ void Lib_glClearColor(GLclampf red, GLclampf green, GLclampf blue,
+@@ -1037,6 +1145,10 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
+         return FALSE;
+     }
+     context->baseIDCMP = IDCMP_RAWKEY;
++    if (!OpenDisplayWaitTimer(context)) {
++        dbg_puts("[mgl] fsfail=waittimer\n");
++        return FALSE;
++    }
+     {
+         /* Temporary diagnostic knob: MINIGL_BUFFERS=1 renders straight
+          * into the visible screen bitmap -- no AllocScreenBuffer copies,
+@@ -1415,6 +1527,10 @@ void Lib_mglSwitchDisplay(void)
+ 
+     if (!context)
+         return;
++    if (context->displayWaitFailed) {
++        SetError(context, GL_INVALID_OPERATION);
++        return;
++    }
+     if (context->insideBegin) {
+         SetError(context, GL_INVALID_OPERATION);
+         return;
+@@ -1434,6 +1550,7 @@ void Lib_mglSwitchDisplay(void)
+      * window right after a rotation. */
+     if (context->fullscreen && !context->singleBuffer) {
+         if (!WaitTargetBufferSafe(context)) {
++            context->displayWaitFailed = TRUE;
+             SetError(context, GL_INVALID_OPERATION);
+             return;
+         }
+@@ -1529,6 +1646,11 @@ void Lib_mglSwitchDisplay(void)
+             BOOL completed = CompletePendingFlip(context,
+                                                  context->syncEnabled);
+ 
++            if (!completed && context->syncEnabled) {
++                context->displayWaitFailed = TRUE;
++                SetError(context, GL_INVALID_OPERATION);
++                return;
++            }
+             if (completed) {
+                 if (!ChangeBuffer(context,
+                                   context->screenBuffers[drawn])) {
+@@ -1578,6 +1700,7 @@ void Lib_mglSwitchDisplay(void)
+                 }
+                 if (context->syncEnabled &&
+                     !CompletePendingFlip(context, TRUE)) {
++                    context->displayWaitFailed = TRUE;
+                     SetError(context, GL_INVALID_OPERATION);
+                     return;
+                 }
+diff --git a/tests/test_r200_context_lifecycle.py b/tests/test_r200_context_lifecycle.py
+index 7680b28..bbe81bb 100644
+--- a/tests/test_r200_context_lifecycle.py
++++ b/tests/test_r200_context_lifecycle.py
+@@ -130,6 +130,7 @@ static ULONG PlatformClockRate = 1000000, clockTicks;
+ static ULONG nativeCreates, nativeDeletes, nativeExecutes, subimages, shutdowns, transportCloses;
+ static ULONG error, allocations, frees, segmentAlloc;
+ static BOOL ringMode = TRUE, polling;
++static BOOL nativeLive, retainNativeDelete;
+ static UBYTE sharedRing[65536] __attribute__((aligned(64)));
+ static UBYTE vertexMemory[4][65536] __attribute__((aligned(64)));
+ static ULONG slots[8][8192] __attribute__((aligned(32))), buildRecords[2][8192];
+@@ -206,10 +207,13 @@ static void mglChooseMtexBufferSize(int n) { (void)n; }
+ static void mglChooseNumberOfBuffers(int n) { (void)n; }
+ static APTR mglCreateContext(int x, int y, int w, int h) {
+     assert(!host.context && !x && !y && w == 320 && h == 240);
+-    ++nativeCreates; segmentAlloc = 0; return &host;
++    ++nativeCreates; nativeLive = TRUE; segmentAlloc = 0; return &host;
+ }
+-static void mglDeleteContext(void) { assert(host.context); ++nativeDeletes; }
+-static APTR mglGetWindowHandle(void) { return &window; }
++static void mglDeleteContext(void) {
++    assert(host.context && nativeLive);
++    if (!retainNativeDelete) { nativeLive = FALSE; ++nativeDeletes; }
++}
++static APTR mglGetWindowHandle(void) { return nativeLive ? &window : NULL; }
+ static BOOL mglLockDisplay(void) { return TRUE; }
+ static void mglUnlockDisplay(void) {}
+ static void mglSwitchDisplay(void) {}
+@@ -284,7 +288,8 @@ static void HandleMessage(MGLPPCMessage *message, MGLPPCHostState *state) {
+             (ringMode ? MGLPPC_CAP_SEMANTIC_RING | MGLPPC_CAP_MAILBOX_V1 : 0);
+         break;
+ '''
+-for begin, end in (("    case MGLPPC_CMD_CREATE_CONTEXT:", "    case MGLPPC_CMD_CLEAR_PRESENT:"),
++for begin, end in (("    case MGLPPC_CMD_SHUTDOWN:", "    case MGLPPC_CMD_CREATE_CONTEXT:"),
++                   ("    case MGLPPC_CMD_CREATE_CONTEXT:", "    case MGLPPC_CMD_CLEAR_PRESENT:"),
+                    ("    case MGLPPC_CMD_DESTROY_CONTEXT:", "    case MGLPPC_CMD_EXECUTE_BATCH:"),
+                    ("    case MGLPPC_CMD_UNREGISTER_SEMANTIC_SLOTS:", "    case MGLPPC_CMD_BIND_TEXTURE:")):
+     code += section(H, begin, end)
+@@ -295,8 +300,6 @@ code += r'''
+     case MGLPPC_CMD_SEMANTIC_BARRIER:
+         assert(message->contextId == state->contextId && message->value[5] == state->semanticEpoch);
+         assert(DrainSemanticFence(state)); break;
+-    case MGLPPC_CMD_SHUTDOWN:
+-        assert(!state->context); ++shutdowns; DiscardProbe(state); state->running = 0; break;
+     default:
+         /* Native texture commands are not the fault: assert their routing and
+          * sequencing, while leaving pixel correctness to the public test. */
+@@ -305,6 +308,7 @@ code += r'''
+         if (message->command == MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED) ++subimages;
+         break;
+     }
++    if (message->command == MGLPPC_CMD_SHUTDOWN && !state->running) ++shutdowns;
+ }
+ '''
+ code += function(H, "static BOOL PollMailbox(")
+@@ -489,7 +493,18 @@ int main(int argc, char **argv) {
+                 testWaitRefresh();
+             }
+             printf("PASS: %s context%u id=%u epoch=%u first/repeat submit + mailbox/Exec updates\n",
+-                   ringMode ? "ring" : "inline", context + 1, id, epoch);
++                    ringMode ? "ring" : "inline", context + 1, id, epoch);
++            retainNativeDelete = TRUE;
++            R200PPCDispatchDeleteContext();
++            assert(R200PPCContext && host.context && nativeLive && host.running);
++            {
++                MGLPPCMessage shutdown;
++                memset(&shutdown, 0, sizeof(shutdown));
++                shutdown.command = MGLPPC_CMD_SHUTDOWN;
++                HandleMessage(&shutdown, &host);
++                assert(shutdown.status == MGLPPC_STATUS_BUSY && host.running && host.context);
++            }
++            retainNativeDelete = FALSE;
+             R200PPCDispatchDeleteContext();
+             assert(!R200PPCContext && !host.context && !FrontendPlatform.registered);
+             assert(!host.mailbox && !host.ringControl && !host.semanticRegistered);
+diff --git a/tests/test_r200_display_wait.py b/tests/test_r200_display_wait.py
+new file mode 100644
+index 0000000..4653390
+--- /dev/null
++++ b/tests/test_r200_display_wait.py
+@@ -0,0 +1,927 @@
++"""CPU-only display wait regression: python3 tests/test_r200_display_wait.py.
++
++Compile unchanged production functions against deterministic Exec/Intuition
++queues and a virtual timer. No SDK, Amiga, GPU, or real-time sleeps are used.
++Destroy/delete/task-close, the public delete wrapper, expunge guard, and native
++flip path run with narrow context/resource stubs. Submission internals,
++rendering, performance accounting, and target ABI are not tested.
++Generated C and the ASan/UBSan executable live only in /tmp/opencode.
++"""
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++
++
++ROOT = Path(__file__).resolve().parents[1]
++LIBRARY = ROOT / "classic_68k/dev/MiniGL_Library_Source_Code/library"
++
++
++def extract(filename, signature):
++    text = (LIBRARY / filename).read_text()
++    match = re.search(rf"^{re.escape(signature)}[^;{{}}]*\{{", text, re.MULTILINE)
++    assert match, f"Missing function definition: {filename}: {signature}"
++    start, opening = match.start(), match.end() - 1
++    depth = 0
++    # Ignore braces in strings/comments, but return the original bytes intact.
++    tokens = r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]'
++    for token in re.finditer(tokens, text[opening:], re.DOTALL):
++        if token.group() == "{":
++            depth += 1
++        elif token.group() == "}":
++            depth -= 1
++            if depth == 0:
++                line = text.count("\n", 0, start) + 1
++                return (f'\n#line {line} "{filename}"\n'
++                        + text[start:opening + token.end()] + "\n")
++    raise AssertionError(f"Unterminated function: {signature}")
++
++
++code = r'''
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++typedef uint32_t ULONG, GLenum, BPTR;
++typedef int32_t LONG;
++typedef int BOOL;
++typedef unsigned char UBYTE;
++typedef const char *CONST_STRPTR;
++typedef struct GLcontext_t *GLcontext;
++#define TRUE 1
++#define FALSE 0
++#define R200_PPC_FRONTEND 0
++#define MINIGL_BACKEND_R200 1
++#define MINIGL_REGARG(reg, type, name) type name
++#define LIBF_DELEXP 8
++#define PA_SIGNAL 0
++#define PA_IGNORE 2
++#define NT_MESSAGE 5
++#define IOERR_ABORTED (-2)
++#define TR_ADDREQUEST 9
++#define TIMERNAME "timer.device"
++#define UNIT_MICROHZ 0
++enum { SAFE_BIT = 3, DISPLAY_BIT = 11, TIMER_BIT = 29, OTHER_BIT = 17 };
++#define BIT(n) (UINT32_C(1) << (n))
++#define WAIT_MASK (BIT(SAFE_BIT) | BIT(DISPLAY_BIT) | BIT(TIMER_BIT))
++struct Task { BOOL alive; };
++struct ExecBase { struct Task *ThisTask; };
++struct SignalSemaphore { BOOL held; };
++struct Node { int unused; };
++struct Library { ULONG lib_OpenCnt, lib_Flags, lib_NegSize, lib_PosSize; };
++struct MiniGLLibrary { struct Library lib; BPTR segList; };
++struct MsgPort;
++struct Message {
++    struct { unsigned char ln_Type; } mn_Node;
++    struct MsgPort *mn_ReplyPort;
++    unsigned short mn_Length;
++    struct Message *next;
++    BOOL queued;
++};
++struct MsgPort {
++    struct Task *mp_SigTask;
++    unsigned char mp_SigBit, mp_Flags;
++    struct Message *head, *tail;
++};
++struct IORequest {
++    struct Message io_Message;
++    unsigned short io_Command;
++    unsigned char io_Flags;
++    signed char io_Error;
++};
++typedef struct {
++    struct IORequest tr_node;
++    struct { ULONG tv_secs, tv_micro; } tr_time;
++} TimeRequest_Type;
++struct DBufInfo { struct Message dbi_SafeMessage, dbi_DispMessage; };
++struct BitMap { int id; };
++struct ScreenBuffer { struct DBufInfo *sb_DBufInfo; struct BitMap *sb_BitMap; };
++struct BufferStorage {
++    struct ScreenBuffer buffer;
++    struct DBufInfo info;
++    struct BitMap bitmap;
++};
++struct RastPort { struct BitMap *BitMap; };
++struct Screen { struct RastPort RastPort; };
++struct Window { struct RastPort *RPort; LONG BorderLeft, BorderTop; };
++struct Radeon3DSurface { void *Handle; };
++struct Vertex { float x, y; };
++struct TextureDirtyRect { ULONG left, right; };
++struct FastPath { void *privateData, *currentVertex; };
++'''
++for filename, names in (
++    ("minigl_r200_internal.h", ("R200_SCREEN_BUFFERS", "MAX_TEXTURES")),
++    ("minigl_r200.h", ("GL_NO_ERROR", "GL_INVALID_OPERATION", "GL_FRONT", "GL_BACK")),
++):
++    header = (LIBRARY / filename).read_text()
++    for name in names:
++        match = re.search(rf"^#define {name} .+$", header, re.MULTILINE)
++        assert match, f"Missing production constant: {name}"
++        code += match.group() + "\n"
++code += r'''
++struct MiniGLR200Context {
++    struct ScreenBuffer *screenBuffers[R200_SCREEN_BUFFERS];
++    struct MsgPort *safePort, *displayPort, *displayTimerPort;
++    TimeRequest_Type displayTimerRequest;
++    ULONG displayTimerOpen, displayTimerPending, displayWaitFailed;
++    ULONG bufferSafe, bufferDisplayed, displayedBuffer, pendingBuffer;
++    ULONG drawingBuffer, screenBufferCount, pendingValid;
++    ULONG fullscreen, screenOwned, screenLocked, singleBuffer, syncEnabled;
++    ULONG drawBuffer, error, insideBegin, presentFlip, presentBlit;
++    struct Screen *screen;
++    struct Window *window;
++    struct RastPort source;
++    ULONG width, height, perfEnabled;
++    struct { ULONG executeTicks, waitTicks, presentTicks; } perf;
++    struct Radeon3DSurface surfaces[R200_SCREEN_BUFFERS], depthSurface;
++    ULONG captureCacheValid, pendingDrawValid;
++    struct { ULONG header[3]; } captureCache, pendingDraw;
++    struct FastPath *activeFastPath;
++    void *fastBuffer, *lockedVertices, *indexCacheVerts, *indexCacheStamp;
++    ULONG fastBufferBytes, lockedCount, indexCacheSize;
++    void *device;
++    struct BitMap *bitmap, *depthBitmap;
++    struct {
++        struct Radeon3DSurface surface;
++        struct BitMap *bitmap;
++        void *image, *dirtyRects;
++        ULONG imageBytes, levelCount;
++    } textures[MAX_TEXTURES];
++    ULONG segmentLeaseCount;
++    struct { ULONG id; } segmentLeases[2];
++};
++static struct MiniGLR200Context *c;
++static struct Task owner, foreign;
++static struct ExecBase execBase = {&owner}, *SysBase = &execBase;
++static struct MiniGLR200Base {
++    struct SignalSemaphore lock;
++    struct Task *owner;
++    struct MiniGLR200Context *context;
++} backend, *LibraryBase = &backend;
++static GLcontext mini_CurrentContext;
++static struct Library *DOSBase;
++static BOOL MiniGLInitialized = TRUE;
++static ULONG handles[R200_SCREEN_BUFFERS + 2];
++static struct FastPath fastPath;
++static struct { void *p; size_t size; } allocations[64];
++static unsigned allocated, freed, live;
++static unsigned portCreates, portDeletes, opens, closes, sends, aborts, reaps;
++static unsigned checks, waits, signalClears, dequeued, changes, changeCalls, tofs;
++static unsigned flushes, submits, drains, deferred, released, freedBuffers;
++static unsigned cleanupCalls;
++static unsigned lockEntries, preclearChecks, disables, enables, windowCloses;
++static unsigned signalDeliveries, semanticBumps;
++static BOOL expectPreclear, interruptsDisabled;
++static BOOL failPort, failOpen, flushOK, submitOK, drainOK, abortRace;
++static struct IORequest *opened, *outstanding;
++static BOOL ioDone;
++static LONG completionError;
++static uint64_t now, deadline;
++static ULONG signals, failures, autoReplies, submittedBuffer;
++enum { SAFE = 1, DISPLAY = 2, BOTH = 3, FOREIGN = 4, SPURIOUS = 8 };
++struct Event { uint64_t at; ULONG buffer, replies; };
++static struct Event events[64];
++static unsigned eventCount, eventNext;
++static struct Message foreignSafe, foreignDisplay;
++static ULONG armReplies;
++
++static void *allocate(size_t size) {
++    assert(allocated < 64);
++    void *p = calloc(1, size);
++    assert(p);
++    allocations[allocated].p = p;
++    allocations[allocated++].size = size;
++    ++live;
++    return p;
++}
++static void release(void *p, size_t size) {
++    for (unsigned i = 0; i < allocated; ++i) {
++        if (allocations[i].p == p) {
++            assert(p && size == allocations[i].size);
++            allocations[i].p = NULL;
++            free(p); ++freed; --live;
++            return;
++        }
++    }
++    assert(!"free of unowned storage");
++}
++static struct Task *FindTask(CONST_STRPTR name) { assert(!name); return SysBase->ThisTask; }
++static void ObtainSemaphore(struct SignalSemaphore *s) {
++    assert(s == &backend.lock && !s->held && !interruptsDisabled);
++    if (expectPreclear) { assert(!mini_CurrentContext); ++preclearChecks; }
++    s->held = TRUE; ++lockEntries;
++}
++static void ReleaseSemaphore(struct SignalSemaphore *s) {
++    assert(s == &backend.lock && s->held && !interruptsDisabled); s->held = FALSE;
++}
++static void Disable(void) {
++    assert(backend.lock.held && !interruptsDisabled && backend.owner == SysBase->ThisTask);
++    assert(!opened && !outstanding && !c->window && !c->displayTimerPort);
++    assert(!c->safePort || (c->safePort->mp_Flags == PA_SIGNAL && c->safePort->mp_SigTask == &owner));
++    assert(!c->displayPort || (c->displayPort->mp_Flags == PA_SIGNAL && c->displayPort->mp_SigTask == &owner));
++    interruptsDisabled = TRUE; ++disables;
++}
++static void Enable(void) {
++    assert(interruptsDisabled && backend.lock.held);
++    assert(!c->safePort || (c->safePort->mp_Flags == PA_IGNORE && !c->safePort->mp_SigTask));
++    assert(!c->displayPort || (c->displayPort->mp_Flags == PA_IGNORE && !c->displayPort->mp_SigTask));
++    interruptsDisabled = FALSE; ++enables;
++}
++static struct MsgPort *port(ULONG bit) {
++    struct MsgPort *p = allocate(sizeof(*p));
++    p->mp_SigTask = &owner; p->mp_SigBit = bit; p->mp_Flags = PA_SIGNAL;
++    return p;
++}
++static struct MsgPort *CreateMsgPort(void) {
++    ++portCreates; return failPort ? NULL : port(TIMER_BIT);
++}
++static void enqueue(struct MsgPort *p, struct Message *m) {
++    assert(p && m && !m->queued);
++    m->queued = TRUE; m->next = NULL;
++    if (p->tail) p->tail->next = m; else p->head = m;
++    p->tail = m;
++    if (p->mp_Flags == PA_SIGNAL) {
++        assert(p->mp_SigTask && p->mp_SigTask->alive);
++        ++signalDeliveries;
++        if (p->mp_SigTask == &owner) signals |= BIT(p->mp_SigBit);
++    } else assert(p->mp_Flags == PA_IGNORE);
++}
++static struct Message *GetMsg(struct MsgPort *p) {
++    assert(p);
++    struct Message *m = p->head;
++    if (m) {
++        assert(m->queued); p->head = m->next;
++        if (!p->head) p->tail = NULL;
++        m->queued = FALSE; m->next = NULL; ++dequeued;
++    }
++    return m;
++}
++static void DeleteMsgPort(struct MsgPort *p) {
++    assert(p && !p->head && !p->tail);
++    assert(!opened || opened->io_Message.mn_ReplyPort != p);
++    assert(!outstanding || outstanding->io_Message.mn_ReplyPort != p);
++    ++portDeletes; release(p, sizeof(*p));
++}
++static LONG OpenDevice(CONST_STRPTR name, ULONG unit, struct IORequest *r, ULONG flags) {
++    assert(!strcmp(name, TIMERNAME) && unit == UNIT_MICROHZ && !flags && !opened);
++    assert(r == &c->displayTimerRequest.tr_node && !outstanding);
++    assert(r->io_Message.mn_Node.ln_Type == NT_MESSAGE);
++    assert(r->io_Message.mn_Length == sizeof(TimeRequest_Type));
++    assert(r->io_Message.mn_ReplyPort == c->displayTimerPort);
++    ++opens; if (failOpen) return -1; opened = r; return 0;
++}
++static void CloseDevice(struct IORequest *r) {
++    assert(r == opened && !outstanding && !r->io_Message.queued);
++    ++closes; opened = NULL;
++}
++static void notify(ULONG buffer, ULONG replies) {
++    if (replies & SPURIOUS) signals |= BIT(SAFE_BIT) | BIT(DISPLAY_BIT);
++    if (replies & FOREIGN) {
++        enqueue(c->safePort, &foreignSafe); enqueue(c->displayPort, &foreignDisplay);
++        signals |= BIT(OTHER_BIT);
++    }
++    if (replies & BOTH) {
++        assert(buffer < R200_SCREEN_BUFFERS && c->screenBuffers[buffer]);
++        struct DBufInfo *d = c->screenBuffers[buffer]->sb_DBufInfo;
++        if (replies & SAFE) enqueue(d->dbi_SafeMessage.mn_ReplyPort, &d->dbi_SafeMessage);
++        if (replies & DISPLAY) enqueue(d->dbi_DispMessage.mn_ReplyPort, &d->dbi_DispMessage);
++    }
++}
++static void schedule(uint64_t at, ULONG buffer, ULONG replies) {
++    assert(eventCount < 64 && at >= now);
++    assert(!eventCount || at >= events[eventCount - 1].at);
++    events[eventCount++] = (struct Event){at, buffer, replies};
++}
++static void finishIO(LONG error) {
++    assert(outstanding && !ioDone);
++    ioDone = TRUE; outstanding->io_Error = error;
++    enqueue(outstanding->io_Message.mn_ReplyPort, &outstanding->io_Message);
++}
++static ULONG SetSignal(ULONG value, ULONG mask) {
++    assert(value == 0 && mask == BIT(TIMER_BIT));
++    ULONG previous = signals;
++    signals = (signals & ~mask) | (value & mask); ++signalClears;
++    return previous;
++}
++static void SendIO(struct IORequest *r) {
++    assert(r == opened && !outstanding && !r->io_Message.queued);
++    assert(c->displayTimerPending && r->io_Command == TR_ADDREQUEST);
++    assert(!r->io_Error && !r->io_Flags);
++    assert(c->displayTimerRequest.tr_time.tv_secs == 2);
++    assert(c->displayTimerRequest.tr_time.tv_micro == 0);
++    outstanding = r; ioDone = FALSE; deadline = now + 2000000; ++sends;
++    if (armReplies) { notify(c->pendingBuffer, armReplies); armReplies = 0; }
++}
++static struct IORequest *CheckIO(struct IORequest *r) {
++    assert(r == outstanding); ++checks;
++    return ioDone ? r : NULL;
++}
++static void AbortIO(struct IORequest *r) {
++    assert(r == outstanding && !ioDone); ++aborts;
++    finishIO(abortRace ? 0 : IOERR_ABORTED);
++    /* Completion/AbortIO do not reap the request or dequeue its reply. */
++}
++static LONG WaitIO(struct IORequest *r) {
++    assert(r == outstanding && ioDone);
++    assert(GetMsg(r->io_Message.mn_ReplyPort) == &r->io_Message);
++    LONG error = r->io_Error;
++    outstanding = NULL; ++reaps;
++    return error;
++}
++static ULONG Wait(ULONG mask) {
++    assert(mask == WAIT_MASK && SysBase->ThisTask == &owner && outstanding && !ioDone);
++    assert(!interruptsDisabled);
++    assert(++waits < 64);
++    if (!(signals & mask)) {
++        now = eventNext < eventCount && events[eventNext].at < deadline
++                  ? events[eventNext].at : deadline;
++        while (eventNext < eventCount && events[eventNext].at <= now) {
++            struct Event e = events[eventNext++]; notify(e.buffer, e.replies);
++        }
++        if (now == deadline) finishIO(completionError);
++    }
++    ULONG result = signals & mask;
++    assert(result); signals &= ~mask;
++    return result;
++}
++static BOOL ChangeScreenBuffer(struct Screen *s, struct ScreenBuffer *b) {
++    assert(s == c->screen && b && !c->pendingValid);
++    ULONG index = 0;
++    while (index < R200_SCREEN_BUFFERS && c->screenBuffers[index] != b) ++index;
++    assert(index < c->screenBufferCount && index != c->displayedBuffer);
++    assert(c->bufferSafe & BIT(index));
++    assert(!b->sb_DBufInfo->dbi_SafeMessage.queued && !b->sb_DBufInfo->dbi_DispMessage.queued);
++    ++changeCalls;
++    if (failures) { --failures; return FALSE; }
++    ++changes;
++    if (autoReplies) {
++        schedule(now + 100000, index, autoReplies);
++        schedule(now + 200000, index, BOTH ^ autoReplies);
++    }
++    return TRUE;
++}
++static void WaitTOF(void) { ++tofs; }
++static void dbg_puts(const char *s) { (void)s; }
++static void dbg_u32(ULONG n) { (void)n; }
++static void dbg_newline(void) {}
++struct Radeon3DSurface *TargetSurface(struct MiniGLR200Context *context);
++static BOOL FlushScreenVertices(struct MiniGLR200Context *p) {
++    assert(p == c); ++flushes; return flushOK;
++}
++static BOOL SubmitAndWait(struct MiniGLR200Context *p) {
++    assert(p == c); ++submits;
++    submittedBuffer = (ULONG)(TargetSurface(p) - p->surfaces); return submitOK;
++}
++static BOOL WaitAllSubmissions(struct MiniGLR200Context *p) {
++    assert(p == c); ++drains; return drainOK;
++}
++static void ReapDeferredSurfaces(struct MiniGLR200Context *p) { assert(p == c); ++deferred; }
++static void ReapDeferredSegments(struct MiniGLR200Context *p) { assert(p == c); }
++static void cleanup(void) { assert(!c->pendingValid); ++cleanupCalls; }
++static void FreeMem(void *p, ULONG size) {
++    cleanup(); BOOL last = p == c;
++    release(p, size); if (last) c = NULL;
++}
++static void FreeMtexQueue(struct MiniGLR200Context *p) { assert(p == c); cleanup(); }
++static void Radeon3DReleaseSurface(void *device, struct Radeon3DSurface *s) {
++    assert(device == c->device && s->Handle); cleanup(); s->Handle = NULL; ++released;
++}
++static void Radeon3DFreeSegment(void *device, ULONG id) {
++    assert(device == c->device && id == 42); cleanup();
++}
++static void CloseWindow(struct Window *w) {
++    assert(w == c->window);
++    if (c->pendingValid) {
++        assert(c->displayWaitFailed && backend.lock.held && !opened && !outstanding);
++    } else cleanup();
++    ++windowCloses; release(w, sizeof(*w));
++}
++static void UnlockPubScreen(CONST_STRPTR name, struct Screen *s) {
++    assert(!name && s == c->screen); cleanup();
++}
++static void p96FreeBitMap(struct BitMap *b) { cleanup(); release(b, sizeof(*b)); }
++static void FreeScreenBuffer(struct Screen *s, struct ScreenBuffer *b) {
++    cleanup(); assert(s == c->screen && c->displayedBuffer == 0);
++    assert((!c->safePort || !c->safePort->head) && (!c->displayPort || !c->displayPort->head));
++    assert(!b->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort);
++    assert(!b->sb_DBufInfo->dbi_DispMessage.mn_ReplyPort);
++    assert(!b->sb_DBufInfo->dbi_SafeMessage.queued && !b->sb_DBufInfo->dbi_DispMessage.queued);
++    ++freedBuffers; release(b, sizeof(struct BufferStorage));
++}
++static void CloseScreen(struct Screen *s) { cleanup(); release(s, sizeof(*s)); }
++static void ReleaseStreamSegment(struct MiniGLR200Context *p) { assert(p == c); cleanup(); }
++static void Radeon3DClose(void *device) { cleanup(); release(device, 1); }
++static void BumpSemanticStateSerial(struct MiniGLR200Context *p) {
++    assert(p == c && p->drawBuffer == GL_FRONT); ++semanticBumps;
++}
++/* These branches are not part of this flip/wait harness. Fail if reached. */
++static void Remove(struct Node *p) { (void)p; abort(); }
++static void MGLTerm(void) { abort(); }
++static void CloseLibrary(struct Library *p) { (void)p; abort(); }
++static ULONG PerfClock(void) { abort(); }
++static void RecordPerfFrame(struct MiniGLR200Context *p) { (void)p; abort(); }
++static void InitRastPort(struct RastPort *p) { (void)p; abort(); }
++static void ClipBlit(struct RastPort *src, LONG x, LONG y, struct RastPort *dst,
++                     LONG dx, LONG dy, ULONG w, ULONG h, ULONG op) {
++    (void)src; (void)x; (void)y; (void)dst; (void)dx; (void)dy; (void)w; (void)h; (void)op;
++    abort();
++}
++static void WaitBlit(void) { abort(); }
++'''
++for signature in ("void SetError(", "struct Radeon3DSurface *TargetSurface(",
++                  "struct MiniGLR200Context *CurrentContext("):
++    code += extract("minigl_r200.c", signature)
++for signature in (
++    "static BOOL OpenDisplayWaitTimer(", "static LONG ReapDisplayWaitTimer(",
++    "void CloseDisplayWaitTimer(", "static void PumpBufferMessages(",
++    "static BOOL WaitBufferNotifications(", "static BOOL CompletePendingFlip(",
++    "static BOOL WaitTargetBufferSafe(", "BOOL ChangeBuffer(",
++    "void DrainNotifications(", "BOOL RestorePrimaryBuffer(",
++    "void Lib_mglSwitchDisplay(",
++):
++    code += extract("r200_surface.c", signature)
++for signature in ("static BOOL DestroyContext(", "BOOL MGLBackendHasContext(",
++                  "void MGLBackendTaskClose(", "void Lib_mglDeleteContext("):
++    code += extract("minigl_r200.c", signature)
++for signature in ("static BPTR LibExpunge(", "static BPTR LibClose("):
++    code += extract("minigl_library.c", signature)
++code += extract("dispatch_table_r200.c", "static void R200_MGLDeleteContext(")
++code += r'''
++static const struct {
++    GLcontext *currentContext;
++    void (*MGLDeleteContext)(GLcontext context);
++} dispatch = {&mini_CurrentContext, R200_MGLDeleteContext}, *MiniGLDispatch = &dispatch;
++'''
++code += extract("../include/libraries/minigl_dispatch.h", "static __inline__ void MGLD_mglDeleteContext(")
++code += r'''
++#line 1 "display_wait_cases.c"
++static void reset(void) {
++    assert(!live && !c && !opened && !outstanding);
++    memset(allocations, 0, sizeof(allocations));
++    allocated = freed = portCreates = portDeletes = opens = closes = 0;
++    sends = aborts = reaps = checks = waits = signalClears = dequeued = 0;
++    changes = changeCalls = tofs = flushes = submits = drains = deferred = 0;
++    released = freedBuffers = cleanupCalls = eventCount = eventNext = 0;
++    lockEntries = preclearChecks = disables = enables = windowCloses = 0;
++    signalDeliveries = semanticBumps = 0; expectPreclear = interruptsDisabled = FALSE;
++    now = deadline = signals = failures = autoReplies = armReplies = 0;
++    failPort = failOpen = abortRace = ioDone = FALSE; completionError = 0;
++    flushOK = submitOK = drainOK = TRUE; SysBase->ThisTask = &owner;
++    owner.alive = foreign.alive = TRUE;
++    memset(&backend, 0, sizeof(backend)); LibraryBase = &backend;
++    memset(&foreignSafe, 0, sizeof(foreignSafe));
++    memset(&foreignDisplay, 0, sizeof(foreignDisplay));
++    c = allocate(sizeof(*c)); c->drawBuffer = GL_BACK;
++    backend.owner = &owner; backend.context = c; mini_CurrentContext = (GLcontext)c;
++}
++static void setup(ULONG count) {
++    reset();
++    c->fullscreen = c->screenOwned = c->syncEnabled = c->presentFlip = TRUE;
++    c->screen = allocate(sizeof(*c->screen));
++    c->window = allocate(sizeof(*c->window)); c->device = allocate(1);
++    c->safePort = port(SAFE_BIT); c->displayPort = port(DISPLAY_BIT);
++    assert(OpenDisplayWaitTimer(c));
++    c->screenBufferCount = count; c->drawingBuffer = 1;
++    c->bufferSafe = (BIT(count) - 1) & ~BIT(0);
++    for (ULONG i = 0; i < count; ++i) {
++        struct BufferStorage *b = allocate(sizeof(*b));
++        c->screenBuffers[i] = &b->buffer;
++        b->buffer.sb_DBufInfo = &b->info; b->buffer.sb_BitMap = &b->bitmap;
++        b->info.dbi_SafeMessage.mn_ReplyPort = c->safePort;
++        b->info.dbi_DispMessage.mn_ReplyPort = c->displayPort;
++        c->surfaces[i].Handle = &handles[i];
++    }
++}
++static void pending(ULONG old, ULONG next) {
++    c->displayedBuffer = old; c->pendingBuffer = next; c->pendingValid = TRUE;
++    c->bufferSafe &= ~(BIT(old) | BIT(next)); c->bufferDisplayed = 0;
++}
++static void timerIdle(void) {
++    assert(!outstanding && !c->displayTimerPending && sends == reaps);
++    assert(!c->displayTimerPort || !c->displayTimerPort->head);
++}
++static void finish(void) {
++    SysBase->ThisTask = &owner; autoReplies = SAFE;
++    if (c->pendingValid) {
++        PumpBufferMessages(c);
++        notify(c->pendingBuffer, BOTH &
++            ~((c->bufferSafe & BIT(c->displayedBuffer) ? SAFE : 0) |
++              (c->bufferDisplayed & BIT(c->pendingBuffer) ? DISPLAY : 0)));
++    }
++    Lib_mglDeleteContext();
++    assert(!c && !live && !outstanding && !opened && allocated == freed);
++    assert(!backend.context && !backend.owner && !mini_CurrentContext && !backend.lock.held);
++    assert(sends == reaps);
++}
++static void arm(void) {
++    c->displayTimerRequest.tr_node.io_Command = TR_ADDREQUEST;
++    c->displayTimerRequest.tr_node.io_Error = 0;
++    c->displayTimerRequest.tr_time.tv_secs = 2;
++    c->displayTimerPending = TRUE; SendIO(&c->displayTimerRequest.tr_node);
++}
++static void test_timer(void) {
++    for (unsigned stage = 0; stage < 3; ++stage) {
++        reset(); failPort = stage == 0; failOpen = stage == 1;
++        assert(OpenDisplayWaitTimer(c) == (stage == 2));
++        assert(portCreates == 1 && opens == (stage != 0));
++        assert(!c->displayTimerPending && !sends && !outstanding);
++        assert(ReapDisplayWaitTimer(c) == 0 && !checks && !reaps && !aborts);
++        CloseDisplayWaitTimer(c); CloseDisplayWaitTimer(c);
++        assert(!c->displayTimerPort && !c->displayTimerOpen);
++        assert(closes == (stage == 2) && portDeletes == (stage != 0));
++        finish();
++    }
++    for (unsigned mode = 0; mode < 4; ++mode) {
++        reset(); assert(OpenDisplayWaitTimer(c)); arm();
++        if (mode == 1) finishIO(0);
++        if (mode == 2) finishIO(-7);
++        abortRace = mode == 3;
++        LONG expected = mode == 0 ? IOERR_ABORTED : mode == 2 ? -7 : 0;
++        assert(ReapDisplayWaitTimer(c) == expected);
++        timerIdle(); assert(aborts == (mode == 0 || mode == 3));
++        assert(ReapDisplayWaitTimer(c) == 0 && reaps == 1);
++        finish();
++    }
++    for (unsigned done = 0; done < 2; ++done) {
++        reset(); assert(OpenDisplayWaitTimer(c)); arm();
++        if (done) finishIO(0);
++        CloseDisplayWaitTimer(c);
++        assert(aborts == !done && reaps == 1 && closes == 1 && portDeletes == 1);
++        timerIdle(); finish();
++    }
++    puts("PASS timer: partial open, idempotent close, completion/abort/error reaping");
++}
++static void test_pump_and_order(void) {
++    setup(3); pending(1, 2); c->bufferSafe = BIT(0);
++    notify(1, BOTH); notify(0, FOREIGN); PumpBufferMessages(c);
++    assert(c->bufferSafe == BIT(0) && !c->bufferDisplayed && dequeued == 4);
++    notify(2, SAFE); PumpBufferMessages(c);
++    assert(c->bufferSafe == (BIT(0) | BIT(1)) && !(c->bufferSafe & BIT(2)));
++    assert(!CompletePendingFlip(c, FALSE) && c->pendingValid && !sends);
++    notify(2, DISPLAY); assert(CompletePendingFlip(c, TRUE));
++    assert(c->displayedBuffer == 2 && c->drawingBuffer == 1 && !c->pendingValid);
++    assert(!c->bufferDisplayed && dequeued == 6 && !sends); finish();
++    for (ULONG first = SAFE; first <= DISPLAY; ++first) {
++        for (unsigned nonblock = 0; nonblock < 2; ++nonblock) {
++            setup(2); pending(0, 1);
++            if (nonblock) {
++                notify(1, first); assert(!CompletePendingFlip(c, FALSE));
++                assert(c->pendingValid && c->displayedBuffer == 0 && !sends && !waits);
++                signals = 0;
++            } else schedule(100000, 1, first);
++            schedule(200000, 1, BOTH ^ first);
++            assert(CompletePendingFlip(c, TRUE)); timerIdle();
++            assert(c->displayedBuffer == 1 && c->drawingBuffer == 0 && !c->pendingValid);
++            assert(c->bufferSafe == BIT(0) && !c->bufferDisplayed);
++            assert(sends == 1 && aborts == 1 && waits == (nonblock ? 1 : 2));
++            assert(dequeued == 3 && !c->safePort->head && !c->displayPort->head);
++            finish();
++        }
++    }
++    puts("PASS notifications: pending NEW DBufInfo releases OLD bitmap; both arrival orders");
++}
++static void test_deadline(void) {
++    for (ULONG replies = 0; replies <= BOTH; ++replies) {
++        setup(2); pending(0, 1);
++        if (replies) schedule(2000000, 1, replies);
++        assert(CompletePendingFlip(c, TRUE) == (replies == BOTH)); timerIdle();
++        assert(now == 2000000 && deadline == 2000000);
++        assert(sends == 1 && waits == 1 && signalClears == 1 && !aborts);
++        assert(c->pendingValid == (replies != BOTH));
++        if (replies != BOTH) {
++            assert(c->displayedBuffer == 0); notify(1, BOTH ^ replies);
++            assert(CompletePendingFlip(c, TRUE) && sends == 1);
++        }
++        finish();
++    }
++    setup(3); pending(0, 1);
++    signals = WAIT_MASK | BIT(OTHER_BIT) | BIT(12); /* stale timer, port and Ctrl-C signals */
++    schedule(250000, 0, SPURIOUS); schedule(750000, 0, FOREIGN);
++    schedule(1250000, 2, BOTH); schedule(1750000, 0, FOREIGN);
++    assert(!CompletePendingFlip(c, TRUE)); timerIdle();
++    assert(now == 2000000 && sends == 1 && signalClears == 1 && waits == 6);
++    assert(signals == (BIT(OTHER_BIT) | BIT(12)) && c->pendingValid);
++    assert(!c->bufferDisplayed && !(c->bufferSafe & BIT(0))); finish();
++    setup(2); pending(0, 1); completionError = -7;
++    schedule(2000000, 1, BOTH);
++    assert(!CompletePendingFlip(c, TRUE)); timerIdle();
++    assert(c->pendingValid && c->displayedBuffer == 0 && !aborts && reaps == 1);
++    assert(c->bufferSafe == BIT(0) && c->bufferDisplayed == BIT(1)); finish();
++    setup(2); pending(0, 1); armReplies = BOTH;
++    signals = BIT(SAFE_BIT) | BIT(DISPLAY_BIT) | BIT(TIMER_BIT) | BIT(OTHER_BIT);
++    assert(CompletePendingFlip(c, TRUE)); timerIdle();
++    assert(sends == 1 && !waits && aborts == 1 && signalClears == 1);
++    assert((signals & ~BIT(TIMER_BIT)) == (BIT(SAFE_BIT) | BIT(DISPLAY_BIT) | BIT(OTHER_BIT)));
++    finish();
++    puts("PASS deadline: one 2s request, exact waitmask, timeout/message tie, foreign/spurious signals");
++}
++static void test_fastpaths_and_guards(void) {
++    setup(2);
++    assert(CompletePendingFlip(c, TRUE));
++    assert(WaitBufferNotifications(c, 0, 0, TRUE));
++    assert(WaitTargetBufferSafe(c));
++    pending(0, 1); assert(!CompletePendingFlip(c, FALSE));
++    notify(1, BOTH); assert(CompletePendingFlip(c, FALSE));
++    assert(!sends && !waits && !signalClears); finish();
++    for (unsigned which = 0; which < 3; ++which) {
++        for (unsigned fault = 0; fault < 5; ++fault) {
++            setup(2); pending(0, 1);
++            struct MsgPort **slot = which == 0 ? &c->safePort :
++                                   which == 1 ? &c->displayPort : &c->displayTimerPort;
++            struct MsgPort *p = *slot;
++            if (fault == 0) *slot = NULL;
++            if (fault == 1) p->mp_SigTask = &foreign;
++            if (fault == 2) p->mp_Flags = PA_SIGNAL + 1;
++            if (fault == 3) p->mp_SigBit = 32;
++            if (fault == 4) p->mp_SigBit = 255;
++            assert(!CompletePendingFlip(c, TRUE));
++            assert(!sends && !waits && !signalClears && c->pendingValid);
++            *slot = p; p->mp_SigTask = &owner; p->mp_Flags = PA_SIGNAL;
++            p->mp_SigBit = which == 0 ? SAFE_BIT : which == 1 ? DISPLAY_BIT : TIMER_BIT;
++            finish();
++        }
++    }
++    setup(2); pending(0, 1); SysBase->ThisTask = &foreign; notify(1, BOTH);
++    assert(!CompletePendingFlip(c, TRUE) && dequeued == 0 && !sends);
++    SysBase->ThisTask = &owner; assert(CompletePendingFlip(c, TRUE) && !sends); finish();
++    setup(2); pending(0, 1); CloseDisplayWaitTimer(c);
++    assert(!CompletePendingFlip(c, TRUE) && !sends);
++    notify(1, BOTH); assert(CompletePendingFlip(c, TRUE) && !sends);
++    assert(OpenDisplayWaitTimer(c)); finish();
++    setup(2); pending(0, 1); arm();
++    assert(!CompletePendingFlip(c, TRUE) && sends == 1 && !reaps && !waits);
++    assert(c->displayTimerPending); CloseDisplayWaitTimer(c);
++    assert(aborts == 1 && reaps == 1); assert(OpenDisplayWaitTimer(c)); finish();
++    puts("PASS fastpaths/guards: no SendIO when ready/nonblocking; reject wrong owner/invalid ports");
++}
++static void test_target_and_restore(void) {
++    setup(3); c->drawingBuffer = 0; pending(0, 1);
++    schedule(100000, 1, SAFE); assert(WaitTargetBufferSafe(c)); timerIdle();
++    assert(c->pendingValid && c->displayedBuffer == 0 && c->bufferSafe == (BIT(0) | BIT(2)));
++    assert(!c->bufferDisplayed && sends == 1); finish();
++    setup(3); c->drawBuffer = GL_FRONT; c->fullscreen = FALSE;
++    assert(WaitTargetBufferSafe(c) && !sends); c->fullscreen = TRUE;
++    assert(WaitTargetBufferSafe(c) && !sends);
++    c->drawBuffer = GL_BACK; c->bufferSafe &= ~BIT(c->drawingBuffer);
++    assert(!WaitTargetBufferSafe(c) && sends == 1 && now == 2000000); finish();
++    setup(3);
++    assert(RestorePrimaryBuffer(c) && !sends && !changes);
++    c->fullscreen = FALSE; assert(RestorePrimaryBuffer(c)); c->fullscreen = TRUE;
++    c->screenOwned = FALSE; assert(RestorePrimaryBuffer(c)); c->screenOwned = TRUE;
++    struct ScreenBuffer *primary = c->screenBuffers[0]; c->screenBuffers[0] = NULL;
++    assert(RestorePrimaryBuffer(c)); c->screenBuffers[0] = primary;
++    assert(!sends && !changeCalls); pending(0, 1);
++    schedule(100000, 1, DISPLAY); schedule(200000, 1, SAFE); autoReplies = DISPLAY;
++    assert(RestorePrimaryBuffer(c)); timerIdle();
++    assert(!c->pendingValid && c->displayedBuffer == 0 && changes == 1 && sends == 2);
++    finish();
++    setup(2); c->displayedBuffer = 1; c->bufferSafe = BIT(0); failures = 100;
++    assert(!RestorePrimaryBuffer(c) && changeCalls == 100 && tofs == 100 && !sends);
++    assert(c->displayedBuffer == 1 && !c->pendingValid); finish();
++    setup(2); c->displayedBuffer = 1; c->bufferSafe = BIT(0);
++    assert(!RestorePrimaryBuffer(c)); timerIdle();
++    assert(c->displayedBuffer == 1 && c->pendingValid && c->pendingBuffer == 0);
++    assert(changes == 1 && sends == 1 && now == 2000000); finish();
++    puts("PASS target/restore: front/back safety, finish pending flip, restore once, bounded failures");
++}
++static void test_rotation(void) {
++    static const ULONG doubleOrder[] = {1, 0}, tripleOrder[] = {1, 2, 0};
++    for (ULONG count = 2; count <= 3; ++count) {
++        for (ULONG sync = 0; sync <= 1; ++sync) {
++            setup(count); c->syncEnabled = sync; autoReplies = sync ? DISPLAY : 0;
++            c->captureCacheValid = c->pendingDrawValid = TRUE;
++            const ULONG *order = count == 2 ? doubleOrder : tripleOrder;
++            for (ULONG frame = 0; frame < 12; ++frame) {
++                if (!sync && c->pendingValid) notify(c->pendingBuffer, BOTH);
++                ULONG drawn = order[frame % count], next = order[(frame + 1) % count];
++                Lib_mglSwitchDisplay(); timerIdle();
++                assert(!c->error && !c->displayWaitFailed && submittedBuffer == drawn);
++                assert(c->drawingBuffer == next && changes == frame + 1 && submits == frame + 1);
++                assert(TargetSurface(c) == &c->surfaces[next]);
++                assert(c->captureCache.header[2] == (ULONG)(uintptr_t)c->surfaces[next].Handle);
++                assert(c->pendingDraw.header[2] == c->captureCache.header[2]);
++                assert(c->pendingValid == !sync);
++                if (sync) {
++                    assert(c->displayedBuffer == drawn && sends == frame + 1);
++                    assert(c->bufferSafe == ((BIT(count) - 1) & ~BIT(drawn)));
++                } else assert(c->pendingBuffer == drawn && !sends && !waits);
++            }
++            finish();
++        }
++    }
++    setup(3); c->syncEnabled = FALSE; Lib_mglSwitchDisplay();
++    Lib_mglSwitchDisplay(); notify(1, DISPLAY); Lib_mglSwitchDisplay();
++    assert(!c->error && c->pendingValid && changes == 1 && submits == 3 && !sends);
++    assert(c->drawingBuffer == 2 && c->displayedBuffer == 0);
++    notify(1, SAFE); Lib_mglSwitchDisplay();
++    assert(changes == 2 && c->pendingBuffer == 2 && c->drawingBuffer == 0 && !sends);
++    finish();
++    setup(2); Lib_mglSwitchDisplay();
++    assert(c->displayWaitFailed && c->error == GL_INVALID_OPERATION && sends == 1);
++    assert(c->pendingValid && changes == 1 && submits == 1 && flushes == 1);
++    Lib_mglSwitchDisplay();
++    assert(changes == 1 && submits == 1 && flushes == 1 && sends == 1); finish();
++    puts("PASS SwitchDisplay: real 2/3-buffer sync/async rotation, skipped flips, failure latch");
++}
++static void test_front_buffer(void) {
++    setup(3); c->drawBuffer = GL_FRONT; pending(0, 1); notify(1, BOTH);
++    assert(WaitTargetBufferSafe(c) && !sends && !waits && !dequeued);
++    assert(c->pendingValid && c->bufferSafe == BIT(2) && !c->bufferDisplayed); finish();
++    for (ULONG count = 2; count <= 3; ++count) {
++        for (ULONG sync = 0; sync <= 1; ++sync) {
++            setup(count); c->drawBuffer = GL_FRONT; c->syncEnabled = sync;
++            autoReplies = sync ? DISPLAY : 0;
++            assert(!(c->bufferSafe & BIT(c->displayedBuffer)));
++            assert(TargetSurface(c) == &c->surfaces[c->displayedBuffer]);
++            Lib_mglSwitchDisplay(); timerIdle();
++            assert(!c->error && !c->displayWaitFailed && submits == 1 && flushes == 1);
++            assert(submittedBuffer == 0 && changes == 1 && semanticBumps == 1);
++            assert(sends == sync && now == (sync ? 200000 : 0));
++            if (!sync) {
++                Lib_mglSwitchDisplay();
++                assert(!c->error && !c->displayWaitFailed && submits == 2 && flushes == 2);
++                assert(submittedBuffer == 0 && changes == 1 && !sends && !waits);
++            }
++            finish();
++        }
++    }
++    setup(2); c->drawBuffer = GL_FRONT; submitOK = FALSE;
++    Lib_mglSwitchDisplay();
++    assert(c->error == GL_INVALID_OPERATION && !c->displayWaitFailed);
++    assert(submits == 1 && flushes == 1 && !changes && !sends && !waits);
++    submitOK = TRUE; finish();
++    puts("PASS GL_FRONT: visible rendering without safety waits; normal GPU drain and errors retained");
++}
++static void test_public_delete(void) {
++    for (ULONG first = SAFE; first <= DISPLAY; ++first) {
++        setup(3); pending(0, 1);
++        GLcontext saved = mini_CurrentContext;
++        struct MiniGLLibrary library = {{0}, 1234};
++        assert(MGLBackendHasContext() && !library.lib.lib_OpenCnt);
++        assert(LibExpunge(&library) == 0 && (library.lib.lib_Flags & LIBF_DELEXP));
++        assert(library.segList == 1234 && !freed);
++        expectPreclear = TRUE;
++        MGLD_mglDeleteContext(); timerIdle();
++        assert(preclearChecks == 1 && lockEntries == 1 && !backend.lock.held);
++        assert(mini_CurrentContext == saved && backend.context == c && backend.owner == &owner);
++        assert(CurrentContext() == c && MGLBackendHasContext());
++        assert(c->displayWaitFailed && c->pendingValid && c->error == GL_INVALID_OPERATION);
++        assert(now == 2000000 && sends == 1 && !freed && !closes && !windowCloses);
++        assert(c->safePort->mp_Flags == PA_SIGNAL && c->displayPort->mp_Flags == PA_SIGNAL);
++        notify(1, first); schedule(now + 100000, 1, BOTH ^ first); autoReplies = DISPLAY;
++        MGLD_mglDeleteContext();
++        assert(preclearChecks == 2 && lockEntries == 2 && !backend.lock.held);
++        assert(!c && !mini_CurrentContext && !backend.context && !backend.owner);
++        assert(!CurrentContext() && !MGLBackendHasContext() && !live && allocated == freed);
++        assert(sends == 3 && reaps == sends && !outstanding && !opened);
++        assert(flushes == 1 && submits == 1 && drains == 1 && freedBuffers == 3);
++        MGLD_mglDeleteContext();
++        assert(preclearChecks == 2 && lockEntries == 2);
++        expectPreclear = FALSE;
++    }
++    puts("PASS public delete: real pre-clearing wrapper/thunk, failed-delete republish, late replies and retry");
++}
++static void test_task_close(void) {
++    setup(2);
++    struct MiniGLLibrary library = {{0}, 1234}; library.lib.lib_OpenCnt = 1;
++    assert(LibClose(&library) == 0 && !library.lib.lib_OpenCnt);
++    assert(!c && !live && !MGLBackendHasContext() && !backend.owner && !mini_CurrentContext);
++    assert(!disables && !enables && windowCloses == 1 && freedBuffers == 2);
++    for (unsigned activeTimer = 0; activeTimer < 2; ++activeTimer) {
++        setup(3); pending(0, 1);
++        if (activeTimer) { c->displayWaitFailed = TRUE; drainOK = FALSE; arm(); }
++        library.lib.lib_OpenCnt = 1; library.lib.lib_Flags = LIBF_DELEXP;
++        assert(LibClose(&library) == 0 && !library.lib.lib_OpenCnt);
++        timerIdle();
++        assert(backend.context == c && !backend.owner && !mini_CurrentContext && !CurrentContext());
++        assert(MGLBackendHasContext() && c->displayWaitFailed && c->pendingValid);
++        assert(disables == 1 && enables == 1 && !interruptsDisabled && !backend.lock.held);
++        assert(!c->window && !c->displayTimerPort && !c->displayTimerOpen);
++        assert(windowCloses == 1 && closes == 1 && portDeletes == 1 && sends == 1 && reaps == 1);
++        assert(aborts == activeTimer && freed == 2 && live == allocated - 2);
++        assert(!cleanupCalls && !released && !freedBuffers && !deferred);
++        for (ULONG i = 0; i < 3; ++i) {
++            assert(c->screenBuffers[i] && c->surfaces[i].Handle == &handles[i]);
++            assert(c->screenBuffers[i]->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort == c->safePort);
++            assert(c->screenBuffers[i]->sb_DBufInfo->dbi_DispMessage.mn_ReplyPort == c->displayPort);
++        }
++        assert(c->safePort->mp_Flags == PA_IGNORE && !c->safePort->mp_SigTask);
++        assert(c->displayPort->mp_Flags == PA_IGNORE && !c->displayPort->mp_SigTask);
++        unsigned deliveredBefore = signalDeliveries, dequeuedBefore = dequeued;
++        ULONG signalsBefore = signals;
++        owner.alive = FALSE; SysBase->ThisTask = &foreign;
++        notify(1, DISPLAY); notify(1, SAFE);
++        assert(signalDeliveries == deliveredBefore && signals == signalsBefore);
++        assert(c->safePort->head == &c->screenBuffers[1]->sb_DBufInfo->dbi_SafeMessage);
++        assert(c->displayPort->head == &c->screenBuffers[1]->sb_DBufInfo->dbi_DispMessage);
++        assert(!CompletePendingFlip(c, TRUE) && !DestroyContext(c));
++        Lib_mglDeleteContext(); MGLD_mglDeleteContext();
++        MGLBackendTaskClose(&owner); MGLBackendTaskClose(&foreign);
++        assert(dequeued == dequeuedBefore && sends == 1 && freed == 2 && disables == 1);
++        assert(backend.context == c && !backend.owner && !CurrentContext() && MGLBackendHasContext());
++        library.lib.lib_Flags = 0;
++        assert(LibExpunge(&library) == 0 && (library.lib.lib_Flags & LIBF_DELEXP));
++        assert(library.segList == 1234 && !mini_CurrentContext);
++        /* Quarantine is terminal in production. Release only mock allocations
++         * after all assertions, for test isolation; this is not a recovery path. */
++        DrainNotifications(c->safePort); DrainNotifications(c->displayPort);
++        for (unsigned i = allocated; i-- > 0;)
++            if (allocations[i].p) release(allocations[i].p, allocations[i].size);
++        c = NULL; backend.context = NULL;
++    }
++    for (unsigned mode = 0; mode < 3; ++mode) {
++        setup(2); pending(0, 1);
++        SysBase->ThisTask = mode == 2 ? &owner : &foreign;
++        MGLBackendTaskClose(mode == 1 ? &owner : &foreign);
++        assert(backend.context == c && backend.owner == &owner && mini_CurrentContext == (GLcontext)c);
++        assert(c->window && c->displayTimerOpen && c->pendingValid && !c->displayWaitFailed);
++        assert(c->safePort->mp_Flags == PA_SIGNAL && c->safePort->mp_SigTask == &owner);
++        assert(c->displayPort->mp_Flags == PA_SIGNAL && c->displayPort->mp_SigTask == &owner);
++        assert(!disables && !enables && !freed && !windowCloses && !closes);
++        assert(!waits && !sends && !flushes && !submits && !backend.lock.held);
++        finish();
++    }
++    puts("PASS task close: terminal quarantine, atomic port detachment, no dead-task signals, expunge/foreign-close guards");
++}
++static void test_destroy(void) {
++    assert(DestroyContext(NULL));
++    setup(3); pending(0, 1);
++    c->activeFastPath = &fastPath;
++    c->fastBufferBytes = 16; c->fastBuffer = allocate(16);
++    fastPath.privateData = fastPath.currentVertex = c->fastBuffer;
++    c->lockedCount = c->indexCacheSize = 2;
++    c->lockedVertices = allocate(2 * sizeof(struct Vertex));
++    c->indexCacheVerts = allocate(2 * sizeof(struct Vertex));
++    c->indexCacheStamp = allocate(2 * sizeof(ULONG));
++    c->bitmap = allocate(sizeof(struct BitMap)); c->depthBitmap = allocate(sizeof(struct BitMap));
++    c->depthSurface.Handle = &handles[3];
++    c->textures[1].surface.Handle = &handles[4];
++    c->textures[1].bitmap = allocate(sizeof(struct BitMap));
++    c->textures[1].imageBytes = 16; c->textures[1].image = allocate(16);
++    c->textures[1].levelCount = 1; c->textures[1].dirtyRects = allocate(sizeof(struct TextureDirtyRect));
++    c->segmentLeaseCount = 1; c->segmentLeases[0].id = 42;
++    schedule(100000, 1, DISPLAY);
++    assert(!DestroyContext(c)); timerIdle();
++    assert(c->displayWaitFailed && c->error == GL_INVALID_OPERATION && c->pendingValid);
++    assert(c->displayedBuffer == 0 && c->displayTimerOpen && !closes);
++    assert(!freed && !cleanupCalls && !released && !deferred && live == allocated);
++    assert(fastPath.privateData == c->fastBuffer && fastPath.currentVertex == c->fastBuffer);
++    assert(flushes == 1 && submits == 1 && !drains);
++    drainOK = FALSE; assert(!DestroyContext(c));
++    assert(!freed && !cleanupCalls && drains == 1 && sends == 1);
++    drainOK = TRUE; finish();
++    assert(!fastPath.privateData && !fastPath.currentVertex && released == 5 && freedBuffers == 3);
++    assert(flushes == 1 && submits == 1 && drains == 2);
++    for (unsigned which = 0; which < 2; ++which) {
++        setup(2);
++        struct MsgPort *p = which ? c->displayPort : c->safePort;
++        p->mp_SigTask = &foreign;
++        assert(!DestroyContext(c));
++        assert(c->error == GL_INVALID_OPERATION && !waits && !sends && !flushes && !freed);
++        p->mp_SigTask = &owner; finish();
++    }
++    setup(3); notify(2, BOTH); notify(0, FOREIGN);
++    /* No pending flip: RestorePrimaryBuffer cannot do the teardown drain. */
++    assert(DestroyContext(c) && dequeued == 4 && freedBuffers == 3 && !live);
++    for (unsigned stage = 0; stage < 6; ++stage) {
++        reset();
++        if (stage >= 1) { c->screen = allocate(sizeof(*c->screen)); c->screenOwned = TRUE; }
++        if (stage >= 2) c->window = allocate(sizeof(*c->window));
++        if (stage >= 3) c->safePort = port(SAFE_BIT);
++        if (stage >= 4) c->displayPort = port(DISPLAY_BIT);
++        if (stage >= 5) { failOpen = TRUE; assert(!OpenDisplayWaitTimer(c)); }
++        c->fullscreen = TRUE; finish();
++        assert(!sends && !aborts && !reaps && !closes && !freedBuffers);
++        assert(portDeletes == (unsigned)((stage >= 3) + (stage >= 4) + (stage >= 5)));
++    }
++    puts("PASS DestroyContext: retain all resources on timeout, retry, wrong owner, drain-before-free, partial init");
++}
++int main(void) {
++    setvbuf(stdout, NULL, _IONBF, 0);
++    assert((uintptr_t)handles + sizeof(handles) <= UINT32_MAX);
++    test_timer(); test_pump_and_order(); test_deadline(); test_fastpaths_and_guards();
++    test_target_and_restore(); test_rotation(); test_front_buffer(); test_destroy();
++    test_public_delete(); test_task_close();
++    puts("R200 display-wait CPU regressions passed (ASan/UBSan)");
++    return 0;
++}
++'''
++
++
++def test_display_wait():
++    with tempfile.TemporaryDirectory(prefix="r200-display-wait-", dir="/tmp/opencode") as directory:
++        source = Path(directory) / "test.c"
++        binary = Path(directory) / "test"
++        source.write_text(code)
++        subprocess.run([
++            "cc", "-std=c99", "-Wall", "-Wextra", "-Werror", "-Wno-pointer-to-int-cast",
++            "-g", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
++            "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
++            str(source), "-o", str(binary),
++        ], check=True, timeout=30, cwd=directory)
++        subprocess.run([str(binary)], check=True, timeout=15, cwd=directory)
++
++
++if __name__ == "__main__":
++    test_display_wait()

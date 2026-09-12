@@ -2,7 +2,8 @@ MiniGL V19 WarpOS direct-R200 stack
 ==================================
 
 This build does not use Warp3D or Warp3DPPC. The PPC DLL contains the R200
-semantic frontend and sends protocol-v14 commands to the included m68k host.
+semantic frontend and sends protocol-v15 commands to the included m68k host
+(the host also accepts v14 clients).
 The host calls the direct-R200 m68k minigl.library, which uses Radeon9200.chip.
 
 Files
@@ -23,7 +24,24 @@ Requirements
 - Install a matching Radeon9200.chip and Prometheus.card in LIBS:Picasso96/.
 - Back up every installed library and driver before replacing it.
 - Cold reboot after changing Radeon9200.chip or Prometheus.card, then run
-  C:InitPPC before starting WarpOS software.
+   C:InitPPC before starting WarpOS software.
+
+Host loader classification
+--------------------------
+
+Sonnet's legacy loader can mistake the uppercase bytes RACE in a diagnostic
+string for a PPC program. The host build now checks the linked file for those
+signatures and constructs the upload-trace environment name at runtime.
+
+If replacing a previously misclassified 68k host, preserve unrelated file
+protection bits and set (oldBits & ~0x00030000) | 0x00020000 with SetProtection
+or the bridge's protection-bit tool. Read back both the full bits and CRC.
+Never apply this override to the actual PPC DLL or PPC clients. Existing
+classification bits can survive a file replacement despite a correct CRC.
+
+The optional MGLPPC_CPEMIT=1 mode keeps command generation on the PPC and
+submission/recovery on the driver-owned 68k side. It currently supports
+windowed contexts only. See CP_EMITTER.md and HOST_LOADER_REGRESSION.md.
 
 Launch order
 ------------

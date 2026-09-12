@@ -1,0 +1,6 @@
+IBPPC ready mode=dry ctrl=43b40000 slot=0 epoch=1
+IBPPC published head=1 payload=8192,8
+IBPPC ack=1 mode=dry gpu_proof=0
+IBPPC ready mode=gpu ctrl=43b40000 slot=0 epoch=1
+IBPPC published head=1 payload=8192,8
+IBPPC ack=1 mode=gpu

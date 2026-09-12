@@ -704,6 +704,10 @@ done:
 #endif
 #if defined(R200_FRONTEND_LIBRARY)
 
+#include <libraries/minigl_ppc_ib_trace.h>
+#include <libraries/minigl_ppc_cp_emit.h>
+#include <libraries/minigl_ppc_yield.h>
+
 extern void MGLPPCFlushDataRange(APTR address, ULONG bytes);
 extern void MGLPPCBlit565Swap(UBYTE *destination, const UBYTE *source,
                               ULONG bytes);
@@ -734,6 +738,20 @@ typedef struct R200PPCFrontendPlatform {
     BOOL mailboxOutstanding;
     BOOL mailboxPoisoned;
     BOOL mailboxAbandoned;
+    BOOL nativeBindingKnown;
+    BOOL ibSmokeRequested;
+    BOOL ibSmokeConfirmed;
+    BOOL ibSmokeDry;
+    BOOL ibSmokeFailed;
+    ULONG ibSegmentBytes;
+    BOOL cpRequested, cpEnabled, cpFailed;
+    APTR cpAddress;
+    ULONG cpBytes, cpSurfaceCount;
+    struct {
+        ULONG token, epoch;
+        struct MGLPPCEmitSurface surface;
+    } cpSurfaces[16];
+    GLuint nativeBoundTexture;
     APTR ringSlotAllocations[MGLPPC_RING_SLOTS];
     ULONG *ringSlots[MGLPPC_RING_SLOTS];
     ULONG ringPostSerial;
@@ -1189,9 +1207,22 @@ static ULONG PlatformClockRate;
 
 #if MGLPPC_PROFILE
 static MGLPPCSemanticPlatformProfile PlatformProfile;
+static unsigned long long PlatformProfileStart;
 static ULONG PlatformSessionStart;
 static MGLPPCTimelineEntry PlatformTimeline[MGLPPC_TIMELINE_ENTRIES];
 static ULONG PlatformTimelineCount;
+
+/* Diagnostic lifetime only, independent of the legacy protocol clocks. */
+static unsigned long long PlatformProfileClock64(void)
+{
+    ULONG upper, lower, again;
+    do {
+        __asm__ volatile("mftbu %0\n\tmftb %1\n\tmftbu %2"
+                         : "=r"(upper), "=r"(lower), "=r"(again)
+                         : : "memory");
+    } while (upper != again);
+    return ((unsigned long long)upper << 32) | lower;
+}
 #endif
 
 void R200PPCTimelineMark(ULONG ev, ULONG a, ULONG b)
@@ -1346,6 +1377,9 @@ static BOOL PlatformMailboxWait(void)
 static BOOL PlatformCallFail(ULONG command, const char *why)
 {
     static ULONG pcFails;
+    /* A failed control may have changed native binding before its error or
+     * lost reply. Only a subsequent acknowledged bind can re-establish it. */
+    FrontendPlatform.nativeBindingKnown = FALSE;
     ++pcFails;
     if (pcFails <= 32UL || (pcFails & 8191UL) == 0UL) {
         R200PPCConsolePrintf("RING pcall FAIL cmd=%lu n=%lu (%s)\n",
@@ -1362,6 +1396,10 @@ static BOOL PlatformCall(ULONG command, ULONG contextId)
     ULONG profileStart = PerfClock();
 #endif
     BOOL result;
+
+    if (command != MGLPPC_CMD_CP_SURFACE && command != MGLPPC_CMD_GET_INTEGER &&
+        command != MGLPPC_CMD_BIND_TEXTURE && command != MGLPPC_CMD_SEMANTIC_BARRIER)
+        FrontendPlatform.cpSurfaceCount = 0;
 
     FrontendPlatform.control.command = command;
     FrontendPlatform.control.contextId = contextId;
@@ -1502,6 +1540,7 @@ static void CopyRecordToRingSlot(const ULONG *source, ULONG *destination,
  * bug. Called from both dispatch admission paths. */
 void R200PPCPlatformResetClientDefaults(void)
 {
+    FrontendPlatform.nativeBindingKnown = FALSE;
     FrontendPlatform.pixelDepth = 32;
     /* MiniGL's native default is fullscreen; only an explicit
      * mglChooseWindowMode(GL_TRUE) (the client's -window flag) opens a
@@ -1518,6 +1557,7 @@ BOOL R200PPCPlatformOpen(void)
     memset(&FrontendPlatform, 0, sizeof(FrontendPlatform));
 #if MGLPPC_PROFILE
     memset(&PlatformProfile, 0, sizeof(PlatformProfile));
+    PlatformProfileStart = PlatformProfileClock64();
 #endif
     R200PPCPlatformResetClientDefaults();
     FrontendPlatform.peerProtocol = 15UL;
@@ -1569,6 +1609,217 @@ BOOL R200PPCPlatformOpen(void)
     return TRUE;
 }
 
+/* No ordinary GL work starts until the single startup entry is acknowledged.
+ * Timeout is terminal: retain shared storage instead of risking GPU reuse. */
+static BOOL R200PPCIbSmokeAfterRegistration(void)
+{
+    volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
+    volatile MGLPPCRingEntryV1 *entry;
+    volatile ULONG *ibWords;
+    ULONG *slotData;
+    ULONG head, slot, index, start, polls;
+    const char *failure = "unsupported";
+    char line[160];
+
+    if (!FrontendPlatform.ibSmokeRequested)
+        return TRUE;
+    if (!control || !FrontendPlatform.ibSmokeConfirmed ||
+        FrontendPlatform.ibSegmentBytes < MGLPPC_RING_SEGMENT_BYTES ||
+        (ULONG)control > 0xffffffffUL - MGLPPC_RING_SEGMENT_BYTES ||
+        PlatformClockRate < 10000UL || PlatformClockRate > 0x7fffffffUL / 5UL)
+        goto failed;
+    failure = "registration";
+    MGLPPCInvalidateLine32((APTR)&control->head);
+    MGLPPCInvalidateLine32((APTR)&control->retired);
+    head = control->head;
+    if (control->magic != MGLPPC_RING_MAGIC ||
+        control->version != MGLPPC_RING_CONTROL_VERSION ||
+        control->epoch != FrontendPlatform.epoch ||
+        control->slotCount != MGLPPC_RING_SLOTS ||
+        control->slotDwords != MGLPPC_SEMANTIC_SLOT_DWORDS || control->error ||
+        head || control->completed != head || control->retired != head)
+        goto failed;
+    slot = head % MGLPPC_RING_SLOTS;
+    slotData = FrontendPlatform.ringSlots[slot];
+    if (!slotData || control->slotAddrs[slot] != (ULONG)slotData)
+        goto failed;
+    sprintf(line, "IBPPC ready mode=%s ctrl=%08lx slot=%lu epoch=%lu\n",
+            FrontendPlatform.ibSmokeDry ? "dry" : "gpu", (unsigned long)control,
+            (unsigned long)slot, (unsigned long)FrontendPlatform.epoch);
+    MGLPPCIBTrace("DH2:ibppc.log", line);
+
+    ibWords = (volatile ULONG *)((UBYTE *)control + MGLPPC_IB_OFFSET);
+    ibWords[0] = __builtin_bswap32(0x00000579UL); /* SCRATCH_REG1 packet */
+    ibWords[1] = __builtin_bswap32(0xdeadbeefUL);
+    for (index = 2; index < MGLPPC_IB_SMOKE_DWORDS; ++index)
+        ibWords[index] = __builtin_bswap32(0x80000000UL);
+    MGLPPCFlushDataRange((APTR)ibWords, MGLPPC_IB_SMOKE_DWORDS * sizeof(ULONG));
+    (void)ibWords[MGLPPC_IB_SMOKE_DWORDS - 1UL];
+    slotData[0] = MGLPPC_IB_OFFSET;
+    slotData[1] = MGLPPC_IB_SMOKE_DWORDS;
+    MGLPPCFlushDataRange((APTR)slotData, 2UL * sizeof(ULONG));
+    entry = &control->entries[slot];
+    entry->slot = slot;
+    entry->dwords = 2UL;
+    entry->generation = ++FrontendPlatform.ringPostSerial;
+    entry->flags = MGLPPC_SEMANTIC_FLAG_INDIRECT;
+    entry->crc = 0UL;
+    MGLPPCFlushDataRange((APTR)entry, sizeof(*entry));
+    control->head = head + 1UL;
+    MGLPPCFlushDataRange((APTR)&control->head, sizeof(control->head));
+    MGLPPCIBTrace("DH2:ibppc.log", "IBPPC published head=1 payload=8192,8\n");
+    start = PerfClock();
+    failure = "ack_timeout";
+    for (polls = 0; polls < 250UL; ++polls) {
+        MGLPPCInvalidateLine32((APTR)&control->completed);
+        MGLPPCInvalidateLine32((APTR)&control->retired);
+        if (control->error || control->epoch != FrontendPlatform.epoch) {
+            failure = "host_error_or_epoch";
+            break;
+        }
+        if (control->completed == head + 1UL && control->retired == head + 1UL) {
+            MGLPPCIBTrace("DH2:ibppc.log", FrontendPlatform.ibSmokeDry ?
+                         "IBPPC ack=1 mode=dry gpu_proof=0\n" :
+                         "IBPPC ack=1 mode=gpu\n");
+            return TRUE;
+        }
+        if (PerfClock() - start >= PlatformClockRate * 5UL)
+            break;
+        Delay(1);
+    }
+failed:
+    FrontendPlatform.ibSmokeFailed = TRUE;
+    sprintf(line, "IBPPC failed stage=%s stop=1 retained=1\n", failure);
+    MGLPPCIBTrace("DH2:ibppc.log", line);
+    return FALSE;
+}
+
+static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *out)
+{
+    struct MiniGLR200Context *context = user;
+    ULONG index;
+    if (!token || !FrontendPlatform.cpEnabled || FrontendPlatform.cpFailed)
+        return FALSE;
+    for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index)
+        if (FrontendPlatform.cpSurfaces[index].token == token &&
+            FrontendPlatform.cpSurfaces[index].epoch == context->deviceEpoch) {
+            *out = FrontendPlatform.cpSurfaces[index].surface;
+            return TRUE;
+        }
+    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+    FrontendPlatform.control.value[0] = token;
+    if (!PlatformCall(MGLPPC_CMD_CP_SURFACE, FrontendPlatform.contextId) ||
+        FrontendPlatform.control.value[0] != GL_NO_ERROR ||
+        FrontendPlatform.control.value[7] != context->deviceEpoch)
+        return FALSE;
+    out->cpuAddress = FrontendPlatform.control.value[1];
+    out->gpuAddress = FrontendPlatform.control.value[2];
+    out->pitch = FrontendPlatform.control.value[3];
+    out->width = FrontendPlatform.control.value[4];
+    out->height = FrontendPlatform.control.value[5];
+    out->format = FrontendPlatform.control.value[6];
+    if (FrontendPlatform.cpSurfaceCount == 16UL)
+        FrontendPlatform.cpSurfaceCount = 0;
+    index = FrontendPlatform.cpSurfaceCount++;
+    FrontendPlatform.cpSurfaces[index].token = token;
+    FrontendPlatform.cpSurfaces[index].epoch = context->deviceEpoch;
+    FrontendPlatform.cpSurfaces[index].surface = *out;
+    return TRUE;
+}
+
+static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *slot)
+{
+    volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
+    volatile MGLPPCRingEntryV1 *entry;
+    volatile ULONG *destination;
+    struct MGLPPCEmitVertices vertices;
+    ULONG head, ringSlot, count, index, segmentIx = 0xffffffffUL;
+    ULONG *staging, start = PerfClock(), spin = 0;
+    const char *failure = "ring";
+    if (!control || !FrontendPlatform.cpAddress ||
+        FrontendPlatform.cpBytes < MGLPPC_CP_SEGMENT_BYTES)
+        goto failed;
+    head = control->head;
+    /* Completion releases CPU metadata, retirement releases GPU-read slices. */
+    for (;;) {
+        if (!(spin & 255UL)) {
+            MGLPPCInvalidateLine32((APTR)&control->head);
+            MGLPPCInvalidateLine32((APTR)&control->retired);
+        }
+        if (control->error || control->epoch != FrontendPlatform.epoch)
+            goto failed;
+        if (head - control->retired < MGLPPC_RING_SLOTS)
+            break;
+        if (PerfClock() - start >= PlatformClockRate * 5UL || ++spin > 5000000UL)
+            goto failed;
+        if (!(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
+            MGLPPCYield();
+    }
+    ringSlot = head % MGLPPC_RING_SLOTS;
+    staging = FrontendPlatform.ringSlots[ringSlot];
+    if (!staging || control->slotAddrs[ringSlot] != (ULONG)staging)
+        goto failed;
+    memset(&vertices, 0, sizeof(vertices));
+    if (slot->commitMode && slot->drawCount) {
+        for (index = 0; index < context->segmentPoolCount; ++index)
+            if (context->segmentPool[index].Id == context->segment.info.Id) {
+                segmentIx = index;
+                break;
+            }
+        if (segmentIx == 0xffffffffUL)
+            goto failed;
+        vertices.gpuAddress = context->segment.info.GpuAddress;
+        vertices.bytes = context->segment.info.Bytes;
+        vertices.drawCount = slot->drawCount;
+        vertices.stateBatch = slot->stateBatch;
+        vertices.offsets = slot->stateBatch ? (const ULONG *)slot->stateBatchDraws :
+                                            slot->vertexOffsets;
+    }
+    failure = "emit_or_surface";
+    count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
+                            vertices.drawCount ? &vertices : NULL,
+                            ResolveCpSurface, context);
+    if (!count || count > MGLPPC_CP_DWORDS)
+        goto failed;
+    /* Classic Radeon CP dispatch requires an even dword count (Linux
+     * radeon_cp_dispatch_indirect); padding is part of the endian conversion. */
+    if (count & 1UL)
+        staging[count++] = 0x80000000UL;
+    if (vertices.drawCount)
+        MGLPPCFlushDataRange((APTR)((ULONG)context->segment.info.CpuAddress +
+            context->buildSlot * SEGMENT_HALF_BYTES), slot->segmentCursor);
+    destination = (volatile ULONG *)((UBYTE *)FrontendPlatform.cpAddress +
+                                     ringSlot * MGLPPC_CP_SLICE_BYTES);
+    for (index = 0; index < count; ++index)
+        destination[index] = __builtin_bswap32(staging[index]);
+    MGLPPCFlushDataRange((APTR)destination, count * sizeof(ULONG));
+    (void)destination[count - 1UL];
+    staging[0] = ringSlot * MGLPPC_CP_SLICE_BYTES;
+    staging[1] = count;
+    staging[2] = vertices.drawCount ? 1UL << segmentIx : 0;
+    MGLPPCFlushDataRange(staging, 3UL * sizeof(ULONG));
+    entry = &control->entries[ringSlot];
+    entry->slot = ringSlot;
+    entry->dwords = 3UL;
+    entry->generation = ++FrontendPlatform.ringPostSerial;
+    entry->flags = MGLPPC_SEMANTIC_FLAG_CP_EMIT;
+    entry->crc = 0;
+    MGLPPCFlushDataRange((APTR)entry, sizeof(*entry));
+    control->syncEnabled = FrontendPlatform.syncEnabled;
+    control->syncSeq = FrontendPlatform.syncSeq;
+    MGLPPCFlushDataRange((APTR)&control->syncEnabled, 2UL * sizeof(ULONG));
+    control->head = head + 1UL;
+    MGLPPCFlushDataRange((APTR)&control->head, sizeof(control->head));
+    if (vertices.drawCount)
+        FrontendPlatform.segmentLastEntry[segmentIx] = FrontendPlatform.ringPostSerial;
+    return TRUE;
+failed:
+    FrontendPlatform.cpFailed = TRUE;
+    MGLPPCIBTrace("DH2:cpfail.log", failure);
+    R200PPCConsolePrintf("CP publish failed: %s\n", failure);
+    return FALSE;
+}
+
 BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
                                 ULONG slotIndex)
 {
@@ -1576,18 +1827,21 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
     MGLPPCMessage *message;
 #if MGLPPC_PROFILE
     ULONG profileStart, crcStart, flushStart, stallStart;
+    ULONG stallSleeps = 0, stallEntered = 0;
 #endif
     ULONG spin;
     ULONG crc = 0;
     BOOL crcArmedThisPublish = FALSE;
 
-    if (FrontendPlatform.mailboxAbandoned || !PlatformMailboxReady() ||
+    if (FrontendPlatform.ibSmokeFailed || FrontendPlatform.cpFailed || FrontendPlatform.mailboxAbandoned || !PlatformMailboxReady() ||
         context != &proofContext || !FrontendPlatform.registered ||
         slotIndex >= SUBMIT_SLOT_COUNT || FrontendPlatform.pending[slotIndex])
         return FALSE;
     slot = &context->submitSlots[slotIndex];
     if (!slot->recordCount || slot->recordCount > MGLPPC_SEMANTIC_SLOT_DWORDS)
         return FALSE;
+    if (FrontendPlatform.cpEnabled)
+        return PublishCpSlot(context, slot);
 #if defined(R200_FRONTEND_LIBRARY)
     if (ReplayCapture.active)
         CaptureReplaySlot(context, slot, slotIndex);
@@ -1641,6 +1895,13 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
         stallStart = PerfClock();
 #endif
         spin = 0;
+#if MGLPPC_PROFILE
+        stallSleeps = 0;
+        stallEntered =
+            (control->head - control->completed) >= control->slotCount;
+        if (stallEntered)
+            PlatformProfile.publishStallEnters++;
+#endif
 #if MGLPPC_CLIENT_TRACE
         {
             static ULONG pubStalls;
@@ -1659,10 +1920,15 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
                     (control->head - control->completed) < control->slotCount)
                     break;
             }
-            /* Yield so the 68k host can drain the ring; a pure spin
-             * monopolizes the scheduler on WarpOS. */
-            if (!(spin & 8191UL))
-                Delay(1);
+            /* Spend the bounded polling budget first: even a short WaitTime
+             * request can cost a full kernel quantum after space is available.
+             * Readiness, timeout and ownership checks remain in this loop. */
+            if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL))) {
+#if MGLPPC_PROFILE
+                ++stallSleeps;
+#endif
+                MGLPPCYield();
+            }
             if (control->error || ++spin > 5000000UL) {
                 R200PPCConsolePrintf("RING publish=FAIL stall head=%lu completed=%lu "
                        "err=%lu spin=%lu\n",
@@ -1684,6 +1950,9 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
             ULONG stalled = PerfClock() - stallStart;
             PlatformProfile.ringStallTicks += stalled;
             PlatformProfile.publishStallTicks += stalled;
+            PlatformProfile.publishStallSleeps += stallSleeps;
+            if (stallEntered && !stallSleeps)
+                PlatformProfile.publishStallNoSleep++;
         }
 #endif
         ringSlot = control->head % control->slotCount;
@@ -1844,6 +2113,7 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
 {
 #if MGLPPC_PROFILE
     ULONG profileStart, stallStart, drainStart;
+    ULONG stallSleeps = 0, stallEntered = 0;
 #endif
     ULONG spin;
     volatile MGLPPCRingControlV1 *control;
@@ -1881,6 +2151,13 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
             stallStart = PerfClock();
 #endif
             spin = 0;
+#if MGLPPC_PROFILE
+            stallSleeps = 0;
+            stallEntered =
+                (control->head - control->completed) >= control->slotCount;
+            if (stallEntered)
+                PlatformProfile.barrierStallEnters++;
+#endif
             while ((control->head - control->completed) >=
                    control->slotCount) {
                 if (!(spin & 255UL)) {
@@ -1889,8 +2166,13 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
                         (control->head - control->completed) < control->slotCount)
                         break;
                 }
-                if (!(spin & 8191UL))
-                    Delay(1);
+                /* Same bounded polling/yield policy as the publish loop. */
+                if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL))) {
+#if MGLPPC_PROFILE
+                    ++stallSleeps;
+#endif
+                    MGLPPCYield();
+                }
                 if (control->error || ++spin > 5000000UL) {
                     R200PPCConsolePrintf("RING present_wait_fail head=%lu completed=%lu "
                            "error=%lu spin=%lu slots=%lu\n",
@@ -1910,6 +2192,9 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
                 ULONG stalled = PerfClock() - stallStart;
                 PlatformProfile.ringStallTicks += stalled;
                 PlatformProfile.barrierStallTicks += stalled;
+                PlatformProfile.barrierStallSleeps += stallSleeps;
+                if (stallEntered && !stallSleeps)
+                    PlatformProfile.barrierStallNoSleep++;
             }
 #endif
             if (result) {
@@ -1947,16 +2232,28 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
 #endif
             spin = 0;
 #if MGLPPC_PROFILE
+            stallSleeps = 0;
+            stallEntered = control->completed != control->head;
+            if (stallEntered)
+                PlatformProfile.drainStallEnters++;
             R200PPCTimelineMark(MGLPPC_TL_DRAIN_ENTER, control->head, 0);
 #endif
-            while (control->completed != control->head) {
+            while ((FrontendPlatform.cpEnabled ? control->retired : control->completed) != control->head) {
                 if (!(spin & 255UL)) {
                     MGLPPCInvalidateLine32((APTR)&control->completed);
-                    if (!control->error && control->completed == control->head)
+                    if (FrontendPlatform.cpEnabled)
+                        MGLPPCInvalidateLine32((APTR)&control->retired);
+                    if (!control->error &&
+                        (FrontendPlatform.cpEnabled ? control->retired : control->completed) == control->head)
                         break;
                 }
-                if (!(spin & 8191UL))
-                    Delay(1);
+                /* Spin budget before the first sleep; see the publish loop. */
+                if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL))) {
+#if MGLPPC_PROFILE
+                    ++stallSleeps;
+#endif
+                    MGLPPCYield();
+                }
                 if (control->error || ++spin > 5000000UL) {
                     result = FALSE;
                     R200PPCConsolePrintf("RING barrier=FAIL drain head=%lu "
@@ -1974,6 +2271,9 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
             R200PPCTimelineMark(MGLPPC_TL_DRAIN_EXIT, control->completed,
                                 spin);
             PlatformProfile.drainTicks += PerfClock() - drainStart;
+            PlatformProfile.drainStallSleeps += stallSleeps;
+            if (stallEntered && !stallSleeps)
+                PlatformProfile.drainStallNoSleep++;
 #endif
         }
 #if MGLPPC_PROFILE || MGLPPC_CLIENT_TRACE
@@ -2019,6 +2319,9 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
 {
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
     ULONG next, spin = 0, index;
+#if MGLPPC_PROFILE
+    ULONG stallStart = 0, stallSleeps = 0, stallEntered = 0;
+#endif
 #if MGLPPC_CLIENT_TRACE
     static ULONG rotStalls;
 #endif
@@ -2051,6 +2354,10 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
                         "retired", control->retired);
 #endif
 #if MGLPPC_PROFILE
+    stallStart = PerfClock();
+    stallSleeps = 0;
+    stallEntered = 1;
+    PlatformProfile.rotateStallEnters++;
     R200PPCTimelineMark(MGLPPC_TL_STALL_ENTER, next,
                         FrontendPlatform.segmentLastEntry[next]);
 #endif
@@ -2064,8 +2371,13 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
                 control->retired >= FrontendPlatform.segmentLastEntry[next])
                 break;
         }
-        if (!(spin & 8191UL))
-            Delay(1);
+        /* Spin budget before the first sleep; see the publish loop. */
+        if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL))) {
+#if MGLPPC_PROFILE
+            ++stallSleeps;
+#endif
+            MGLPPCYield();
+        }
 #if MGLPPC_PROFILE || MGLPPC_CLIENT_TRACE
         if (!(spin & 500000UL)) {
             R200PPCConsolePrintf("RING rotate spin retired=%lu need=%lu spin=%lu\n",
@@ -2084,6 +2396,8 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
             R200PPCTraceUL2("rotate FAIL retired", control->retired,
                             "need", FrontendPlatform.segmentLastEntry[next]);
 #if MGLPPC_PROFILE
+            PlatformProfile.rotateStallTicks += PerfClock() - stallStart;
+            PlatformProfile.rotateStallSleeps += stallSleeps;
             R200PPCTimelineMark(MGLPPC_TL_STALL_EXIT, next, spin);
 #endif
             return FALSE;
@@ -2091,7 +2405,15 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
     }
 haveSegment:
 #if MGLPPC_PROFILE
-    R200PPCTimelineMark(MGLPPC_TL_STALL_EXIT, next, spin);
+    /* The fast path jumps straight here without ever entering the wait, so
+     * only a real stall may charge ticks or a no-sleep resolution. */
+    if (stallEntered) {
+        PlatformProfile.rotateStallTicks += PerfClock() - stallStart;
+        PlatformProfile.rotateStallSleeps += stallSleeps;
+        if (!stallSleeps)
+            PlatformProfile.rotateStallNoSleep++;
+        R200PPCTimelineMark(MGLPPC_TL_STALL_EXIT, next, spin);
+    }
 #endif
     context->segment.info = context->segmentPool[next];
     context->segment.valid = TRUE;
@@ -2104,6 +2426,7 @@ haveSegment:
 void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
 {
     ULONG index;
+    FrontendPlatform.nativeBindingKnown = FALSE;
     (void)offx;
     (void)offy;
     if (!FrontendPlatform.opened || R200PPCContext)
@@ -2184,6 +2507,24 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     FrontendPlatform.mailboxPoisoned = FALSE;
     FrontendPlatform.mailboxAbandoned = FALSE;
     FrontendPlatform.ringPostSerial = 0;
+    FrontendPlatform.ibSmokeConfirmed = FALSE;
+    FrontendPlatform.ibSmokeDry = FALSE;
+    FrontendPlatform.ibSmokeFailed = FALSE;
+    FrontendPlatform.ibSegmentBytes = 0;
+    FrontendPlatform.cpEnabled = FrontendPlatform.cpFailed = FALSE;
+    FrontendPlatform.cpAddress = NULL;
+    FrontendPlatform.cpBytes = FrontendPlatform.cpSurfaceCount = 0;
+    {
+        UBYTE flag[8];
+        flag[0] = 0;
+        FrontendPlatform.ibSmokeRequested =
+            GetVar((CONST_STRPTR)"MGLPPC_IBSMOKE", flag, sizeof(flag),
+                   GVF_GLOBAL_ONLY) > 0 && flag[0] == '1';
+        flag[0] = 0;
+        FrontendPlatform.cpRequested =
+            GetVar((CONST_STRPTR)"MGLPPC_CPEMIT", flag, sizeof(flag),
+                   GVF_GLOBAL_ONLY) > 0 && flag[0] == '1';
+    }
     /* The host verifies the first Execute of EACH registration, not DLL open. */
     FrontendPlatform.crcArmed = TRUE;
     FrontendPlatform.hostEventsConfirmed = FALSE;
@@ -2225,6 +2566,12 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                     MGLPPC_RING_REGISTER_HOST_EVENTS;
 #endif
             registerMessage->payloadWords = MGLPPC_RING_SLOTS;
+            if (FrontendPlatform.ibSmokeRequested &&
+                (FrontendPlatform.capabilities & MGLPPC_CAP_INDIRECT))
+                registerMessage->value[3] |= MGLPPC_RING_REGISTER_INDIRECT;
+            if (FrontendPlatform.cpRequested &&
+                (FrontendPlatform.capabilities & MGLPPC_CAP_CP_EMIT))
+                registerMessage->value[3] |= MGLPPC_RING_REGISTER_CP_EMIT;
             if ((FrontendPlatform.capabilities & MGLPPC_CAP_MAILBOX_V1) &&
                 FrontendPlatform.peerProtocol == MGLPPC_PROTOCOL_VERSION &&
                 PlatformClockRate >= 10000UL &&
@@ -2269,6 +2616,25 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                 FrontendPlatform.ring = (volatile MGLPPCRingControlV1 *)
                     registerMessage->value[0];
                 FrontendPlatform.epoch = registerMessage->value[1];
+                FrontendPlatform.ibSmokeConfirmed =
+                    (registerMessage->value[3] & MGLPPC_RING_REGISTER_INDIRECT) != 0;
+                FrontendPlatform.ibSmokeDry =
+                    (registerMessage->value[3] & MGLPPC_RING_REGISTER_IB_DRY) != 0;
+                FrontendPlatform.ibSegmentBytes = registerMessage->value[4];
+                FrontendPlatform.cpEnabled =
+                    (registerMessage->value[3] & MGLPPC_RING_REGISTER_CP_EMIT) != 0;
+                if (FrontendPlatform.cpEnabled) {
+                    if (!registerMessage->value[5] || (registerMessage->value[5] & 31UL) ||
+                        registerMessage->value[7] < MGLPPC_CP_SEGMENT_BYTES ||
+                        registerMessage->value[5] > 0xffffffffUL - registerMessage->value[7] ||
+                        vertexCount != MGLPPC_VERTEX_SEGMENTS ||
+                        registerMessage->payloadWords != vertexCount * 4UL) {
+                        FrontendPlatform.cpFailed = TRUE;
+                        return NULL;
+                    }
+                    FrontendPlatform.cpAddress = (APTR)registerMessage->value[5];
+                    FrontendPlatform.cpBytes = registerMessage->value[7];
+                }
                 if ((FrontendPlatform.capabilities & MGLPPC_CAP_MAILBOX_V1) &&
                     (registerMessage->value[3] & MGLPPC_RING_REGISTER_MAILBOX) &&
                     FrontendPlatform.peerProtocol == MGLPPC_PROTOCOL_VERSION &&
@@ -2294,17 +2660,19 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                 if (vertexCount > 4UL)
                     vertexCount = 4UL;
                 for (index = 0; index < vertexCount; ++index) {
+                    ULONG stride = FrontendPlatform.cpEnabled ? 4UL : 3UL;
                     proofContext.segmentPool[index].Size =
                         RADEON3D_SEGMENT_V1_SIZE;
                     proofContext.segmentPool[index].Version =
                         RADEON3D_SEGMENT_VERSION;
                     proofContext.segmentPool[index].CpuAddress =
-                        (APTR)registerMessage->payload[index * 3UL];
+                        (APTR)registerMessage->payload[index * stride];
                     proofContext.segmentPool[index].Bytes =
-                        registerMessage->payload[index * 3UL + 1UL];
+                        registerMessage->payload[index * stride + 1UL];
                     proofContext.segmentPool[index].Id =
-                        registerMessage->payload[index * 3UL + 2UL];
-                    proofContext.segmentPool[index].GpuAddress = 0;
+                        registerMessage->payload[index * stride + 2UL];
+                    proofContext.segmentPool[index].GpuAddress = FrontendPlatform.cpEnabled ?
+                        registerMessage->payload[index * stride + 3UL] : 0;
                     FrontendPlatform.segmentLastEntry[index] = 0;
                 }
                 proofContext.segmentPoolCount = vertexCount;
@@ -2321,13 +2689,13 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                     proofContext.streamSegments = TRUE;
                 }
 #endif
-                R200PPCConsolePrintf("RING reg=ok ctrl=%08lx epoch=%lu vseg=%lu\n",
-                       (unsigned long)FrontendPlatform.ring,
-                       (unsigned long)FrontendPlatform.epoch,
-                       (unsigned long)vertexCount);
-                R200PPCTraceUL2("ring reg ok ctrl",
-                                (ULONG)FrontendPlatform.ring,
-                                "vseg", vertexCount);
+                 R200PPCConsolePrintf("RING reg=ok ctrl=%08lx epoch=%lu vseg=%lu\n",
+                        (unsigned long)FrontendPlatform.ring,
+                        (unsigned long)FrontendPlatform.epoch,
+                        (unsigned long)vertexCount);
+                 R200PPCTraceUL2("ring reg ok ctrl",
+                                 (ULONG)FrontendPlatform.ring,
+                                 "vseg", vertexCount);
     R200PPCTraceUL("ring reg mailbox",
                    FrontendPlatform.mailbox ? 1UL : 0UL);
     /* Park the render window on the right half of a 1920-wide screen so
@@ -2385,6 +2753,16 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
         FrontendPlatform.generation[index] = 0;
         FrontendPlatform.pending[index] = FALSE;
     }
+    if (FrontendPlatform.cpRequested && !FrontendPlatform.cpEnabled) {
+        /* Do not benchmark a silent semantic fallback as PPC command emission. */
+        R200PPCConsolePrintf("CP emitter unavailable; context rejected\n");
+        SetError(&proofContext, GL_INVALID_OPERATION);
+        return NULL;
+    }
+    if (!R200PPCIbSmokeAfterRegistration()) {
+        SetError(&proofContext, GL_INVALID_OPERATION);
+        return NULL;
+    }
     return &proofContext;
 }
 
@@ -2399,6 +2777,10 @@ void *R200PPCDispatchCreateContextFromID(GLint id, GLint *width, GLint *height)
 void R200PPCDispatchDeleteContext(void)
 {
     ULONG index;
+    if (FrontendPlatform.ibSmokeFailed || FrontendPlatform.cpFailed ||
+        (FrontendPlatform.cpEnabled && FrontendPlatform.ring && FrontendPlatform.ring->error))
+        return; /* No reuse or teardown traffic after unacknowledged smoke work. */
+    FrontendPlatform.nativeBindingKnown = FALSE;
     R200PPCTraceUL("delctx call ctx", (ULONG)R200PPCContext);
     if (!R200PPCContext) {
         R200PPCTraceStr("delctx skip (no ctx)");
@@ -2411,7 +2793,7 @@ void R200PPCDispatchDeleteContext(void)
         R200PPCTraceStr("delctx FAIL mailbox drain");
         return;
     }
-#if MGLPPC_PROFILE
+#if MGLPPC_PROFILE && R200_PERF_AUTOREPORT
     {
         const struct PerfMetrics *perf = &proofContext.perf;
         ULONG clockKHz = PlatformClockRate / 1000UL;
@@ -2490,6 +2872,33 @@ void R200PPCDispatchDeleteContext(void)
                         "ringStall", (ULONG)PlatformProfile.ringStallTicks);
         R200PPCTraceUL2("SUMMARY drainTicks", (ULONG)PlatformProfile.drainTicks,
                         "pubFlush", (ULONG)PlatformProfile.publishFlushTicks);
+        /* Stall split, mirrored into the trace so an aborted run that never
+         * reaches the teardown report still leaves the sleep/no-sleep
+         * evidence on disk. */
+        R200PPCTraceUL2("SUMMARY pubStallEnter",
+                        (ULONG)PlatformProfile.publishStallEnters,
+                        "pubStallSleeps",
+                        (ULONG)PlatformProfile.publishStallSleeps);
+        R200PPCTraceUL2("SUMMARY pubStallNoSleep",
+                        (ULONG)PlatformProfile.publishStallNoSleep,
+                        "barStallEnter",
+                        (ULONG)PlatformProfile.barrierStallEnters);
+        R200PPCTraceUL2("SUMMARY barStallSleeps",
+                        (ULONG)PlatformProfile.barrierStallSleeps,
+                        "barStallNoSleep",
+                        (ULONG)PlatformProfile.barrierStallNoSleep);
+        R200PPCTraceUL2("SUMMARY drainStallEnter",
+                        (ULONG)PlatformProfile.drainStallEnters,
+                        "drainStallSleeps",
+                        (ULONG)PlatformProfile.drainStallSleeps);
+        R200PPCTraceUL2("SUMMARY rotStallEnter",
+                        (ULONG)PlatformProfile.rotateStallEnters,
+                        "rotStallSleeps",
+                        (ULONG)PlatformProfile.rotateStallSleeps);
+        R200PPCTraceUL2("SUMMARY rotStallNoSleep",
+                        (ULONG)PlatformProfile.rotateStallNoSleep,
+                        "rotStallTicks",
+                        (ULONG)PlatformProfile.rotateStallTicks);
     }
 #endif
 #if defined(R200_FRONTEND_LIBRARY)
@@ -2543,6 +2952,111 @@ void R200PPCDispatchDeleteContext(void)
             FrontendPlatform.ringSlots[index] = NULL;
         }
     }
+#if MGLPPC_PROFILE
+    {
+        const MGLPPCSemanticPlatformProfile *profile = R200PPCPlatformProfile();
+        unsigned long long lifetimeTicks =
+            PlatformProfileClock64() - PlatformProfileStart;
+        FILE *report = fopen("DH2:mglprof/dll-profile.log", "w");
+
+        /* Teardown only, after the final drain/destroy and before clearing the
+         * context. Raw 32-bit counters overlap; never sum them or use the
+         * legacy clock calibration for conversion. I/O failure is nonfatal. */
+        if (report) {
+            fprintf(report, "PPC_TRANSPORT_PROFILE scope=whole_context_including_setup "
+                    "snapshot=after_destroy counters_since=platform_open "
+                    "overlapping_nested=1 mutually_exclusive=0 "
+                    "counter_bits=32 ticks=raw_timebase\n");
+            fprintf(report, "PPC_TRANSPORT_CLOCK clock_hz_legacy=%lu "
+                    "session_ticks=%lu clock_hz_legacy_trusted=0 "
+                    "conversion=client_whole_run_tb_hz\n",
+                    (unsigned long)profile->clockRate,
+                    (unsigned long)profile->sessionTicks);
+            /* Covers setup, teardown and recreated contexts, not just the
+             * client's fixed frame loop or the post-HELLO legacy session. */
+            fprintf(report, "PPC_TRANSPORT_LIFETIME elapsed_ticks_hi=%lu "
+                    "elapsed_ticks_lo=%lu counter_wrap_risk=%lu "
+                    "lifetime_since=profile_reset\n",
+                    (unsigned long)(lifetimeTicks >> 32),
+                    (unsigned long)(ULONG)lifetimeTicks,
+                    (unsigned long)(lifetimeTicks > 0xffffffffULL));
+            fprintf(report, "PPC_PUBLISH count=%lu send_ticks=%lu stall_ticks=%lu "
+                    "flush_ticks=%lu crc_ticks=%lu\n",
+                    (unsigned long)profile->publishCount,
+                    (unsigned long)profile->publishSendTicks,
+                    (unsigned long)profile->publishStallTicks,
+                    (unsigned long)profile->publishFlushTicks,
+                    (unsigned long)profile->publishCrcTicks);
+            fprintf(report, "PPC_BARRIER count=%lu ticks=%lu stall_ticks=%lu "
+                    "ring_stall_ticks=%lu drain_ticks=%lu\n",
+                    (unsigned long)profile->barrierCount,
+                    (unsigned long)profile->barrierTicks,
+                    (unsigned long)profile->barrierStallTicks,
+                    (unsigned long)profile->ringStallTicks,
+                    (unsigned long)profile->drainTicks);
+            fprintf(report, "PPC_REPLY_WAIT count=%lu ticks=%lu max_ticks=%lu\n",
+                    (unsigned long)profile->replyWaitCount,
+                    (unsigned long)profile->replyWaitTicks,
+                    (unsigned long)profile->replyWaitMaxTicks);
+            fprintf(report, "PPC_CONTROL count=%lu ticks=%lu\n",
+                    (unsigned long)profile->controlCount,
+                    (unsigned long)profile->controlTicks);
+            fprintf(report, "PPC_CHUNK count=%lu ticks=%lu\n",
+                    (unsigned long)profile->chunkCount,
+                    (unsigned long)profile->chunkTicks);
+            fprintf(report, "PPC_TEXTURE calls=%lu successes=%lu bytes=%lu "
+                    "ticks=%lu direct_calls=%lu direct_ticks=%lu "
+                    "shared_calls=%lu chunked_calls=%lu barrier_calls=%lu "
+                    "barrier_ticks=%lu\n",
+                    (unsigned long)profile->textureCalls,
+                    (unsigned long)profile->textureSuccesses,
+                    (unsigned long)profile->textureBytes,
+                    (unsigned long)profile->textureTicks,
+                    (unsigned long)profile->textureDirectCalls,
+                    (unsigned long)profile->textureDirectTicks,
+                    (unsigned long)profile->textureSharedCalls,
+                    (unsigned long)profile->textureChunkedCalls,
+                    (unsigned long)profile->textureBarrierCalls,
+                    (unsigned long)profile->textureBarrierTicks);
+            /* Ring back-pressure split: enters counts waits that found no
+             * space, nosleep those that got space back from a cache refresh
+             * alone, sleeps the number of short PPC-native yields taken.
+             * The requested duration is reported explicitly; actual scheduling
+             * latency can be longer. rotate_* waits on GPU retirement, not ring space,
+             * and its ticks are NOT part of ring_stall_ticks. */
+            fprintf(report, "PPC_STALL_SPLIT yield_us=%lu spin_budget=%lu publish_enters=%lu "
+                    "publish_nosleep=%lu publish_sleeps=%lu "
+                    "barrier_enters=%lu barrier_nosleep=%lu "
+                    "barrier_sleeps=%lu drain_enters=%lu drain_nosleep=%lu "
+                    "drain_sleeps=%lu rotate_enters=%lu rotate_nosleep=%lu "
+                    "rotate_sleeps=%lu rotate_ticks=%lu\n",
+                    (unsigned long)MGLPPC_RING_YIELD_US,
+                    (unsigned long)MGLPPC_RING_YIELD_SPINS,
+                    (unsigned long)profile->publishStallEnters,
+                    (unsigned long)profile->publishStallNoSleep,
+                    (unsigned long)profile->publishStallSleeps,
+                    (unsigned long)profile->barrierStallEnters,
+                    (unsigned long)profile->barrierStallNoSleep,
+                    (unsigned long)profile->barrierStallSleeps,
+                    (unsigned long)profile->drainStallEnters,
+                    (unsigned long)profile->drainStallNoSleep,
+                    (unsigned long)profile->drainStallSleeps,
+                    (unsigned long)profile->rotateStallEnters,
+                    (unsigned long)profile->rotateStallNoSleep,
+                    (unsigned long)profile->rotateStallSleeps,
+                    (unsigned long)profile->rotateStallTicks);
+            {
+                ULONG calls, ticks, maximum;
+                MGLPPCYieldStats(&calls, &ticks, &maximum);
+                fprintf(report, "PPC_YIELD scope=dll_lifetime requested_us=%lu "
+                        "calls=%lu ticks=%lu max_ticks=%lu\n",
+                        (unsigned long)MGLPPC_RING_YIELD_US, (unsigned long)calls,
+                        (unsigned long)ticks, (unsigned long)maximum);
+            }
+            fclose(report);
+        }
+    }
+#endif
     R200PPCContext = NULL;
     FrontendPlatform.registered = FALSE;
     FrontendPlatform.contextId = 0;
@@ -2801,6 +3315,39 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+    if (FrontendPlatform.nativeBindingKnown &&
+        FrontendPlatform.nativeBoundTexture == texture &&
+        context->boundTexture[0] == texture &&
+        (!texture || context->textures[texture].generated)) {
+        volatile MGLPPCMailboxV1 *box = FrontendPlatform.mailbox;
+
+        /* Eliding the command must not hide a poisoned/abandoned transport,
+         * nor bypass PlatformCall's mailbox header validation. */
+        if (!FrontendPlatform.opened || !FrontendPlatform.registered ||
+            !FrontendPlatform.contextId ||
+            !PlatformMailboxReady() || FrontendPlatform.mailboxAbandoned ||
+            FrontendPlatform.transport.pendingMessage) {
+            FrontendPlatform.nativeBindingKnown = FALSE;
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        if (box) {
+            MGLPPCInvalidateLine32((APTR)box);
+            if (box->magic != MGLPPC_MAILBOX_MAGIC ||
+                box->version != MGLPPC_MAILBOX_VERSION ||
+                box->epoch != FrontendPlatform.epoch) {
+                FrontendPlatform.mailboxPoisoned = TRUE;
+                FrontendPlatform.mailboxAbandoned = TRUE;
+                FrontendPlatform.nativeBindingKnown = FALSE;
+                SetError(context, GL_INVALID_OPERATION);
+                return;
+            }
+        }
+        if (context->perfEnabled)
+            context->perf.stateNoops++;
+        return;
+    }
+    FrontendPlatform.nativeBindingKnown = FALSE;
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = target;
     FrontendPlatform.control.value[1] = texture;
@@ -2809,6 +3356,10 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
         return;
     }
     Lib_glBindTexture(target, texture);
+    FrontendPlatform.nativeBoundTexture = texture;
+    FrontendPlatform.nativeBindingKnown =
+        context->boundTexture[0] == texture &&
+        (!texture || context->textures[texture].generated);
 }
 
 static ULONG FrontendTextureLayout(struct MiniGLR200Context *context,
@@ -3536,6 +4087,7 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
         return;
     }
     if (!count) return;
+    FrontendPlatform.nativeBindingKnown = FALSE;
     if (!FrontendTextureBarrier(context)) return;
     while (done < count) {
         ULONG chunk = (ULONG)(count - done), index;
@@ -3547,6 +4099,8 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
                 names[done + (GLsizei)index];
         if (!PlatformCall(MGLPPC_CMD_DELETE_TEXTURES,
                           FrontendPlatform.contextId)) {
+            if (bindingChanged)
+                BumpSemanticStateSerial(context);
             FrontendSetTransportError(context);
             return;
         }

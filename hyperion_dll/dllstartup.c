@@ -78,13 +78,13 @@ int main(int argc, char **argv)
    /*
 	* Process symbol import table
 	*/
-	if(!dllImportSymbols())
+	if (!dllImportSymbols())
 		exit(0L);
 
    /*
 	* Call DLL specific constructor
 	*/
-	if(!DLL_Init())
+	if (!DLL_Init())
 		exit(0L);
 
    /*

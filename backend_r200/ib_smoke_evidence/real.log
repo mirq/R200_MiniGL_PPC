@@ -1,0 +1,4 @@
+IBCLIENT open
+IBCLIENT create
+IBCLIENT context_ok draws=0
+IBCLIENT closed

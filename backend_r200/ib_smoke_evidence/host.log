@@ -1,0 +1,11 @@
+IBHOST registered mode=dry ctrl=43b40000 segment=1 epoch=1
+IBHOST payload slot=0 offset=8192 dwords=8 generation=1 mode=dry
+IBHOST bytes=79050000,efbeadde,00000080x6 ok
+IBHOST dry_validated=1 gpu_submitted=0
+IBHOST ack=1 mode=dry
+IBHOST registered mode=gpu ctrl=43b40000 segment=1 epoch=1
+IBHOST payload slot=0 offset=8192 dwords=8 generation=1 mode=gpu
+IBHOST bytes=79050000,efbeadde,00000080x6 ok
+IBHOST submitted fence=101
+IBHOST gpu_retired=1
+IBHOST ack=1 mode=gpu

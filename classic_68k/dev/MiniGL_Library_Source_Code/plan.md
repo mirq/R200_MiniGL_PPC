@@ -117,6 +117,93 @@ matching header + import lib + runtime together.
 
 ## Progress log
 
+- 2026-09-12: Completed the remaining DLL pacing correction: actual requested
+  100 us WaitTime calls measured ~20.3 ms on the kernel. Raising the bounded
+  polling budget from 8,192 to 131,072 iterations reduced yields 198 -> 33 and
+  recovered 136.363 FPS profiled / 134.529 FPS quiet, fullscreen precalc
+  640x480x16, three buffers, 600 frames, GL error zero. CP path retained and
+  validated (68.337 FPS windowed 800x600x32, 2,031 IBs; 7,127 texture checks pass).
+  Quiet DLL CRC 02605851; host/native/driver unchanged. All 12 local test scripts
+  pass. Details: ../../../backend_r200/HOST_LOADER_REGRESSION.md.
+
+- 2026-09-12: Final quiet current DLL reached 101.694 FPS in the requested
+  600-frame precalc fullscreen 640x480x16 / 3-buffer / sync-off run, with GL
+  error zero. Retained CP-emitter path reached 69.444 FPS windowed 800x600x32,
+  2,031 IB submissions and 511,620 dwords; CP texture acceptance passed all
+  7,127 checks. Native bootstrap passed afterward. Host 0FAA4EFA, classified
+  normal 68k; DLL A02F353A; native 62343673 restored. Evidence and distinctions:
+  ../../../backend_r200/HOST_LOADER_REGRESSION.md.
+
+- 2026-09-12: Confirmed the host slowdown was a Sonnet LoadSeg false positive:
+  the RACE substring in MGLPPC_UPLOAD_TRACE marked the 68k helper as PPC. The
+  unchanged host D0406387 improved 67.774 -> 140.752 FPS by changing only file
+  classification bits. Added runtime option-name construction and a linked-host
+  signature guard; restored current ABI-5 library 62343673. A second DLL pacing
+  issue was measured: 263 DOS tick sleeps/600 frames. PPC-native 100 us yields
+  retain ownership/deadline checks and improved matching profiled fullscreen
+  precalc 640x480x16/3-buffer runs 59.760 -> 102.040 FPS. CPP packet emission is
+  retained. Evidence: ../../../backend_r200/HOST_LOADER_REGRESSION.md.
+
+- 2026-09-10: Real opt-in windowed PPC command emission now implemented and
+  cross-built, retaining streamed vertices, 68k fences/presents and driver
+  ownership. Added read-only owned-surface metadata query (44 bytes), CP-slice
+  retirement discipline, driver generation/transition guards and even-dword
+  padding. All 11 local test scripts pass; physical new-path tests and FPS
+  pending matched-pair cold load. The unchanged semantic baseline is 52.264 FPS,
+  one 600-frame 800x600x32 windowed envmap run. Details: ../../../backend_r200/CP_EMITTER.md.
+
+- 2026-09-10: Started the bounded PPC-emitter follow-up. Audit confirmed the
+  driver emitter can be shared without register-programming duplication, but
+  real indirect draws need the normal driver-owned 2D/3D transition hooks and
+  post-Prepare generation validation. Driver-only prerequisites and 76 mocked
+  production-extracted checks pass; experimental pair remains uninstalled in
+  `/tmp/opencode/ibdraw`. User requested benchmarking before further emitter
+  integration. Preparing an isolated 600-frame 800x600x32 windowed envmap baseline
+  in `DH2:ibbench`, using the unchanged validated `DH2:ibsafe` host/DLL. No
+  indirect-rendering FPS result exists yet.
+
+- 2026-09-10: Corrected the experimental PPC indirect-query bridge: explicit
+  capability probe after context creation, and valid segment ID zero accepted
+  for dispatch/free. Native library `4C4D4A7F` built and installed with a verified
+  `D85B04B5` backup at `DH2:ibsafe/libprev`, followed by `Avail Flush`. PPC
+  no-render client baseline, transport-only smoke, real eight-dword IB smoke
+  (fence 101 retired), and post-test native bootstrap passed in one boot.
+  Driver/card unchanged. Evidence and limits:
+  `../../../backend_r200/ib_smoke_evidence/SESSION.md`.
+
+- 2026-09-07: Started deferred texture/segment retirement correction. The
+  service accepts only its latest fence token and surface release clears it;
+  polling parked historical tokens can retain P96 bitmaps/segments indefinitely.
+  Reapers now use native submit-slot ownership, retain current surfaces while
+  submissions remain live, and never replay old-epoch handles into a new device.
+  Recovery frees old deferred P96 ownership after closing the device. No upload
+  barriers, per-update residency policy, public ABI, or driver code changed.
+- 2026-09-07: Retirement correction built/reviewed and validated. CPU tests
+  reproduce the obsolete/shared-token leaks and cover live-slot retention,
+  epochs, release order and async rotation on/off. Native phase5 passed before
+  and after the fix; fixed residency stress (48 x 512x512) and the PPC update
+  test (7,127 checks, 2 contexts, 18 updates) passed. New native library CRC
+  2F05868E is installed; DC041695 remains at DH2:texretire/native-base. Only
+  lifetime cleanup changed; P96 allocation counts/FPS savings were not measured.
+  Details: ../../../backend_r200/TEXTURE_P96_AUDIT.md.
+
+- 2026-09-07: Started bounded fullscreen notification waiting, preserving the
+  synchronous two-buffer rotation and all GPU waits. An unmodified isolated
+  GCC build matches installed minigl.library CRC DC041695 exactly. Scope:
+  per-context timer/notification ownership, both-reply completion, and safe
+  teardown on notification failure. No public ABI or driver changes.
+- 2026-09-07: Experiment completed, performance gate NOT met; production
+  sources and installed native library restored. A/B/A, 600 frames each,
+  fullscreen 640x480x32 with two buffers and host priority -1: original
+  20.547 FPS, candidate 19.960, restored original 20.519; all error-free.
+  A separate 300-frame diagnostic measured 30.0010 ms/call inside
+  ChangeScreenBuffer versus 0.1407 ms/call in notification waiting. Thus
+  MiniGL's notification polling is not the dominant flip cost on this stack.
+  Implementation, safety regressions, measurements and rollback provenance
+  are [archived here](../../../experiments/native-flip-wait/README.md). The next attribution
+  boundary is P96/Intuition and its Radeon display/vsync/blitter callbacks;
+  no driver change or further performance claim was made.
+
 - 2026-09-05: Authorized matched-native negotiation integration started. Added
   scalar private selector 0x4d47500c (one GLint, context-independent tagged V1
   reply); host subimage capability/command require a positive checked response.

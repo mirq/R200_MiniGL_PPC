@@ -191,6 +191,16 @@
 
 ## Physical-device session and deployment rules
 
+- Sonnet LoadSeg scans raw hunk bytes for `RACE`, `powerpc.library`, and
+  `AmigaAMP`. In particular, the literal `MGLPPC_UPLOAD_TRACE` falsely marks a
+  68k host as PPC and can halve throughput. Keep the linked-host classifier
+  check in `Makefile.dll.r200.gcc`; preserve the runtime option via its builder.
+  File protection bits cache classification: for the **68k host only**, retain
+  unrelated bits and set `(bits & ~0x00030000) | 0x00020000` after replacing a
+  previously misclassified file. Verify bits as well as CRC. Never apply this
+  classification override to genuine PPC clients/DLLs. See
+  `backend_r200/HOST_LOADER_REGRESSION.md` for the unchanged-binary proof.
+
 - Never push, pull, copy, checksum, or otherwise mutate/query Amiga files
   in parallel. Serialize all Amiga filesystem and DOS operations;
   concurrent bridge requests collide through shared temp files and

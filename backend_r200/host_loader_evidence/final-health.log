@@ -1,0 +1,5 @@
+[mgl] ctx fullscreen=0 depth=16 mode=0
+[minigl.library] LibClose count=0
+MiniGL_R200 smoke: mode=window vendor=MiniGL_R200 renderer=Radeon3D semantic R200 version=1.1 MiniGL_R200 phase6
+MiniGL_R200 smoke: abi_tail=pass mode_size=640x480
+MiniGL_R200 smoke: pass mode=window frames=20

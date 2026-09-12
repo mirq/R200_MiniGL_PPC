@@ -1,4 +1,5 @@
 # WarpOS MiniGL V19 PPC DLL using the direct R200 semantic frontend.
+.DELETE_ON_ERROR:
 CPU     ?= 604e
 include Makefile.wos.gcc.common
 
@@ -9,13 +10,24 @@ PYTHON  ?= python3
 M68K_CC ?= /opt/amiga/bin/m68k-amigaos-gcc
 
 R200_NATIVE_ROOT ?= $(CURDIR)/classic_68k/dev/MiniGL_Library_Source_Code
+R200_EMITTER_ROOT ?= $(abspath $(CURDIR)/../p96-driver)
 R200_NATIVE_IMPORT := $(R200_NATIVE_ROOT)/lib/libminigl_dispatch.a
 R200_NATIVE_LIBRARY := $(R200_NATIVE_ROOT)/bin/dispatch-r200-gcc/minigl.library
 R200_HOST ?= bin/minigl_ppc_host
+# Set MGLPPC_HOST_TRACE=1 to build the host with DH2:wosbuild/mglppc_host.log
+# stage/poll reporting enabled (diagnostic builds only -- the per-line
+# Open/Seek/Write/Close logging and 2s console reports cost frame time).
+MGLPPC_HOST_TRACE ?= 0
 # Protocol deadlines still use the calibrated timebase; profiling is optional.
 MGLPPC_PROFILE ?= 0
+# Live console reports are independent; quiet counters use the runtime glHint.
+MGLPPC_AUTOREPORT ?= 0
+# Use isolated OBJDIR and WARPELF paths per MGLPPC_PROFILE/MGLPPC_AUTOREPORT
+# configuration: make does not track command-line flag changes.
 # Completed-present interval histogram/top gaps; shutdown output only.
 MGLPPC_PACING ?= 0
+# Sleep counters only; no clock calls outside actual host idle sleeps.
+MGLPPC_IDLE_DIAG ?= 0
 # Disable only in a separately named host build for lookup-cost comparisons.
 MGLPPC_HOST_TARGET_CACHE ?= 1
 R200_PACKAGE_DIR ?= bin/r200-package
@@ -37,7 +49,7 @@ R200_CFLAGS = $(COMMON_CFLAGS) -I$(R200_INCLUDE) -Iinclude \
               -I$(R200_LIBRARY) -I$(R200_THIRDPARTY) \
                -DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
                -DR200_FRONTEND_LIBRARY=1 -DR200_PERF_TIMING=1 \
-               -DR200_PERF_AUTOREPORT=$(MGLPPC_PROFILE) \
+               -DR200_PERF_AUTOREPORT=$(MGLPPC_AUTOREPORT) \
                -DMGLPPC_PROFILE=$(MGLPPC_PROFILE) \
                -DR200_STREAM_COMMITS=1 -DR200_ASYNC_ROTATION=1
 
@@ -57,7 +69,10 @@ R200_SOURCES = $(R200_LIBRARY)/minigl_r200_warpos_compile_probe.c \
 
 OBJS = $(OBJDIR)/minigl_ppc_dispatch_r200.o \
        $(OBJDIR)/r200_frontend.o \
+       $(OBJDIR)/r200_cp_emit.o \
+       $(OBJDIR)/radeon3d_emit.o \
        $(OBJDIR)/minigl_ppc_transport.o \
+       $(OBJDIR)/minigl_ppc_yield.o \
        $(OBJDIR)/minigl_ppc_serial.o \
        $(OBJDIR)/minigl_warpos_cache_flush.o \
        $(OBJDIR)/dllstartup.o \
@@ -89,6 +104,12 @@ $(OBJDIR) $(R200_GENERATED) bin:
 $(OBJDIR)/r200_frontend.o: $(R200_SOURCES) Makefile.dll.r200.gcc Makefile.wos.gcc.common | $(OBJDIR)
 	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
 
+$(OBJDIR)/r200_cp_emit.o: $(R200_LIBRARY)/r200_cp_emit.c Makefile.dll.r200.gcc | $(OBJDIR)
+	$(CC) $(R200_CFLAGS) -I$(R200_EMITTER_ROOT)/include -MMD -MP -c $< -o $@
+
+$(OBJDIR)/radeon3d_emit.o: $(R200_EMITTER_ROOT)/src/radeon3d_emit.c Makefile.dll.r200.gcc | $(OBJDIR)
+	$(CC) $(R200_CFLAGS) -I$(R200_EMITTER_ROOT)/include -MMD -MP -c $< -o $@
+
 $(R200_SYMBOLS): $(OBJDIR)/r200_frontend.o | $(R200_GENERATED)
 	$(NM) --defined-only --format=posix $< | \
 		awk '$$2 == "T" && $$1 ~ /^Lib_/ { print $$1 }' | sort -u > $@
@@ -105,6 +126,10 @@ $(OBJDIR)/minigl_ppc_dispatch_r200.o: ppc_dll/minigl_ppc_dispatch_r200.c \
 $(OBJDIR)/minigl_ppc_transport.o: $(R200_CLIENT)/minigl_ppc_transport.c \
               $(R200_INCLUDE)/libraries/minigl_ppc_transport.h \
               $(R200_INCLUDE)/libraries/minigl_ppc_protocol.h | $(OBJDIR)
+	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_yield.o: $(R200_CLIENT)/minigl_ppc_yield.c \
+              $(R200_INCLUDE)/libraries/minigl_ppc_yield.h | $(OBJDIR)
 	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJDIR)/minigl_ppc_serial.o: $(R200_CLIENT)/minigl_ppc_serial.s | $(OBJDIR)
@@ -124,16 +149,20 @@ $(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
 	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
 
 $(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
+              tools/check_68k_host.py \
               $(R200_INCLUDE)/libraries/minigl_ppc_protocol.h \
               $(R200_INCLUDE)/libraries/minigl_r200_bridge.h \
+              $(R200_INCLUDE)/libraries/minigl_ppc_ib_trace.h \
               $(R200_NATIVE_IMPORT) Makefile.dll.r200.gcc | bin
 	$(M68K_CC) -std=gnu99 -O2 -mcpu=68020 -noixemul -Wall \
-		-Werror=incompatible-pointer-types \
+		-Werror=incompatible-pointer-types -DMGLPPC_HOST_TRACE=$(MGLPPC_HOST_TRACE) \
 		-DMGLPPC_PROFILE=$(MGLPPC_PROFILE) -DMGLPPC_PACING=$(MGLPPC_PACING) \
+		-DMGLPPC_IDLE_DIAG=$(MGLPPC_IDLE_DIAG) \
 		-DMGLPPC_HOST_TARGET_CACHE=$(MGLPPC_HOST_TARGET_CACHE) \
 		-I$(R200_INCLUDE) -I$(R200_NATIVE_ROOT)/include \
 		-I$(R200_NATIVE_ROOT)/third_party/warp3d/include \
 		-I$(R200_THIRDPARTY) $< $(R200_NATIVE_IMPORT) -o $@
+	$(PYTHON) tools/check_68k_host.py $@
 
 lib/libminigl.a:
 	$(MAKE) -f Makefile.import.gcc importlib

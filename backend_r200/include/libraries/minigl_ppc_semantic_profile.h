@@ -40,6 +40,28 @@ typedef struct MGLPPCSemanticPlatformProfile {
     ULONG textureChunkedCalls;
     ULONG textureBarrierCalls;
     ULONG textureBarrierTicks;
+    /* Ring back-pressure split. Each wait loop reports how often it was
+     * entered with no space (enters), how often it got space back from a
+     * cache refresh alone (noSleep), and how many scheduling yields it
+     * cost (sleeps). Current DLL builds request short PPC-native waits and
+     * report yield_us; historical builds used DOS tick sleeps. These counts
+     * do not measure actual sleep duration or exclusively GPU latency. */
+    ULONG publishStallEnters;
+    ULONG publishStallNoSleep;
+    ULONG publishStallSleeps;
+    ULONG barrierStallEnters;
+    ULONG barrierStallNoSleep;
+    ULONG barrierStallSleeps;
+    ULONG drainStallEnters;
+    ULONG drainStallNoSleep;
+    ULONG drainStallSleeps;
+    /* Segment rotation waits on GPU retirement, not on ring space, and had
+     * no timer at all before; rotateStallTicks is not part of
+     * ringStallTicks and must not be added to it. */
+    ULONG rotateStallEnters;
+    ULONG rotateStallNoSleep;
+    ULONG rotateStallSleeps;
+    ULONG rotateStallTicks;
 } MGLPPCSemanticPlatformProfile;
 
 const MGLPPCSemanticPlatformProfile *R200PPCPlatformProfile(void);

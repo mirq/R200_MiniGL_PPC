@@ -53,8 +53,9 @@ class TextureOrder(unittest.TestCase):
         frontend = source("backend_r200/library/minigl_r200_warpos_compile_probe.c")
         barrier = frontend.rsplit("BOOL R200PPCPlatformBarrier(", 1)[1].split(
             "BOOL R200PPC", 1)[0]
-        self.assertIn("while (control->completed != control->head)", barrier)
+        self.assertIn("while ((FrontendPlatform.cpEnabled ? control->retired : control->completed) != control->head)", barrier)
         self.assertIn("MGLPPCInvalidateLine32((APTR)&control->completed)", barrier)
+        self.assertIn("MGLPPCInvalidateLine32((APTR)&control->retired)", barrier)
         self.assertNotIn("SubmitAndWait", barrier)
 
     def test_pixel_oracles_and_pre_present_order(self):

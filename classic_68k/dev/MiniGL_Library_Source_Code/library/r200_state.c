@@ -1452,7 +1452,7 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             SetError(context, GL_INVALID_VALUE);
         return;
     }
-    if (!context)
+    if (!context && name != MGL_R200_PRIVATE_SURFACE_V1_QUERY)
         return;
     if (!value) {
         SetError(context, GL_INVALID_VALUE);
@@ -1664,12 +1664,15 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
                     break;
                 }
             }
-            if (!segmentId || !found) {
+            if (!found) {
                 SetError(context, GL_INVALID_OPERATION);
                 break;
             }
-            if (context->device)
-                Radeon3DFreeSegment(context->device, segmentId);
+            if (!context->device ||
+                !Radeon3DFreeSegment(context->device, segmentId)) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
             for (index = kept = 0; index < context->segmentLeaseCount;
                  ++index) {
                 if (context->segmentLeases[index].id != segmentId)
@@ -1680,6 +1683,140 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             ZeroMemory(bridge, sizeof(*bridge));
             bridge->version = MGL_R200_PRIVATE_SEGMENT_FREE_V1_VERSION;
             bridge->structSize = sizeof(*bridge);
+        }
+        break;
+    case MGL_R200_PRIVATE_SURFACE_V1_QUERY:
+        {
+            MGLR200PrivateSurfaceV1 *bridge =
+                (MGLR200PrivateSurfaceV1 *)value;
+            ULONG surfaceToken = bridge->surfaceToken;
+            const struct Radeon3DSurface *surface;
+            struct Radeon3DInfo info;
+            ULONG index, bytesPerPixel, rowBytes, span;
+
+            ZeroMemory(bridge, sizeof(*bridge));
+            bridge->version = MGL_R200_PRIVATE_SURFACE_V1_VERSION;
+            bridge->structSize = sizeof(*bridge);
+            bridge->surfaceToken = surfaceToken;
+            if (!context || !surfaceToken || !context->device ||
+                !context->deviceEpoch) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            /* Compare opaque tokens only; pending direct allocations and
+             * non-target screen buffers are not queryable live surfaces. */
+            surface = TargetSurface(context);
+            if ((ULONG)surface->Handle != surfaceToken) {
+                surface = &context->depthSurface;
+                if ((ULONG)surface->Handle != surfaceToken) {
+                    surface = NULL;
+                    for (index = 0; index < MAX_TEXTURES; ++index) {
+                        const struct TextureObject *texture =
+                            &context->textures[index];
+                        if (texture->generated && texture->resident &&
+                            texture->residentDeviceEpoch ==
+                                context->deviceEpoch &&
+                            (ULONG)texture->surface.Handle == surfaceToken) {
+                            surface = &texture->surface;
+                            break;
+                        }
+                    }
+                }
+            }
+            /* Native recovery has its own epoch; only the live service can
+             * tell us whether an imported generation survived a reset. */
+            ZeroMemory(&info, sizeof(info));
+            info.Size = sizeof(info);
+            if (!surface ||
+                !Radeon3DGetInfo(context->device, &info) ||
+                !(info.Caps & RADEON3D_CAP_CP_READY) || !info.Generation ||
+                surface->Generation != info.Generation ||
+                surface->Size < RADEON3D_SURFACE_V1_SIZE ||
+                surface->Version != RADEON3D_SURFACE_VERSION ||
+                !surface->CpuAddress || (surface->GpuAddress & 15UL) ||
+                !surface->Pitch || (surface->Pitch & 63UL) ||
+                !surface->Width || surface->Width > 65536UL ||
+                !surface->Height || surface->Height > 65536UL ||
+                surface->Height > 0xffffffffUL / surface->Pitch) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            switch (surface->Format) {
+            case RADEON3D_FORMAT_CLUT8: bytesPerPixel = 1UL; break;
+            case RADEON3D_FORMAT_R5G6B5PC: bytesPerPixel = 2UL; break;
+            case RADEON3D_FORMAT_B8G8R8A8: bytesPerPixel = 4UL; break;
+            default: bytesPerPixel = 0; break;
+            }
+            rowBytes = surface->Width * bytesPerPixel;
+            if (!bytesPerPixel || rowBytes > surface->Pitch) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            span = (surface->Height - 1UL) * surface->Pitch + rowBytes;
+            if (span - 1UL > 0xffffffffUL - (ULONG)surface->CpuAddress ||
+                span - 1UL > 0xffffffffUL - surface->GpuAddress) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            bridge->cpuAddress = (ULONG)surface->CpuAddress;
+            bridge->gpuAddress = surface->GpuAddress;
+            bridge->pitch = surface->Pitch;
+            bridge->width = surface->Width;
+            bridge->height = surface->Height;
+            bridge->format = surface->Format;
+            bridge->deviceEpoch = context->deviceEpoch;
+            bridge->generation = surface->Generation;
+        }
+        break;
+    case MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_QUERY:
+        {
+            MGLR200PrivateIndirectDispatchV1 *bridge =
+                (MGLR200PrivateIndirectDispatchV1 *)value;
+            ULONG segmentId = bridge->segmentId;
+            ULONG byteOffset = bridge->byteOffset;
+            ULONG dwordCount = bridge->dwordCount;
+            ULONG flags = bridge->flags;
+            ULONG idx, fence = 0;
+            struct Radeon3DIndirect indirect;
+            BOOL result;
+
+            ZeroMemory(bridge, sizeof(*bridge));
+            bridge->version = MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_VERSION;
+            bridge->structSize = sizeof(*bridge);
+            bridge->segmentId = segmentId;
+            if (!context->device ||
+                !(context->radeonCaps & RADEON3D_CAP_INDIRECT_DISPATCH)) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            if (flags == MGL_R200_PRIVATE_INDIRECT_PROBE &&
+                !segmentId && !byteOffset && !dwordCount) {
+                bridge->flags = MGL_R200_PRIVATE_INDIRECT_SUPPORTED;
+                break;
+            }
+            if (flags || !dwordCount) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            for (idx = 0; idx < context->segmentLeaseCount; ++idx) {
+                if (context->segmentLeases[idx].id == segmentId)
+                    break;
+            }
+            if (idx >= context->segmentLeaseCount) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            ZeroMemory(&indirect, sizeof(indirect));
+            indirect.Size = sizeof(indirect);
+            indirect.Version = RADEON3D_INDIRECT_VERSION;
+            indirect.SegmentId = segmentId;
+            indirect.ByteOffset = byteOffset;
+            indirect.DwordCount = dwordCount;
+            result = Radeon3DDispatchIndirect(context->device, &indirect,
+                                              &fence);
+            bridge->fenceOut = fence;
+            if (!result)
+                SetError(context, GL_INVALID_OPERATION);
         }
         break;
     case GL_SHADE_MODEL: *value = (GLint)context->shadeModel; break;

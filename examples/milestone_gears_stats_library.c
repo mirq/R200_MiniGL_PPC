@@ -31,6 +31,86 @@ struct IntuitionBase *IntuitionBase;
 #define MGL_GEARS_DIAG 0
 #endif
 
+#ifndef MGL_GEARS_PROFILE
+#define MGL_GEARS_PROFILE 0
+#endif
+
+#if MGL_GEARS_PROFILE
+#include "../backend_r200/include/libraries/minigl_perf.h"
+static int profileCounters;
+
+static unsigned long long ReadProfileClock(void)
+{
+	unsigned long high, low, again;
+	do {
+		__asm__ volatile("mftbu %0\n\tmftb %1\n\tmftbu %2"
+		                 : "=r"(high), "=r"(low), "=r"(again) : : "memory");
+	} while (high != again);
+	return ((unsigned long long)high << 32) | low;
+}
+
+static GLenum ReportProfile(unsigned long long ticks, LONG runTicks)
+{
+	static const struct { GLenum query; const char *name; } fields[] = {
+		{MGL_PERF_CLOCK_RATE, "legacy_clock_hz"},
+		{MGL_PERF_FRAMES, "frames"},
+		{MGL_PERF_PRIMITIVES, "primitives"},
+		{MGL_PERF_INPUT_VERTICES, "input_vertices"},
+		{MGL_PERF_SUBMITTED_VERTICES, "submitted_vertices"},
+		{MGL_PERF_DRAW_RECORDS, "draw_records"},
+		{MGL_PERF_SUBMITS, "submits"},
+		{MGL_PERF_RECORD_DWORDS, "record_dwords"},
+		{MGL_PERF_FRONTEND_TICKS, "frontend_ticks"},
+		{MGL_PERF_MATRIX_TICKS, "matrix_ticks"},
+		{MGL_PERF_DRAW_TICKS, "draw_ticks"},
+		{MGL_PERF_SERIALIZE_TICKS, "serialize_ticks"},
+		{MGL_PERF_SERIALIZE_STALL_TICKS, "serialize_stall_ticks"},
+		{MGL_PERF_EXECUTE_TICKS, "execute_ticks"},
+		{MGL_PERF_WAIT_TICKS, "wait_ticks"},
+		{MGL_PERF_PRESENT_TICKS, "present_ticks"},
+		{MGL_PERF_INDEX_SCAN_TICKS, "index_scan_ticks"},
+		{MGL_PERF_VERTEX_FETCH_TICKS, "vertex_fetch_ticks"},
+		{MGL_PERF_APPEND_TICKS, "append_ticks"},
+		{MGL_PERF_TEXTURE_RESIDENCY_TICKS, "residency_ticks"},
+		{MGL_PERF_TEXTURE_UPLOAD_TICKS, "upload_ticks"},
+		{MGL_PERF_TEXTURE_UPLOAD_BYTES, "upload_bytes"},
+		{MGL_PERF_TEXTURE_UPLOAD_COPIES, "upload_copies"},
+		{MGL_PERF_TEXTURE_EVICTIONS, "evictions"},
+		{MGL_PERF_FENCE_WAITS, "fence_waits"},
+		{MGL_PERF_FENCE_POLL_HITS, "fence_poll_hits"},
+		{MGL_PERF_BUFFER_WAITS, "buffer_waits"},
+		{MGL_PERF_TEXTURE_WAITS, "texture_waits"},
+		{MGL_PERF_DRAIN_WAITS, "drain_waits"},
+		{MGL_PERF_STATE_CALLS, "state_calls"},
+		{MGL_PERF_STATE_NOOPS, "state_noops"},
+		{MGL_PERF_SNAPSHOT_BUILDS, "snapshot_builds"},
+		{MGL_PERF_SNAPSHOT_FAST_HITS, "snapshot_fast_hits"},
+		{MGL_PERF_SERIALIZE_KERNEL_FLUSHES, "kernel_flushes"},
+		{MGL_PERF_SERIALIZE_KERNEL_VERTICES, "kernel_vertices"},
+		{MGL_PERF_EXECUTE_FAILURES, "execute_failures"},
+		{MGL_PERF_WAIT_FAILURES, "wait_failures"}
+	};
+	unsigned int i;
+	GLenum error;
+	/* Calibrate the raw counter over this whole run, not the DLL's short
+	 * Delay(2) estimate. Stages overlap; serialize stall requires DLL support. */
+	/* This WarpOS printf cannot reliably consume 64-bit varargs. */
+	printf("MGL_PROFILE enabled=%d run_ticks=%ld tb_hi=%lu tb_lo=%lu tb_hz=%lu "
+	       "counter_wrap_risk=%d\n", profileCounters, (long)runTicks,
+	       (unsigned long)(ticks >> 32), (unsigned long)ticks,
+	       runTicks > 0 ? (unsigned long)(ticks * 50ULL / (unsigned long)runTicks) : 0UL,
+	       ticks > 0xffffffffULL ? 1 : 0);
+	for (i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+		GLint value = 0;
+		glGetIntegerv(fields[i].query, &value);
+		printf("MGL_PROFILE %s=%lu\n", fields[i].name, (unsigned long)value);
+	}
+	error = glGetError();
+	printf("MGL_PROFILE query_error=%lu\n", (unsigned long)error);
+	return error;
+}
+#endif
+
 
 #ifndef M_PI
 #define M_PI 3.14159265
@@ -693,6 +773,12 @@ int main(int argc, char *argv[])
 			bShowFPS = 0;
 			continue;
 		}
+#if MGL_GEARS_PROFILE
+		if (0 == local_stricmp(option, "-profile")) {
+			profileCounters = 1;
+			continue;
+		}
+#endif
 		if (++i == argc)
 			goto usage;
 		if (0 == local_stricmp(option, "-width"))
@@ -715,6 +801,10 @@ int main(int argc, char *argv[])
 	if (width <= 0 || height <= 0 || (depth != 16 && depth != 32) ||
 	    buffers < 1 || buffers > 3)
 		goto usage;
+#if MGL_GEARS_PROFILE
+	if (profileCounters && !frameLimit)
+		goto usage;
+#endif
 
 	GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0);
 	if (!GfxBase) {
@@ -822,12 +912,28 @@ int main(int argc, char *argv[])
 			if (frameLimit) {
 				struct DateStamp run_ds;
 				LONG run_ticks, fps_x1000;
+#if MGL_GEARS_PROFILE
+				unsigned long long profileStart, profileEnd;
+				glHint(MGL_PERF_COUNTERS_HINT,
+				       profileCounters ? GL_NICEST : GL_DONT_CARE);
+				error = glGetError();
+				if (error != GL_NO_ERROR) {
+					printf("MGL_PROFILE setup_error=%lu\n", (unsigned long)error);
+					goto cleanup;
+				}
+#endif
 				/* No event, title, timer or logging calls in the fixed loop.
 				 * Finish includes the final asynchronous PRESENT in wall time. */
 				DateStamp(&g_run_ds);
+#if MGL_GEARS_PROFILE
+				profileStart = ReadProfileClock();
+#endif
 				for (framesDone = 0; framesDone < frameLimit; ++framesDone)
 					oneFrame();
 				glFinish();
+#if MGL_GEARS_PROFILE
+				profileEnd = ReadProfileClock();
+#endif
 				DateStamp(&run_ds);
 				error = glGetError();
 				run_ticks = (run_ds.ds_Days - g_run_ds.ds_Days)
@@ -852,6 +958,12 @@ int main(int argc, char *argv[])
 				       windowed ? 0 : buffers, !noSync, (unsigned long)error);
 				fflush(stdout);
 				result = error == GL_NO_ERROR && run_ticks > 0 ? 0 : 20;
+#if MGL_GEARS_PROFILE
+				glHint(MGL_PERF_COUNTERS_HINT, GL_FASTEST);
+				if (ReportProfile(profileEnd - profileStart, run_ticks) != GL_NO_ERROR ||
+				    profileEnd - profileStart > 0xffffffffULL)
+					result = 20;
+#endif
 			} else {
 				DateStamp(&g_fps_ds);
 				g_fps_frame_count = 0;
@@ -887,5 +999,8 @@ cleanup:
 usage:
 	puts("usage: gears [-frames N] [-window] [-width N] [-height N] "
 	     "[-depth 16|32] [-buffers 1|2|3] [-nosync] [-nofps] [-envmap file]");
+#if MGL_GEARS_PROFILE
+	puts("profiling build: add -profile to enable runtime counters in -frames mode");
+#endif
 	return 20;
 }

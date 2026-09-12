@@ -1,0 +1,2 @@
+# Archived unified-diff context lines intentionally preserve their whitespace.
+experiments/native-flip-wait/candidate.patch -whitespace

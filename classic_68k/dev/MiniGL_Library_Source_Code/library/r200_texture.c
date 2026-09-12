@@ -105,19 +105,32 @@ BOOL EvictTextureDefer(struct MiniGLR200Context *context,
 void ReapDeferredSurfaces(struct MiniGLR200Context *context)
 {
     struct DeferredSurface **link = &context->deferredSurfaces;
+    ULONG index;
+    BOOL pending = FALSE;
+
+    if (!*link)
+        return;
+    /* Called after a drain. Do not poll old public tokens: Radeon3D accepts
+     * only its latest fence, and ReleaseSurface clears that token. If any
+     * native submission is still live, retain current-epoch surfaces rather
+     * than implicitly draining it and invalidating its token through release. */
+    for (index = 0; index < SUBMIT_SLOT_COUNT; ++index)
+        if (context->submitSlots[index].inFlight &&
+            context->submitSlots[index].deviceEpoch == context->deviceEpoch)
+            pending = TRUE;
 
     while (*link) {
         struct DeferredSurface *node = *link;
-        BOOL retired = node->deviceEpoch != context->deviceEpoch;
+        BOOL sameDevice = context->device &&
+                          node->deviceEpoch == context->deviceEpoch;
 
-        if (!retired && node->fence)
-            retired = Radeon3DTestFence(context->device, node->fence);
-        if (!retired) {
+        if (sameDevice && pending) {
             link = &node->next;
             continue;
         }
         *link = node->next;
-        if (node->surface.Handle)
+        /* Closing the old device already destroyed its handles. */
+        if (sameDevice && node->surface.Handle)
             Radeon3DReleaseSurface(context->device, &node->surface);
         if (node->bitmap)
             p96FreeBitMap(node->bitmap);

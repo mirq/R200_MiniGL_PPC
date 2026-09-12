@@ -63,6 +63,10 @@ typedef uint32_t ULONG;
 #define MGLPPC_CMD_TEXTURE_UPLOAD_SHARED 22UL
 #define MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED 26UL
 #define MGLPPC_CMD_READ_PIXELS_SHARED 27UL
+/* CP-emitter metadata, negotiated at registration. Input value[0]=surface
+ * token; reply: GL error, CPU/GPU address, pitch, width, height, format, epoch.
+ * Read-only: no recovery, residency allocation, or native context mutation. */
+#define MGLPPC_CMD_CP_SURFACE 28UL
 
 #define MGLPPC_CAP_REPLAY_V9        (1UL << 0)
 #define MGLPPC_CAP_SEMANTIC_INLINE  (1UL << 1)
@@ -86,6 +90,19 @@ typedef uint32_t ULONG;
 #define MGLPPC_CAP_MAILBOX_V1       (1UL << 8)
 #define MGLPPC_CAP_TEXTURE_SUBIMAGE_V1 (1UL << 9)
 #define MGLPPC_CAP_READ_PIXELS_V1 (1UL << 10)
+/* HELLO advertises negotiation support only. REGISTER must also echo
+ * RING_REGISTER_INDIRECT after probing the live context. Slot layout for an
+ * MGLPPC_SEMANTIC_FLAG_INDIRECT entry: dword[0] = byte offset of the CP
+ * stream inside the ring control segment (CP-native byte order), dword[1]
+ * = dword count. The host supplies its own ring segment id. */
+#define MGLPPC_CAP_INDIRECT (1UL << 11)
+/* Trusted PPC emitter, windowed only. Requires a live render-transition
+ * capability at registration; distinct from the fixed startup smoke. */
+#define MGLPPC_CAP_CP_EMIT (1UL << 12)
+/* Reserved startup-smoke storage, separate from control/mailbox lines.
+ * Flush PPC writes and drain the aperture before publishing the descriptor. */
+#define MGLPPC_IB_OFFSET 8192UL
+#define MGLPPC_IB_SMOKE_DWORDS 8UL
 
 /* Optional v15 command 27, negotiated by READ_PIXELS_V1. No payload; eight
  * words: x, y, width, height, format, type, shared address, exact byte count.
@@ -112,6 +129,16 @@ typedef uint32_t ULONG;
 /* Commit payload is one homogeneous TCL header followed by two dwords per
  * draw: segment byte offset and vertex count. */
 #define MGLPPC_SEMANTIC_FLAG_STATE_BATCH (1UL << 3)
+/* Ring entry asks the host to dispatch a client-built CP packet stream
+ * (see MGLPPC_CAP_INDIRECT for the slot layout). */
+#define MGLPPC_SEMANTIC_FLAG_INDIRECT (1UL << 4)
+/* CP_EMIT slot contains [byteOffset, dwordCount, vertexSegmentMask]. The IB
+ * is in a separate 256 KiB lease: one immutable 32 KiB slice per FIFO slot.
+ * A slice is reusable only after retired, NOT after completed. No PRESENT
+ * flag is accepted here; ordinary zero-payload barriers present/drain. */
+#define MGLPPC_SEMANTIC_FLAG_CP_EMIT (1UL << 5)
+#define MGLPPC_CP_SLICE_BYTES (8192UL * 4UL)
+#define MGLPPC_CP_SEGMENT_BYTES (8UL * MGLPPC_CP_SLICE_BYTES)
 /* ~64 KB chunks: the 65535-byte Exec message limit leaves 16363 payload
  * words, so 16000 still fits. Hosts bind chunk size only by payloadWords,
  * so a larger client chunk needs no negotiation against an older host. */
@@ -255,6 +282,13 @@ typedef struct MGLPPCRingEntryV1 {
 #define MGLPPC_RING_COMMIT_HEADER_DWORDS 2UL
 #define MGLPPC_RING_REGISTER_HOST_EVENTS (1UL << 0)
 #define MGLPPC_RING_REGISTER_MAILBOX (1UL << 1)
+#define MGLPPC_RING_REGISTER_INDIRECT (1UL << 2)
+/* Reply-only: acknowledgment is transport validation, NOT GPU retirement. */
+#define MGLPPC_RING_REGISTER_IB_DRY (1UL << 3)
+/* Request/echo. Reply value[5..7]=CP lease CPU address/id/bytes, vertex
+ * payload tuples expand from 3 to 4 words: CPU address/bytes/id/GPU address.
+ * Mutually exclusive with startup INDIRECT; protocol v15 optional extension. */
+#define MGLPPC_RING_REGISTER_CP_EMIT (1UL << 4)
 
 /* Optional protocol-15 extension; never changes RingControlV1. Registration
  * echoes MAILBOX only after initializing this region, and returns the segment
@@ -282,7 +316,8 @@ typedef char MGLPPCMailboxLayoutCheck[
     offsetof(MGLPPCMailboxV1, status) == 100 &&
     offsetof(MGLPPCMailboxV1, ackValue) == 128 ? 1 : -1];
 #define MGLPPC_MAILBOX_COMMAND_ALLOWED(cmd) \
-    ((cmd) == MGLPPC_CMD_BIND_TEXTURE || \
+    ((cmd) == MGLPPC_CMD_CP_SURFACE || \
+     (cmd) == MGLPPC_CMD_BIND_TEXTURE || \
      (cmd) == MGLPPC_CMD_GET_INTEGER || \
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_BEGIN || \
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT || \

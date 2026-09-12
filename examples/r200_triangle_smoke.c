@@ -8,6 +8,8 @@ int main(int argc, char **argv)
     GLenum error;
     int depth = 0;
     GLboolean windowed = GL_TRUE;
+    GLubyte center[4] = {0}, corner[4] = {0};
+    int pixelsOk;
 
     if (argc > 1) {
         depth = atoi(argv[1]);
@@ -57,6 +59,16 @@ int main(int argc, char **argv)
     glVertex3f(0.0f, 0.75f, 0.0f);
     glEnd();
     glFinish();
+    glReadPixels(320, 240, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, center);
+    glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner);
+    /* Interior interpolation stays within the three vertex colours; the
+     * background is dark. Tolerances also cover RGB565 quantization. */
+    pixelsOk = center[0] >= 50 && center[1] >= 50 && center[2] >= 50 &&
+               corner[0] < 40 && corner[1] < 40 && corner[2] < 40;
+    printf("triangle: pixels=%s center=%u,%u,%u corner=%u,%u,%u\n",
+           pixelsOk ? "pass" : "FAIL", (unsigned)center[0], (unsigned)center[1],
+           (unsigned)center[2], (unsigned)corner[0], (unsigned)corner[1],
+           (unsigned)corner[2]);
     mglSwitchDisplay();
     error = glGetError();
     printf("triangle: error=0x%04lx\n", (unsigned long)error);
@@ -64,5 +76,5 @@ int main(int argc, char **argv)
     mglDeleteContext();
     MiniGLClose();
     puts("triangle: done");
-    return error == GL_NO_ERROR ? 0 : 20;
+    return error == GL_NO_ERROR && pixelsOk ? 0 : 20;
 }

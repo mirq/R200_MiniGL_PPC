@@ -214,3 +214,19 @@ The 68k host also continuously polls when idle. Resource contention affecting
 game logic/audio/IO is a candidate, not a proven cause. Next discriminating
 test should vary idle pacing alone, preserve mailbox latency and GPU ordering,
 and compare game logic/present buckets. Black-screen cause remains unresolved.
+
+## P96 Usage Audit And Retirement Correction: 2026-09-07
+
+The rejected native flip-wait experiment is reverted; only its inactive archive
+remains. A new texture audit found no per-frame re-upload in gears, but resident
+subimages do eagerly allocate/import fresh P96 storage and copy full backing.
+The deferred surface/segment reapers also polled obsolete service fence tokens,
+which can retain P96 allocations after completed work. This concrete retirement
+bug is fixed using native submit-slot ownership and epoch-safe cleanup, without
+changing upload barriers or introducing in-place updates.
+
+Native phase5 and its 48-texture residency stress passed on hardware. The PPC
+update test passed 7,127 checks across two contexts and 18 updates. Installed
+native library: 2F05868E; original DC041695 retained as rollback. The PPC DLL/host
+and Picasso96 pair are unchanged. No texture FPS gain or measured VRAM savings
+is claimed. Full findings and validation are in `TEXTURE_P96_AUDIT.md`.

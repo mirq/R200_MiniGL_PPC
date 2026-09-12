@@ -22,6 +22,37 @@
 #define MGL_R200_PRIVATE_SEGMENT_V1_VERSION 1UL
 #define MGL_R200_PRIVATE_SEGMENT_FREE_V1_QUERY 0x4d475004UL
 #define MGL_R200_PRIVATE_SEGMENT_FREE_V1_VERSION 1UL
+/* Trusted indirect dispatch. Segment zero is a valid lease, not a probe.
+ * Probe explicitly after context creation; the service trusts packet contents,
+ * so an extent check does NOT sandbox their register or VRAM references. */
+#define MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_QUERY 0x4d475012UL
+#define MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_VERSION 1UL
+#define MGL_R200_PRIVATE_INDIRECT_PROBE (1UL << 31)
+#define MGL_R200_PRIVATE_INDIRECT_SUPPORTED (1UL << 0)
+
+/* Read-only metadata for a live surface owned by the current context. */
+#define MGL_R200_PRIVATE_SURFACE_V1_QUERY 0x4d475013UL
+#define MGL_R200_PRIVATE_SURFACE_V1_VERSION 1UL
+
+/* surfaceToken is the only input; all other fields are native-owned output.
+ * Failure clears metadata, retaining version/structSize and the input token.
+ * deviceEpoch alone cannot validate a surface after a driver reset. */
+typedef struct MGLR200PrivateSurfaceV1 {
+    ULONG version;
+    ULONG structSize;
+    ULONG surfaceToken;
+    ULONG cpuAddress;
+    ULONG gpuAddress;
+    ULONG pitch;
+    ULONG width;
+    ULONG height;
+    ULONG format;
+    ULONG deviceEpoch;
+    ULONG generation;
+} MGLR200PrivateSurfaceV1;
+
+typedef char MGLR200PrivateSurfaceV1SizeCheck[
+    sizeof(MGLR200PrivateSurfaceV1) == 44 ? 1 : -1];
 
 /* Bounded, context-independent query: writes exactly one GLint, never a
  * descriptor. Bits 31..8 identify texture-capability schema V1; bits 7..0
@@ -107,6 +138,23 @@ typedef struct MGLR200PrivateSegmentFreeV1 {
 
 typedef char MGLR200PrivateSegmentV1SizeCheck[
     sizeof(MGLR200PrivateSegmentV1) == 24 ? 1 : -1];
+
+/* Indirect dispatch: inputs are segmentId/byteOffset/dwordCount and flags
+ * (0 = dispatch, INDIRECT_PROBE = capability query with zero inputs); fenceOut
+ * is the backend-owned retiring fence. The segment must be leased by this
+ * context through the segment query. */
+typedef struct MGLR200PrivateIndirectDispatchV1 {
+    ULONG version;
+    ULONG structSize;
+    ULONG segmentId;
+    ULONG byteOffset;
+    ULONG dwordCount;
+    ULONG flags;
+    ULONG fenceOut;
+} MGLR200PrivateIndirectDispatchV1;
+
+typedef char MGLR200PrivateIndirectDispatchV1SizeCheck[
+    sizeof(MGLR200PrivateIndirectDispatchV1) == 28 ? 1 : -1];
 
 /* V2 = V1 plus the live surface's aperture mapping, so the 68k host can
  * hand a writable address to the PPC frontend for direct texture fills. */

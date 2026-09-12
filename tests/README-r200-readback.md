@@ -50,6 +50,8 @@ python3 tests/test_r200_context_lifecycle.py --regress-cache
 python3 tests/test_r200_context_lifecycle.py --regress-register
 python3 tests/test_r200_context_lifecycle.py --regress-waits
 python3 tests/test_r200_host_pacing.py
+python3 tests/test_r200_retirement.py -v
+python3 tests/test_r200_retirement.py --regress-fences -v
 ```
 
 `r200_texture_layout_test.c` contains the former protocol-header test program:

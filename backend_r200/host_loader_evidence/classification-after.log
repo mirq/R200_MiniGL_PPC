@@ -1,0 +1,10 @@
+CLIENT boot
+CLIENT create sent
+RING reg=begin slots=8 dwords=8192
+RING reg=ok ctrl=43b40000 epoch=1 vseg=4
+RING barrier0 present=0
+gears_benchmark: setup done, starting benchmark (ESC to quit)
+MGL_GEARS_PRECALC_READY gear1_commands=4060 gear2_commands=3664
+RING publish0 slot=0 dwords=11 commit=0
+MINIGL_GEARS_SUMMARY version=5 variant=ppc-precalc mode=fullscreen size=640x480 depth=16 benchmark=1 show=1 envmap=1 overlay=0 warmup=0 frames=600 elapsed_ticks=3023944 eclock_hz=709379 client_clock_hz=24745106 fps_x1000=140752 perf_frames=0 primitives=0 input_vertices=0 submitted_vertices=0 draw_records=0 clear_records=0 submits=0 record_dwords=0 generated_dwords=0 frontend_ticks=0 execute_ticks=0 wait_ticks=0 present_ticks=0 matrix_ticks=0 serialize_ticks=0 serialize_stall_ticks=0 serialize_kernel_flushes=15000 serialize_kernel_vertices=1656000 spheremap_calls=0 spheremap_samples=0 spheremap_ticks=0 spheremap_cache_hits=0 spheremap_cache_misses=0 normal_cache_hits=0 normal_cache_misses=0 texture_residency_ticks=0 radeon_caps=03fff7ff native_attempts=0 native_used=0 native_fallback_caps=0 native_fallback_cull=0 native_fallback_flat=0 native_fallback_size=0 native_fallback_clip=0 quad_attempts=0 quad_used=0 quad_fallback_caps=0 quad_fallback_state=0 quad_fallback_clip=0 async_submits=0 fence_waits=0 fence_poll_hits=0 buffer_waits=0 texture_waits=0 drain_waits=0 client_frame_ticks=0 client_event_ticks=0 client_clear_ticks=0 client_scene_ticks=0 client_overlay_ticks=0 client_switch_ticks=0 client_api_calls=0 client_api_samples=0 client_api_sample_ticks=0 client_timer_overhead_ticks=0 client_immediate_api_ticks=0 client_state_api_calls=0 client_state_api_ticks=0 client_application_ticks=0 client_application_probe_ticks=0 client_application_probe_overhead_ticks=0 client_total_api_ticks=0 client_nonbackend_ticks=0
+gears_benchmark: run complete, tearing down
