@@ -419,6 +419,14 @@ struct TextureObject {
     struct Radeon3DSurface surface;
     BOOL generated;
     BOOL resident;
+    /* PPC-frontend only: retained canonical BGRA8888 shadow of the
+     * level-0 image of a direct-fill texture. Letting a TexSubImage
+     * patch this shadow and re-commit the full image through the direct
+     * path keeps every residency change on the fresh-address rule while
+     * the write stays on the PPC aperture (native copyback measured
+     * ~5.8 MB/s). Zeroed for every other build. */
+    UBYTE *shadow;
+    ULONG shadowWidth, shadowHeight;
 };
 
 /* Radeon3DExecute consumes semantic records asynchronously.  A slot remains

@@ -65,6 +65,7 @@ typedef int BOOL;
 #define MGLPPC_CLIENT_TRACE 0
 #define R200_PPC_FRONTEND 1
 #define MEMF_PUBLIC 1
+#define MEMF_CLEAR 2
 #define GVF_GLOBAL_ONLY 0x100
 #define RADEON3D_SEGMENT_V1_SIZE 24
 #define RADEON3D_SEGMENT_VERSION 1
@@ -128,6 +129,18 @@ static ULONG PlatformClockRate = 10000, clockTicks, hostBound, semanticBound;
 static ULONG nextContext, nextEpoch, failCommand, failOccurrence;
 static BOOL failTransport, holdAck, failFlush, failSubmit, failBarrier, failWait, stagingLive;
 static BOOL generated[MAX_TEXTURES];
+/* Shadow helpers extracted later; prototypes prevent implicit-decl noise
+ * when the slice pulls functions out of production order. */
+#define R200_SHADOW_TOTAL_MAX (2UL * 1024UL * 1024UL)
+static void FrontendShadowFree(struct TextureObject *texture);
+static BOOL FrontendShadowEnsure(struct MiniGLR200Context *context,
+                                 struct TextureObject *texture,
+                                 ULONG width, ULONG height);
+static void FrontendShadowPatch(struct TextureObject *texture,
+                                const UBYTE *source, GLsizei width,
+                                GLsizei height, GLenum format, GLenum type,
+                                ULONG sourceBytes, ULONG sourceStride,
+                                GLint xoffset, GLint yoffset);
 static struct Observations {
     ULONG command[MGLPPC_CMD_CP_SURFACE + 1], total, exec, headerReads, ackReads, flushes, clocks, delays;
     ULONG geometryFlushes, submits, barriers, waits, allocations, frees, yields;
@@ -154,6 +167,20 @@ static void InitializeFrontendContext(struct MiniGLR200Context *c) {
 }
 static BOOL FlushScreenVertices(struct MiniGLR200Context *c) {
     CHECK(c == &proofContext); ++observed.geometryFlushes; return !failFlush;
+}
+/* The frontend TexSubImage shadow path publishes its slot with Submit
+ * (async) rather than SubmitAndWait before the direct recommit. */
+static BOOL Submit(struct MiniGLR200Context *c) {
+    CHECK(c == &proofContext); ++observed.submits; return !failSubmit;
+}
+static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
+                                        ULONG width, ULONG height,
+                                        GLenum format, GLenum type,
+                                        const UBYTE *source,
+                                        ULONG sourceStride) {
+    (void)context; (void)width; (void)height; (void)format; (void)type;
+    (void)source; (void)sourceStride;
+    return TRUE;
 }
 static BOOL SubmitAndWait(struct MiniGLR200Context *c) {
     CHECK(c == &proofContext); ++observed.submits; return !failSubmit;
@@ -281,6 +308,7 @@ FUNCTIONS = (
     "FrontendEnsureTextureUploadBuffer", "FrontendMirrorTextureReply",
     "FrontendWireSourceFormat", "FrontendWireSourceType",
     "FrontendSourceToBGRA32", "FrontendStageTextureBGRA",
+    "FrontendShadowFree", "FrontendShadowEnsure", "FrontendShadowPatch",
     "R200PPCDispatchTexSubImage2D", "R200PPCDispatchDeleteTextures",
 )
 

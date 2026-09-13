@@ -100,10 +100,13 @@ typedef int BOOL;
 #define R200PPCTraceUL2(...) ((void)0)
 #define R200PPCTraceStr(...) ((void)0)
 #define R200PPCTraceClose(...) ((void)0)
+#define MAX_TEXTURES 32
+static void FrontendShadowFree(void *texture) { (void)texture; }
 struct MiniGLR200Context {
     BOOL insideBegin, streamSegments;
     struct { BOOL valid; } segment;
     ULONG segmentPoolCount, alive;
+    void *textures[MAX_TEXTURES];
 };
 static struct MiniGLR200Context proofContext, *R200PPCContext;
 struct Ring { ULONG error; };

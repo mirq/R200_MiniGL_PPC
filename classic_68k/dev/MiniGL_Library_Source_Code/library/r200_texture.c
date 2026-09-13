@@ -170,6 +170,19 @@ struct TextureObject *FindEvictionCandidate(
     return best ? best : bestQueued;
 }
 
+#if R200_RESIDENCY_DIAG
+#include "debug_output.h"
+/* Bind the residency-churn budget to evidence: alloc/import/copyback
+ * per update, event-labeled, written through the host's Output. */
+static void R200DiagU(const char *label, ULONG value)
+{
+    dbg_puts(label);
+    dbg_puts("=");
+    dbg_u32(value);
+    dbg_newline();
+}
+#endif
+
 BOOL EnsureTextureResident(struct MiniGLR200Context *context,
                                   struct TextureObject *texture)
 {
@@ -189,7 +202,15 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
         return FALSE;
     expectedPitch = (texture->width * 4UL + 63UL) & ~63UL;
     storageHeight = (texture->imageBytes + expectedPitch - 1UL) / expectedPitch;
+#if R200_RESIDENCY_DIAG
+    {
+        ULONG t0 = PerfClock();
+#endif
     texture->bitmap = AllocateArgbBitMap(texture->width, storageHeight);
+#if R200_RESIDENCY_DIAG
+        R200DiagU("resdiag alloc", PerfClock() - t0);
+    }
+#endif
     while (!texture->bitmap) {
         struct TextureObject *candidate =
             FindEvictionCandidate(context, texture);
@@ -202,10 +223,17 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
     if (!texture->bitmap)
         return FALSE;
     texture->surface.Size = sizeof(texture->surface);
+#if R200_RESIDENCY_DIAG
+    {
+        ULONG t0 = PerfClock();
+#endif
     if (!Radeon3DImportBitMap(context->device, texture->bitmap,
                               &texture->surface) ||
         texture->surface.Format != RADEON3D_FORMAT_B8G8R8A8 ||
         texture->surface.Pitch * texture->surface.Height < texture->imageBytes) {
+#if R200_RESIDENCY_DIAG
+        R200DiagU("resdiag importfail", PerfClock() - t0);
+#endif
         if (texture->surface.Handle)
             Radeon3DReleaseSurface(context->device, &texture->surface);
         p96FreeBitMap(texture->bitmap);
@@ -221,9 +249,21 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
         }
         return FALSE;
     }
+#if R200_RESIDENCY_DIAG
+        R200DiagU("resdiag import", PerfClock() - t0);
+    }
+#endif
+#if R200_RESIDENCY_DIAG
+    {
+        ULONG t0 = PerfClock();
+#endif
     output = texture->surface.CpuAddress;
     CopyMem(texture->image, output, texture->imageBytes);
     (void)output[texture->imageBytes - 1UL];
+#if R200_RESIDENCY_DIAG
+        R200DiagU("resdiag copyback", PerfClock() - t0);
+    }
+#endif
     texture->resident = TRUE;
     texture->residentGeneration = texture->imageGeneration;
     texture->residentDeviceEpoch = context->deviceEpoch;

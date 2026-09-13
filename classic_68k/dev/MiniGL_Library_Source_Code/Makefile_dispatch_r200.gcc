@@ -36,6 +36,7 @@ LIB_CFLAGS += -DR200_DUMP_FIRST_BATCHES=$(DUMP_FIRST_BATCHES)
 # only for crash triage; keep them out of performance measurements.
 STREAM_DIAG ?= 0
 LIB_CFLAGS += -DR200_STREAM_DIAG=$(STREAM_DIAG)
+LIB_CFLAGS += -DR200_RESIDENCY_DIAG=$(RESIDENCY_DIAG)
 EX_CFLAGS = -std=gnu99 -O2 -mcpu=$(CPU) -m68881 -noixemul -I$(WARP3D_INC) -I$(RADEON3D_INC) -Iinclude
 
 LIB_OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_r200.o \

@@ -130,10 +130,14 @@ typedef struct { ULONG protocolVersion; } MGLPPCTransport;
 struct Radeon3DDevice { int unused; };
 struct SubmitSlot { ULONG *records; ULONG recordCount, drawCount, segmentCursor;
     BOOL commitMode, stateBatch; ULONG *stateBatchDraws, *vertexOffsets; };
+struct HarnessTextureObject { void *shadow; ULONG shadowWidth, shadowHeight; };
+static ULONG shadowFrees;
 struct MiniGLR200Context {
     struct Window *window;
     ULONG baseIDCMP;
     ULONG width, height, pixelDepth, radeonCaps, batchDwords, deviceEpoch;
+    /* Retained direct-texture shadows for the frontend delete loop. */
+    struct HarnessTextureObject textures[32];
     BOOL compactTclVertex, insideBegin, streamSegments, syncEnabled;
     struct { APTR Handle; } surfaces[1], depthSurface;
     struct { struct Radeon3DSegment info; BOOL valid; } segment;
@@ -148,6 +152,11 @@ code += section(F, "typedef struct R200PPCFrontendPlatform", "#define MGLPPC_REP
 code += section(H, "static ULONG HostExecuteCount;", "#if MGLPPC_PROFILE")
 code += r'''
 static struct MiniGLR200Context proofContext, *R200PPCContext;
+/* Production shadow release for the frontend delete loop: the harness
+ * TextureObject only carries the pointer fields the release touches. */
+static void FrontendShadowFree(struct HarnessTextureObject *texture) {
+    if (texture->shadow) { ++shadowFrees; texture->shadow = NULL; }
+}
 static MGLPPCHostState host;
 static struct Window window;
 static struct IntuitionBase *IntuitionBase;

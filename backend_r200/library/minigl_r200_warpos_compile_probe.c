@@ -766,6 +766,7 @@ typedef struct R200PPCFrontendPlatform {
     int numberOfBuffers;
     UBYTE *textureUploadBuffer;
     ULONG textureUploadCapacity;
+    ULONG shadowBytesTotal;
     BOOL opened;
     BOOL registered;
 } R200PPCFrontendPlatform;
@@ -2781,6 +2782,13 @@ void *R200PPCDispatchCreateContextFromID(GLint id, GLint *width, GLint *height)
     return NULL;
 }
 
+/* Retained direct-texture shadow lifecycle (definitions live below
+ * FrontendSourceToBGRA32). */
+static void FrontendShadowFree(struct TextureObject *texture);
+static BOOL FrontendShadowEnsure(struct MiniGLR200Context *context,
+                                 struct TextureObject *texture,
+                                 ULONG width, ULONG height);
+
 void R200PPCDispatchDeleteContext(void)
 {
     ULONG index;
@@ -2911,6 +2919,10 @@ void R200PPCDispatchDeleteContext(void)
 #if defined(R200_FRONTEND_LIBRARY)
     MGLPPCSemanticReplayFree();
 #endif
+    /* Retained direct-texture shadows are PPC-side allocations tied to
+     * this context; release them before the context struct is buried. */
+    for (index = 0; index < MAX_TEXTURES; ++index)
+        FrontendShadowFree(&proofContext.textures[index]);
     if (!proofContext.insideBegin && !FrontendPlatform.mailboxAbandoned) {
         if (!FlushScreenVertices(&proofContext) ||
             !SubmitAndWait(&proofContext)) {
@@ -3753,6 +3765,78 @@ static void FrontendStageTextureBGRA(UBYTE *destination,
     (void)rowBytes;
 }
 
+
+/* Retained canonical shadows: per-texture level-0 BGRA mirror of the
+ * source the direct path last committed, kept PPC-side so a following
+ * TexSubImage patches the shadow and re-commits the full image through
+ * the direct path -- the whole residency/redraw stays on the proven
+ * direct-pipeline rails with no 68k copyback and no new residency
+ * churn. Bounded by R200_SHADOW_TOTAL_MAX so a pathological client
+ * cannot balloon PPC memory; overflow frees only the new shadow. */
+#define R200_SHADOW_TOTAL_MAX (2UL * 1024UL * 1024UL)
+
+static void FrontendShadowFree(struct TextureObject *texture)
+{
+    if (texture->shadow) {
+        FrontendPlatform.shadowBytesTotal -=
+            texture->shadowWidth * texture->shadowHeight * 4UL;
+        FreeVec(texture->shadow);
+        texture->shadow = NULL;
+        texture->shadowWidth = 0;
+        texture->shadowHeight = 0;
+    }
+}
+
+static BOOL FrontendShadowEnsure(struct MiniGLR200Context *context,
+                                 struct TextureObject *texture,
+                                 ULONG width, ULONG height)
+{
+    ULONG bytes = width * height * 4UL;
+    UBYTE *shadow;
+    (void)context;
+    if (texture->shadow && texture->shadowWidth == width &&
+        texture->shadowHeight == height)
+        return TRUE;
+    FrontendShadowFree(texture);
+    if (bytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES ||
+        FrontendPlatform.shadowBytesTotal + bytes > R200_SHADOW_TOTAL_MAX)
+        return FALSE;
+    shadow = AllocVec(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!shadow)
+        return FALSE;
+    texture->shadow = shadow;
+    texture->shadowWidth = width;
+    texture->shadowHeight = height;
+    FrontendPlatform.shadowBytesTotal += bytes;
+    return TRUE;
+}
+
+/* Patch region [x|x+w) x [y|y+h) of the retained shadow from client
+ * texels (canonical BGRA expansion). */
+static void FrontendShadowPatch(struct TextureObject *texture,
+                                const UBYTE *source, GLsizei width,
+                                GLsizei height, GLenum format, GLenum type,
+                                ULONG sourceBytes, ULONG sourceStride,
+                                GLint xoffset, GLint yoffset)
+{
+    ULONG py;
+    for (py = 0; py < (ULONG)height; ++py) {
+        const UBYTE *srcRow = source + (ULONG)py * sourceStride;
+        UBYTE *dstRow = texture->shadow +
+            (ULONG)(yoffset + py) * texture->shadowWidth * 4UL +
+            (ULONG)xoffset * 4UL;
+        ULONG column;
+        for (column = 0; column < (ULONG)width; ++column) {
+            ULONG value = FrontendSourceToBGRA32(
+                format, type, srcRow + column * sourceBytes);
+            dstRow[column * 4UL + 0] = (UBYTE)(value >> 24);
+            dstRow[column * 4UL + 1] = (UBYTE)(value >> 16);
+            dstRow[column * 4UL + 2] = (UBYTE)(value >> 8);
+            dstRow[column * 4UL + 3] = (UBYTE)value;
+        }
+    }
+}
+
 static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
                                         ULONG width, ULONG height,
                                         GLenum format, GLenum type,
@@ -3955,6 +4039,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+    texture = &context->textures[context->boundTexture[0]];
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
         level == 0 && width <= 2048 && height <= 2048 &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
@@ -3998,6 +4083,20 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                 return;
             }
             FrontendMirrorTextureReply(context);
+            /* Retain this level-0 image as the canonical shadow so a
+             * following TexSubImage can patch-and-recommit here. */
+            {
+                struct TextureObject *shadowTarget =
+                    &context->textures[context->boundTexture[0]];
+                ULONG shadowSourceBytes =
+                    MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
+                if (FrontendShadowEnsure(context, shadowTarget,
+                                         (ULONG)width, (ULONG)height))
+                    FrontendStageTextureBGRA(
+                        shadowTarget->shadow, source + sourceOffset,
+                        width, height, format, type, shadowSourceBytes,
+                        rowBytes, sourceStride);
+            }
 #if MGLPPC_PROFILE
             PlatformProfile.textureSuccesses++;
             PlatformProfile.textureTicks += PerfClock() - textureStart;
@@ -4014,6 +4113,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         /* Direct failed: recover the host's pending state, then fall
          * through to the shared staging path, which re-creates the
          * whole texture from scratch. */
+        FrontendShadowFree(texture);
         memset(&FrontendPlatform.control, 0,
                sizeof(FrontendPlatform.control));
         FrontendPlatform.control.value[0] =
@@ -4165,6 +4265,10 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         return;
     }
     texture = &context->textures[context->boundTexture[context->activeTexture]];
+    /* A shared/chunked (image-backed) redefinition invalidates any
+     * retained direct shadow: subimages of image-backed textures must go
+     * through the native canonical path. */
+    FrontendShadowFree(texture);
     generation = texture->imageGeneration + 1UL;
     if (!generation) generation = 1;
     texture->generated = TRUE;
@@ -4196,6 +4300,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     ULONG name, bpp, rowBytes, stride, offset, bytes;
 #if MGLPPC_PROFILE
     ULONG textureStart;
+    ULONG subChunkStart = 0;
 #endif
     if (!StateChangeAllowed(context)) return;
     if (target != GL_TEXTURE_2D) {
@@ -4248,6 +4353,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     }
 #if MGLPPC_PROFILE
     textureStart = PerfClock();
+
     PlatformProfile.textureCalls++;
     PlatformProfile.textureBytes += bytes;
     PlatformProfile.textureSharedCalls++;
@@ -4259,6 +4365,89 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     if (bytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES) {
         SetError(context, GL_INVALID_OPERATION);
         return;
+    }
+    /* Fast path: a retained direct-eligible shadow lets this subimage
+     * patch PPC-side memory and re-commit the WHOLE image through the
+     * direct pipeline (fresh BEGIN surface per commit, aperture-rate
+     * fill, no 68k copyback, no native residency churn). Same
+     * eligibility rules as the direct TexImage path plus the shadow. */
+    if (texture->shadow &&
+        texture->shadowWidth == (ULONG)texture->width &&
+        texture->shadowHeight == (ULONG)texture->height &&
+        level == 0 &&
+        (FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
+        texture->width >= (ULONG)(xoffset + width) &&
+        texture->height >= (ULONG)(yoffset + height) &&
+        !FrontendPlatform.mailboxAbandoned &&
+        !(texture->width & (texture->width - 1UL)) &&
+        !(texture->height & (texture->height - 1UL))) {
+#if MGLPPC_PROFILE
+        subChunkStart = PerfClock();
+        PlatformProfile.textureBarrierCalls++;
+#endif
+        /* The shadow patch precedes publishing: the client's texels are
+         * the truth until the commit completes. */
+        FrontendShadowPatch(texture, (const UBYTE *)pixels + offset,
+                            width, height, format, type,
+                            bpp, stride, xoffset, yoffset);
+        if (!PlatformMailboxReady() ||
+            !FlushScreenVertices(context) || !Submit(context) ||
+            (FrontendPlatform.ring &&
+             !R200PPCPlatformBarrier(context, FALSE))) {
+#if MGLPPC_PROFILE
+            PlatformProfile.textureBarrierTicks += PerfClock() - subChunkStart;
+#endif
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+#if MGLPPC_PROFILE
+        PlatformProfile.textureBarrierTicks += PerfClock() - subChunkStart;
+        subChunkStart = PerfClock();
+        PlatformProfile.textureDirectCalls++;
+#endif
+        if (FrontendDirectTextureUpload(context, texture->shadowWidth,
+                                        texture->shadowHeight,
+                                        MGL_UBYTE_BGRA, GL_UNSIGNED_BYTE,
+                                        texture->shadow,
+                                        texture->shadowWidth * 4UL)) {
+#if MGLPPC_PROFILE
+            PlatformProfile.textureDirectTicks += PerfClock() - subChunkStart;
+#endif
+            if (!FrontendPlatform.control.value[1] ||
+                !FrontendPlatform.control.value[2] ||
+                !FrontendPlatform.control.value[3] ||
+                FrontendPlatform.control.value[4] != texture->definedLevels ||
+                FrontendPlatform.control.value[5] != texture->levelCount ||
+                FrontendPlatform.control.value[7] != context->deviceEpoch) {
+                SetError(context, GL_INVALID_OPERATION);
+                return;
+            }
+            FrontendMirrorTextureReply(context);
+#if MGLPPC_PROFILE
+            PlatformProfile.textureSuccesses++;
+            PlatformProfile.textureTicks += PerfClock() - textureStart;
+#endif
+            return;
+        }
+#if MGLPPC_PROFILE
+        PlatformProfile.textureDirectTicks += PerfClock() - subChunkStart;
+#endif
+        if (FrontendPlatform.mailboxAbandoned) {
+            /* The shadow now leads the native content; a later recommit
+             * or TexImage can still converge. Keep the shadow. */
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        memset(&FrontendPlatform.control, 0,
+               sizeof(FrontendPlatform.control));
+        FrontendPlatform.control.value[0] = name;
+        if (!PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_ABORT,
+                          FrontendPlatform.contextId)) {
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        /* Fall through to the canonical shared path below; the shadow
+         * stays the committed PPC-side truth for the next attempt. */
     }
     /* Old snapshots must be published and fenced before native invalidation. */
     if (!FrontendTextureBarrier(context)) return;
@@ -4344,6 +4533,9 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
             struct TextureObject *texture;
             if (!name || name >= MAX_TEXTURES) continue;
             texture = &context->textures[name];
+            /* Free the retained shadow before the struct is zeroed or
+             * the PPC allocation leaks. */
+            FrontendShadowFree(texture);
             ZeroMemory(texture, sizeof(*texture));
             texture->minFilter = texture->magFilter = GL_NEAREST;
             texture->wrapS = texture->wrapT = GL_REPEAT;
