@@ -276,6 +276,7 @@ FUNCTIONS = (
     "R200PPCDispatchDeleteContext", "FrontendTextureBarrier", "FrontendSetTransportError",
     "R200PPCDispatchGenTextures", "R200PPCDispatchBindTexture", "FrontendCopyTextureBytes",
     "FrontendEnsureTextureUploadBuffer", "FrontendMirrorTextureReply",
+    "FrontendWireSourceFormat", "FrontendWireSourceType",
     "R200PPCDispatchTexSubImage2D", "R200PPCDispatchDeleteTextures",
 )
 

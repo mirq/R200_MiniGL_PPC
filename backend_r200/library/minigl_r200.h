@@ -149,7 +149,7 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_FILL 222U
 #define GL_POLYGON_OFFSET_FILL 135U
 #define GL_COLOR_INDEX 29U
-#define GL_COLOR_TABLE 236U
+#define GL_COLOR_TABLE 232U
 #define GL_SCISSOR_TEST 160U
 #define GL_DST_ALPHA 50U
 #define GL_DST_COLOR 51U
@@ -201,8 +201,6 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_SPHERE_MAP 219U
 #define GL_T 220U
 #define GL_S 221U
-#define GL_TEXTURE0_ARB 223U
-#define GL_TEXTURE1_ARB 224U
 /* Interleaved-array formats and remaining hint targets (ABI v5,
  * values from the classic MiniGL public enum, matching mgl/gl.h). */
 #define GL_C3F_V3F 19U
@@ -217,15 +215,34 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 /* Matches mgl/gl.h; V19-parity return value for
  * mglGetSupportedScreenModes when no mode is selected. */
 #define MGL_SM_BESTMODE 0xFFFFFFFFUL
-#define MGL_FLATFAN 231U
-#define MGL_FLATSTRIP 232U
-#define MGL_W_ONE_HINT 234U
-#define MGL_Z_OFFSET 235U
-#define MGL_LOCK_MANUAL 229U
-#define MGL_UBYTE_BGRA 237U
-#define MGL_UBYTE_ARGB 238U
-#define MGL_UNSIGNED_SHORT_5_6_5 239U
-#define MGL_UNSIGNED_SHORT_4_4_4_4 240U
+/*
+ * Client-visible enum numbering must match include/mgl/gl.h (the header
+ * every dispatch client compiles against), NOT the classic dev/include
+ * copy. The WOS client header re-anchored GL_TEXTURE0_ARB/1_ARB to the
+ * real GL spec values (Quake2 multitexture fix) and re-anchored
+ * GL_MAX_TEXTURE_UNITS_ARB to GL_FILL+1, which shifted every tail
+ * constant by -4 relative to the classic numbering below-the-line values
+ * (BGRA/ARGB/565/4444/FLATFAN/...) previously used here. A mismatch is
+ * not cosmetic: ValidPrimitive()/glHint/glColorTable validate raw client
+ * values, and BGRA/ARGB fall into the byte-order else-branch and swap
+ * channels silently. tests/test_enum_parity.py guards this contract.
+ */
+#define MGL_FLATFAN 227U
+#define MGL_FLATSTRIP 228U
+#define MGL_W_ONE_HINT 230U
+#define MGL_Z_OFFSET 231U
+#define MGL_LOCK_AUTOMATIC 224U
+#define MGL_LOCK_MANUAL 225U
+#define MGL_LOCK_SMART 226U
+#define MGL_UBYTE_BGRA 233U
+#define MGL_UBYTE_ARGB 234U
+#define MGL_UNSIGNED_SHORT_5_6_5 235U
+#define MGL_UNSIGNED_SHORT_4_4_4_4 236U
+/* Same contract for the multitexture unit selectors: dispatch clients
+ * pass the real spec values (include/mgl/gl.h re-anchor), so unit -
+ * GL_TEXTURE0_ARB yields the 0/1 unit index. */
+#define GL_TEXTURE0_ARB 0x84C0U
+#define GL_TEXTURE1_ARB 0x84C1U
 /* Fixed-function lighting (ABI v4), appended to the end of mgl/gl.h's
  * enum; values must match it exactly. */
 #define GL_LIGHTING 245U

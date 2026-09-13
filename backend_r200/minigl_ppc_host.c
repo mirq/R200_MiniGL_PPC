@@ -2081,6 +2081,18 @@ static ULONG TextureByteCount(ULONG width, ULONG height,
             components = 3;
         else if (format == GL_RGBA)
             components = 4;
+        /* Luminance-class and direct byte-order sources: same values
+         * the native backend's SourceFormatBytes() accepts (the host
+         * compiles against the native tree's client header, and the
+         * frontend translates the below-the-anchor tail constants
+         * before they cross the wire). */
+        else if (format == MGL_UBYTE_BGRA || format == MGL_UBYTE_ARGB)
+            components = 4;
+        else if (format == GL_LUMINANCE_ALPHA)
+            components = 2;
+        else if (format == GL_ALPHA || format == GL_LUMINANCE ||
+                 format == GL_COLOR_INDEX)
+            components = 1;
         else
             return 0;
     } else if ((type == MGL_UNSIGNED_SHORT_5_6_5 && format == GL_RGB) ||

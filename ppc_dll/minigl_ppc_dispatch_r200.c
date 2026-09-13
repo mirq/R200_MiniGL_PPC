@@ -88,6 +88,7 @@ void R200ABI3DeleteContext(void)
 #define Lib_glTexImage2D R200PPCDispatchTexImage2D
 #define Lib_glTexSubImage2D R200PPCDispatchTexSubImage2D
 #define Lib_glReadPixels R200PPCDispatchReadPixels
+#define Lib_mglWriteShotPPM R200PPCDispatchWriteShotPPM
 #define Lib_mglEmergencyCloseScreen R200PPCDispatchEmergencyCloseScreen
 
 #include "../backend_r200/generated/dispatch_table_abi3.c"

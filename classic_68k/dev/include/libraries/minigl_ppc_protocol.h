@@ -148,8 +148,19 @@ typedef uint32_t ULONG;
  *   0 target, 1 level, 2 internal format, 3 width, 4 height,
  *   5 format (v14) or format | (type << 16) (v15),
  *   6 shared CPU address, 7 byte count.
- * Eligible types: GL_UNSIGNED_BYTE, and (v15) MGL_UNSIGNED_SHORT_5_6_5
- * with GL_RGB / MGL_UNSIGNED_SHORT_4_4_4_4 with GL_RGBA. */
+ * Eligible types: GL_UNSIGNED_BYTE with GL_RGB / GL_RGBA /
+ * MGL_UBYTE_BGRA / MGL_UBYTE_ARGB / GL_ALPHA / GL_LUMINANCE /
+ * GL_LUMINANCE_ALPHA (v15 also carries BGRA/ARGB), and (v15)
+ * MGL_UNSIGNED_SHORT_5_6_5 with GL_RGB / MGL_UNSIGNED_SHORT_4_4_4_4
+ * with GL_RGBA. COLOR_INDEX is excluded: frontend/native palettes are
+ * not synchronized.
+ * Numbering contract: source formats/types arrive as DISPATCH-CLIENT
+ * values (include/mgl/gl.h). The frontend translates the four
+ * below-the-anchor tail constants (BGRA/ARGB/565/4444) to the native
+ * tree's numbering before packing, so this handler and every native
+ * call see native-header values. Formats below the anchor (RGB, RGBA,
+ * alpha, luminance, luminance-alpha, unsigned-byte) are identical in
+ * both headers. */
 /* Shared staging uploads above this size fall back to the chunked path so
  * a maximum-size 2048x2048 upload cannot pin a permanent 16 MB buffer. */
 #define MGLPPC_TEXTURE_SHARED_MAX_BYTES (2UL * 1024UL * 1024UL)

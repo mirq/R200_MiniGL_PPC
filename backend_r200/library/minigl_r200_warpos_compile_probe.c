@@ -3373,10 +3373,15 @@ static ULONG FrontendTextureLayout(struct MiniGLR200Context *context,
     ULONG w = (ULONG)width, h = (ULONG)height;
     if (width <= 0 || height <= 0) return 0;
     /* components is bytes per texel: 3/4 for byte sources, 2 for the
-     * 16-bit halfword sources the game's present path uploads. */
+     * 16-bit halfword sources the game's present path uploads, and the
+     * 1/2-byte luminance-class sources the native backend accepts. */
     if (type == GL_UNSIGNED_BYTE) {
         if (format == GL_RGB) components = 3;
-        else if (format == GL_RGBA) components = 4;
+        else if (format == GL_RGBA || format == MGL_UBYTE_BGRA ||
+                 format == MGL_UBYTE_ARGB) components = 4;
+        else if (format == GL_LUMINANCE_ALPHA) components = 2;
+        else if (format == GL_ALPHA || format == GL_LUMINANCE ||
+                 format == GL_COLOR_INDEX) components = 1;
         else return 0;
     } else if ((type == MGL_UNSIGNED_SHORT_5_6_5 && format == GL_RGB) ||
                (type == MGL_UNSIGNED_SHORT_4_4_4_4 && format == GL_RGBA)) {
@@ -3513,6 +3518,115 @@ void R200PPCDispatchReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                shared + row * rowBytes, rowBytes);
 }
 
+/* Full-frame screenshot via the command-27 readback path. The frame is
+ * fetched in row bands (the shared staging buffer is capped), converted
+ * RGBA->RGB PPC-side, and written as binary PPM (P6) through stdio.
+ * Rows are read in GL order (bottom-up) but written top-to-bottom, so
+ * each band is walked backwards; the band at GL y is the PPM row span
+ * [height-y-rows, height-y). The 68k implementation (r200_surface.c)
+ * reads its own surface directly; this frontend variant exists because
+ * the DLL never owns the drawable. */
+void R200PPCDispatchWriteShotPPM(char *filename)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG bandRows, bandBytes, width, height, top, row;
+    UBYTE *shared;
+    UBYTE *rowBuffer;
+    FILE *file;
+
+    if (!context || !filename)
+        return;
+    if (context->insideBegin) {
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+    if (FrontendPlatform.peerProtocol < 15UL ||
+        !(FrontendPlatform.capabilities & MGLPPC_CAP_READ_PIXELS_V1) ||
+        !PlatformMailboxReady() || FrontendPlatform.mailboxAbandoned) {
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+    width = context->width;
+    height = context->height;
+    /* A single row must fit the staging cap for banding to work. */
+    if (!width || !height || width > MGLPPC_READ_PIXELS_MAX_BYTES / 4UL) {
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+    bandRows = MGLPPC_READ_PIXELS_MAX_BYTES / (width * 4UL);
+    if (bandRows > height)
+        bandRows = height;
+    bandBytes = width * 4UL * bandRows;
+    if (!FrontendTextureBarrier(context)) return;
+    /* Keep both boundary cache lines inside the retained allocation. */
+    if (!FrontendEnsureTextureUploadBuffer(bandBytes + 63UL)) {
+        SetError(context, GL_OUT_OF_MEMORY);
+        return;
+    }
+    shared = (UBYTE *)(((ULONG)FrontendPlatform.textureUploadBuffer + 31UL)
+                       & ~31UL);
+    rowBuffer = AllocVec(width * 3UL, MEMF_PUBLIC);
+    if (!rowBuffer) {
+        SetError(context, GL_OUT_OF_MEMORY);
+        return;
+    }
+    file = fopen(filename, "wb");
+    if (!file) {
+        FreeVec(rowBuffer);
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+    if (fprintf(file, "P6\n%lu %lu\n255\n",
+                (unsigned long)width, (unsigned long)height) <= 0)
+        goto write_failed;
+    for (top = 0; top < height; top += bandRows) {
+        ULONG rows = height - top < bandRows ? height - top : bandRows;
+        ULONG yGL = height - top - rows; /* lowest GL row of the band */
+        ULONG readBytes = width * 4UL * rows;
+        memset(&FrontendPlatform.control, 0,
+               sizeof(FrontendPlatform.control));
+        FrontendPlatform.control.value[0] = 0UL;
+        FrontendPlatform.control.value[1] = yGL;
+        FrontendPlatform.control.value[2] = width;
+        FrontendPlatform.control.value[3] = rows;
+        FrontendPlatform.control.value[4] = GL_RGBA;
+        FrontendPlatform.control.value[5] = GL_UNSIGNED_BYTE;
+        FrontendPlatform.control.value[6] = (ULONG)shared;
+        FrontendPlatform.control.value[7] = readBytes;
+        MGLPPCFlushDataRange(shared, readBytes);
+        if (!PlatformCall(MGLPPC_CMD_READ_PIXELS_SHARED,
+                          FrontendPlatform.contextId)) {
+            FrontendSetTransportError(context);
+            goto write_failed;
+        }
+        MGLPPCFlushDataRange(shared, readBytes);
+        /* Shared rows are GL-ordered; the PPM wants the band reversed. */
+        for (row = rows; row-- > 0;) {
+            const UBYTE *src = shared + row * width * 4UL;
+            ULONG x;
+            for (x = 0; x < width; ++x) {
+                rowBuffer[x * 3UL + 0] = src[x * 4UL + 0];
+                rowBuffer[x * 3UL + 1] = src[x * 4UL + 1];
+                rowBuffer[x * 3UL + 2] = src[x * 4UL + 2];
+            }
+            if (fwrite(rowBuffer, 1UL, width * 3UL, file) != width * 3UL)
+                goto write_failed;
+        }
+    }
+    if (fclose(file) != 0) {
+        FreeVec(rowBuffer);
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+    FreeVec(rowBuffer);
+    return;
+write_failed:
+    fclose(file);
+    FreeVec(rowBuffer);
+    if (!context->error)
+        SetError(context, GL_INVALID_OPERATION);
+}
+
 static void FrontendMirrorTextureReply(struct MiniGLR200Context *context)
 {
     struct TextureObject *texture;
@@ -3540,6 +3654,68 @@ static void FrontendMirrorTextureReply(struct MiniGLR200Context *context)
  * the PPC converts the source rows into it through the aperture,
  * flushes, and COMMIT installs it. Byte order and the 565/4444
  * expansion mirror the 68k ConvertPixel() exactly. */
+/* One source texel -> BGRA32 surface dword ((b<<24)|(g<<16)|(r<<8)|a),
+ * matching the native ConvertPixel()'s destination order exactly. All
+ * supported unsigned-byte source formats plus the two big-endian 565 /
+ * 4444 halfword types; anything else returns the opaque-white dword the
+ * format checks upstream already reject. Luminance-class expansions
+ * mirror ConvertPixel: L=a?255:L for RGB, alpha-only keeps rgb=255. */
+static ULONG FrontendSourceToBGRA32(GLenum format, GLenum type,
+                                    const UBYTE *src)
+{
+    ULONG r = 255, g = 255, b = 255, a = 255;
+    if (type == MGL_UNSIGNED_SHORT_5_6_5) {
+        ULONG value = ((ULONG)src[0] << 8) | src[1];
+        r = ((value >> 11) & 31UL) * 255UL / 31UL;
+        g = ((value >> 5) & 63UL) * 255UL / 63UL;
+        b = (value & 31UL) * 255UL / 31UL;
+    } else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) {
+        ULONG value = ((ULONG)src[0] << 8) | src[1];
+        r = ((value >> 12) & 15UL) * 17UL;
+        g = ((value >> 8) & 15UL) * 17UL;
+        b = ((value >> 4) & 15UL) * 17UL;
+        a = (value & 15UL) * 17UL;
+    } else if (format == GL_ALPHA) {
+        a = src[0];
+    } else if (format == GL_LUMINANCE) {
+        r = g = b = src[0];
+    } else if (format == GL_LUMINANCE_ALPHA) {
+        r = g = b = src[0];
+        a = src[1];
+    } else if (format == GL_RGB) {
+        r = src[0]; g = src[1]; b = src[2];
+    } else if (format == GL_RGBA) {
+        r = src[0]; g = src[1]; b = src[2]; a = src[3];
+    } else if (format == MGL_UBYTE_BGRA) {
+        b = src[0]; g = src[1]; r = src[2]; a = src[3];
+    } else if (format == MGL_UBYTE_ARGB) {
+        a = src[0]; r = src[1]; g = src[2]; b = src[3];
+    }
+    return (b << 24) | (g << 16) | (r << 8) | a;
+}
+
+/* The 68k host and the native library compile against the classic
+ * client enum (MGL_UBYTE_BGRA=237, MGL_UNSIGNED_SHORT_5_6_5=239, ...),
+ * while dispatch clients compile against include/mgl/gl.h (233/235/...)
+ * — the WOS header re-anchored GL_TEXTURE0_ARB and shifted the tail.
+ * Source formats/types cross the protocol as raw client values, so
+ * translate the four below-the-anchor tail constants to the native
+ * numbering when packing a wire message. Everything else is identical
+ * in both headers and passes through unchanged. */
+static GLenum FrontendWireSourceFormat(GLenum format)
+{
+    if (format == MGL_UBYTE_BGRA) return (GLenum)237U;
+    if (format == MGL_UBYTE_ARGB) return (GLenum)238U;
+    return format;
+}
+
+static GLenum FrontendWireSourceType(GLenum type)
+{
+    if (type == MGL_UNSIGNED_SHORT_5_6_5) return (GLenum)239U;
+    if (type == MGL_UNSIGNED_SHORT_4_4_4_4) return (GLenum)240U;
+    return type;
+}
+
 static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
                                         ULONG width, ULONG height,
                                         GLenum format, GLenum type,
@@ -3552,7 +3728,16 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
     ULONG requestFormat = MGLPPC_TEXDIRECT_FMT_BGRA32;
     ULONG grantedFormat;
     ULONG row, column, pitch, bytes;
+    ULONG sourceBytes;
     UBYTE *destination;
+
+    if (type == MGL_UNSIGNED_SHORT_5_6_5 ||
+        type == MGL_UNSIGNED_SHORT_4_4_4_4)
+        sourceBytes = 2;
+    else if (format == GL_RGB) sourceBytes = 3;
+    else if (format == GL_LUMINANCE_ALPHA) sourceBytes = 2;
+    else if (format == GL_ALPHA || format == GL_LUMINANCE) sourceBytes = 1;
+    else sourceBytes = 4;
 
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = textureName;
@@ -3609,77 +3794,17 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
          * transaction each and dominate the upload. */
         if (((ULONG)out & 3UL) == 0UL) {
             ULONG *out32 = (ULONG *)out;
-            if (type == MGL_UNSIGNED_SHORT_5_6_5) {
-                for (column = 0; column < width; ++column) {
-                    ULONG value = ((ULONG)srcRow[column * 2UL] << 8) |
-                                  srcRow[column * 2UL + 1UL];
-                    ULONG r = ((value >> 11) & 31UL) * 255UL / 31UL;
-                    ULONG g = ((value >> 5) & 63UL) * 255UL / 63UL;
-                    ULONG b = (value & 31UL) * 255UL / 31UL;
-                    out32[column] = (b << 24) | (g << 16) |
-                                    (r << 8) | 0xffUL;
-                }
-            } else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) {
-                for (column = 0; column < width; ++column) {
-                    ULONG value = ((ULONG)srcRow[column * 2UL] << 8) |
-                                  srcRow[column * 2UL + 1UL];
-                    ULONG r = ((value >> 12) & 15UL) * 17UL;
-                    ULONG g = ((value >> 8) & 15UL) * 17UL;
-                    ULONG b = ((value >> 4) & 15UL) * 17UL;
-                    ULONG a = (value & 15UL) * 17UL;
-                    out32[column] = (b << 24) | (g << 16) |
-                                    (r << 8) | a;
-                }
-            } else if (format == GL_RGB) {
-                for (column = 0; column < width; ++column) {
-                    out32[column] = ((ULONG)srcRow[column * 3UL + 2] << 24) |
-                                    ((ULONG)srcRow[column * 3UL + 1] << 16) |
-                                    ((ULONG)srcRow[column * 3UL + 0] << 8) |
-                                    0xffUL;
-                }
-            } else {
-                for (column = 0; column < width; ++column) {
-                    out32[column] = ((ULONG)srcRow[column * 4UL + 2] << 24) |
-                                    ((ULONG)srcRow[column * 4UL + 1] << 16) |
-                                    ((ULONG)srcRow[column * 4UL + 0] << 8) |
-                                    (ULONG)srcRow[column * 4UL + 3];
-                }
-            }
+            for (column = 0; column < width; ++column)
+                out32[column] = FrontendSourceToBGRA32(
+                    format, type, srcRow + column * sourceBytes);
         } else {
-            if (type == MGL_UNSIGNED_SHORT_5_6_5) {
-                for (column = 0; column < width; ++column) {
-                    UWORD value = (UWORD)((srcRow[column * 2UL] << 8) |
-                                          srcRow[column * 2UL + 1UL]);
-                    out[column * 4UL + 0] = (UBYTE)((value & 31UL) * 255UL / 31UL);
-                    out[column * 4UL + 1] =
-                        (UBYTE)(((value >> 5) & 63UL) * 255UL / 63UL);
-                    out[column * 4UL + 2] =
-                        (UBYTE)(((value >> 11) & 31UL) * 255UL / 31UL);
-                    out[column * 4UL + 3] = 255;
-                }
-            } else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) {
-                for (column = 0; column < width; ++column) {
-                    UWORD value = (UWORD)((srcRow[column * 2UL] << 8) |
-                                          srcRow[column * 2UL + 1UL]);
-                    out[column * 4UL + 0] = (UBYTE)((value & 15UL) * 17UL);
-                    out[column * 4UL + 1] = (UBYTE)(((value >> 4) & 15UL) * 17UL);
-                    out[column * 4UL + 2] = (UBYTE)(((value >> 8) & 15UL) * 17UL);
-                    out[column * 4UL + 3] = (UBYTE)(((value >> 12) & 15UL) * 17UL);
-                }
-            } else if (format == GL_RGB) {
-                for (column = 0; column < width; ++column) {
-                    out[column * 4UL + 0] = srcRow[column * 3UL + 2];
-                    out[column * 4UL + 1] = srcRow[column * 3UL + 1];
-                    out[column * 4UL + 2] = srcRow[column * 3UL + 0];
-                    out[column * 4UL + 3] = 255;
-                }
-            } else {
-                for (column = 0; column < width; ++column) {
-                    out[column * 4UL + 0] = srcRow[column * 4UL + 2];
-                    out[column * 4UL + 1] = srcRow[column * 4UL + 1];
-                    out[column * 4UL + 2] = srcRow[column * 4UL + 0];
-                    out[column * 4UL + 3] = srcRow[column * 4UL + 3];
-                }
+            for (column = 0; column < width; ++column) {
+                ULONG value = FrontendSourceToBGRA32(
+                    format, type, srcRow + column * sourceBytes);
+                out[column * 4UL + 0] = (UBYTE)(value >> 24);
+                out[column * 4UL + 1] = (UBYTE)(value >> 16);
+                out[column * 4UL + 2] = (UBYTE)(value >> 8);
+                out[column * 4UL + 3] = (UBYTE)value;
             }
         }
     }
@@ -3717,6 +3842,21 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+    /* Internalformat accepts the same resolved list as the native
+     * backend (raw component counts 3/4 included, GL 1.0 style). The
+     * DIRECT path never forwards it, the shared/chunked paths pass it
+     * through to native glTexImage2D; validating here gives the client
+     * the documented error code at the documented call. */
+    if (internalFormat != GL_RGB && internalFormat != GL_RGB5_A1 &&
+        internalFormat != GL_RGBA &&
+        internalFormat != 3 && internalFormat != 4 &&
+        internalFormat != GL_ALPHA &&
+        internalFormat != GL_LUMINANCE &&
+        internalFormat != GL_LUMINANCE_ALPHA &&
+        internalFormat != GL_COLOR_INDEX) {
+        SetError(context, GL_INVALID_ENUM);
+        return;
+    }
     /* The game's present path uploads 16-bit tiles as
      * (MGL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT); normalise to the
      * type-driven forms the native backend implements. */
@@ -3734,7 +3874,19 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         SetError(context, GL_INVALID_ENUM);
         return;
     }
-    if (format != GL_RGB && format != GL_RGBA) {
+    if (format != GL_RGB && format != GL_RGBA &&
+        format != MGL_UBYTE_BGRA && format != MGL_UBYTE_ARGB &&
+        format != GL_ALPHA && format != GL_LUMINANCE &&
+        format != GL_LUMINANCE_ALPHA) {
+        /* COLOR_INDEX is native-accepted but the frontend and native
+         * palettes are not synchronized across CPUs (see protocol
+         * notes); reject it here like the subimage path always has. */
+        SetError(context, GL_INVALID_ENUM);
+        return;
+    }
+    if (format != GL_RGB && format != GL_RGBA &&
+        format != MGL_UBYTE_BGRA && format != MGL_UBYTE_ARGB &&
+        type != GL_UNSIGNED_BYTE) {
         SetError(context, GL_INVALID_ENUM);
         return;
     }
@@ -3853,7 +4005,8 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[4] = (ULONG)height;
         FrontendPlatform.control.value[5] =
             FrontendPlatform.peerProtocol >= 15UL
-                ? (format | (type << 16)) : format;
+                ? (FrontendWireSourceFormat(format) |
+                   (FrontendWireSourceType(type) << 16)) : format;
         FrontendPlatform.control.value[6] =
             (ULONG)FrontendPlatform.textureUploadBuffer;
         FrontendPlatform.control.value[7] = total;
@@ -3867,7 +4020,10 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         PlatformProfile.chunkCount++;
 #endif
         if (!chunkOk) {
-            SetError(context, GL_INVALID_OPERATION);
+            /* The host reports the native glTexImage2D error in
+             * value[0] with MGLPPC_STATUS_GL_ERROR; surface that code
+             * instead of masking it as INVALID_OPERATION. */
+            FrontendSetTransportError(context);
             return;
         }
         sharedUpload = TRUE;
@@ -3888,8 +4044,10 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[3] = (ULONG)width;
         FrontendPlatform.control.value[4] = (ULONG)height;
         FrontendPlatform.control.value[5] = (ULONG)border;
-        FrontendPlatform.control.value[6] = format;
-        FrontendPlatform.control.value[7] = type;
+        FrontendPlatform.control.value[6] =
+            (ULONG)FrontendWireSourceFormat(format);
+        FrontendPlatform.control.value[7] =
+            (ULONG)FrontendWireSourceType(type);
         if (!PlatformCall(MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN,
                           FrontendPlatform.contextId)) {
             FrontendSetTransportError(context);
@@ -4046,7 +4204,9 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     FrontendPlatform.control.value[3] = yoffset;
     FrontendPlatform.control.value[4] = width;
     FrontendPlatform.control.value[5] = height;
-    FrontendPlatform.control.value[6] = format | (type << 16);
+    FrontendPlatform.control.value[6] =
+        (ULONG)(FrontendWireSourceFormat(format) |
+                (FrontendWireSourceType(type) << 16));
     FrontendPlatform.control.value[7] = (ULONG)FrontendPlatform.textureUploadBuffer;
     /* Native may fail AFTER replacing residency. Never keep a stale handle,
      * even when transport completion is lost. A later successful update or
