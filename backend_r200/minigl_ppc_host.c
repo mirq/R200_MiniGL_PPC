@@ -543,6 +543,12 @@ static ULONG HostPollLoops;
 static ULONG HostMailboxPollTicks, HostMailboxPollCalls;
 static ULONG HostFencePollTicks, HostFencePollCalls;
 static ULONG HostEventPollTicks, HostEventPollCalls;
+/* Subimage stage attribution (MGLPPC-profile builds only). */
+static ULONG HostSubimageCount;
+static ULONG HostSubimageTicks;
+static ULONG HostSubimagePreflightTicks;
+static ULONG HostSubimageNativeTicks;
+static ULONG HostSubimageBridgeTicks;
 static GLenum HostNativeEnableError;
 static BOOL HostNativeReported;
 
@@ -2942,6 +2948,9 @@ static void HandleMessage(MGLPPCMessage *message,
         struct MemHeader *region;
         BOOL readable = FALSE;
         GLenum error;
+#if MGLPPC_PROFILE
+        ULONG subStart = ProbeTicks(), preflightStart, nativeStart, bridgeStart;
+#endif
         memcpy(args, message->value, sizeof(args));
         memset(message->value, 0, sizeof(message->value));
         if (!state->context || message->contextId != state->contextId) {
@@ -3000,7 +3009,14 @@ static void HandleMessage(MGLPPCMessage *message,
          * without forcing backing on the ordinary direct-upload hot path. */
         memset(&preflight, 0, sizeof(preflight));
         preflight.textureName = args[0];
+#if MGLPPC_PROFILE
+        ++HostSubimageCount;
+        preflightStart = ProbeTicks();
+#endif
         glGetIntegerv(MGL_R200_PRIVATE_TEXTURE_V2_QUERY, (GLint *)&preflight);
+#if MGLPPC_PROFILE
+        HostSubimagePreflightTicks += ProbeTicks() - preflightStart;
+#endif
         error = glGetError();
         if (error || preflight.version != MGL_R200_PRIVATE_TEXTURE_V2_VERSION ||
             preflight.structSize != sizeof(preflight) ||
@@ -3028,17 +3044,34 @@ static void HandleMessage(MGLPPCMessage *message,
         CacheClearE((APTR)args[7], bytes, CACRF_ClearD);
         for (index = 0; index < 4; ++index)
             glPixelStorei(HostUnpackNames[index], index ? 0 : 1);
+#if MGLPPC_PROFILE
+        nativeStart = ProbeTicks();
+#endif
         glTexSubImage2D(GL_TEXTURE_2D, args[1], args[2], args[3],
                        args[4], args[5], format, type, (const GLvoid *)args[7]);
+#if MGLPPC_PROFILE
+        HostSubimageNativeTicks += ProbeTicks() - nativeStart;
+#endif
         error = glGetError();
         for (index = 0; index < 4; ++index)
             glPixelStorei(HostUnpackNames[index], state->unpack[index]);
         glBindTexture(GL_TEXTURE_2D, state->semanticBoundTexture);
         if (!error) error = glGetError();
-        if (!error && !QueryBackendTexture(args[0], &bridge)) {
+#if MGLPPC_PROFILE
+        bridgeStart = ProbeTicks();
+#endif
+        if (!QueryBackendTexture(args[0], &bridge)) {
+#if MGLPPC_PROFILE
+            HostSubimageBridgeTicks += ProbeTicks() - bridgeStart;
+#endif
             error = glGetError();
             if (!error) error = GL_INVALID_OPERATION;
         }
+#if MGLPPC_PROFILE
+        else
+            HostSubimageBridgeTicks += ProbeTicks() - bridgeStart;
+        HostSubimageTicks += ProbeTicks() - subStart;
+#endif
         if (!error) error = glGetError();
         message->value[0] = error;
         if (error) {
@@ -3594,6 +3627,13 @@ int main(int argc, char **argv)
         printf("MiniGLPPC host: uploads=%lu upload_fails=%lu\n",
                (unsigned long)state.uploadCount,
                (unsigned long)state.uploadFails);
+        printf("HOST_SUBIMAGE count=%lu handler_us=%lu preflight_us=%lu "
+               "native_texsub_us=%lu bridge_query_us=%lu\n",
+               (unsigned long)HostSubimageCount,
+               (unsigned long)ProbeMicros(0, HostSubimageTicks),
+               (unsigned long)ProbeMicros(0, HostSubimagePreflightTicks),
+               (unsigned long)ProbeMicros(0, HostSubimageNativeTicks),
+               (unsigned long)ProbeMicros(0, HostSubimageBridgeTicks));
         printf("HOST_BRIDGE_CACHE enabled=%lu scope=ring_poll_burst "
                "v2_queries_including_registration=%lu hits=%lu\n",
                (unsigned long)MGLPPC_HOST_TARGET_CACHE,

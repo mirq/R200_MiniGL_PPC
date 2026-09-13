@@ -130,7 +130,7 @@ static BOOL failTransport, holdAck, failFlush, failSubmit, failBarrier, failWait
 static BOOL generated[MAX_TEXTURES];
 static struct Observations {
     ULONG command[MGLPPC_CMD_CP_SURFACE + 1], total, exec, headerReads, ackReads, flushes, clocks, delays;
-    ULONG geometryFlushes, submits, barriers, waits, allocations, frees;
+    ULONG geometryFlushes, submits, barriers, waits, allocations, frees, yields;
 } observed;
 static void R200PPCConsolePrintf(const char *format, ...) { (void)format; }
 static void MGLPPCIBTrace(const char *path, const char *text) { (void)path; (void)text; }
@@ -140,6 +140,9 @@ static LONG GetVar(CONST_STRPTR name, UBYTE *value, LONG size, LONG flags) {
 }
 static ULONG PerfClock(void) { ++observed.clocks; return clockTicks += 100; }
 static void Delay(LONG ticks) { CHECK(ticks == 1); ++observed.delays; }
+/* PlatformMailboxWait now yields through the bounded ring policy. */
+#define MGLPPC_RING_YIELD_SPINS 131072UL
+static void MGLPPCYield(void) { ++observed.yields; }
 static void InitializeFrontendContext(struct MiniGLR200Context *c) {
     c->deviceEpoch = EPOCH; c->unpackAlignment = 4; c->perfEnabled = TRUE;
     c->semanticStateSerial = 11; c->pendingSemanticStateSerial = 9;
@@ -277,6 +280,7 @@ FUNCTIONS = (
     "R200PPCDispatchGenTextures", "R200PPCDispatchBindTexture", "FrontendCopyTextureBytes",
     "FrontendEnsureTextureUploadBuffer", "FrontendMirrorTextureReply",
     "FrontendWireSourceFormat", "FrontendWireSourceType",
+    "FrontendSourceToBGRA32", "FrontendStageTextureBGRA",
     "R200PPCDispatchTexSubImage2D", "R200PPCDispatchDeleteTextures",
 )
 
@@ -635,6 +639,9 @@ class BindCache(unittest.TestCase):
         result = subprocess.run([
             "cc", "-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
             "-Wno-pointer-to-int-cast", "-Wno-int-to-pointer-cast",
+            # The harness compiles an extracted subset; helpers retained
+            # for the full frontend but unused in a slice are harmless.
+            "-Wno-unused-function",
             "-fno-pie", "-no-pie", "-fno-omit-frame-pointer", "-fsanitize=address,undefined",
             "-fno-sanitize-recover=all", str(source), "-o", str(cls.binary),
         ], capture_output=True, text=True, timeout=60, cwd=cls.directory)

@@ -1363,10 +1363,17 @@ static BOOL PlatformMailboxWait(void)
                            FrontendPlatform.mailboxSerial);
             return FALSE;
         }
-        /* A pure spin here starves the 68k host that must acknowledge the
-         * request -- on WarpOS the scheduler only runs at exec calls. */
-        if (!(++relax & 255UL))
-            Delay(1);
+        /* Yield rarely, on the same bounded budget as the ring wait
+         * rework in HOST_LOADER_REGRESSION.md: a 68k-side sleep
+         * (Delay(1), WaitTime(0,100)) quantizes to a 50 Hz tick, about
+         * 20 ms of actual latency on this kernel, so yielding every 256
+         * spins added 1-4 of those to every control round-trip. The 68k
+         * host runs on a separate physical CPU and is never starved by
+         * a PPC spin; the 100 us check interval already bounds the
+         * mailbox register reads, and the eventual yield only trips for
+         * a host that is genuinely not answering. */
+        if (!(++relax & (MGLPPC_RING_YIELD_SPINS - 1UL)))
+            MGLPPCYield();
     }
 }
 
@@ -3716,6 +3723,36 @@ static GLenum FrontendWireSourceType(GLenum type)
     return type;
 }
 
+/* Convert a client source patch into the staging buffer as canonical
+ * BGRA8888 (same texel expansion as the native ConvertPixel and as the
+ * direct path), reading the source with the client unpack layout and
+ * writing tightly packed rows. The native UploadTextureRegion has a
+ * per-row CopyMem fast path for MGL_UBYTE_BGRA sources, so canonical
+ * staging keeps the 68060 out of its per-texel conversion loop -- the
+ * single largest cost the profile host attributed to shared subimage
+ * updates (HOST_SUBIMAGE native_texsub_us). */
+static void FrontendStageTextureBGRA(UBYTE *destination,
+                                     const UBYTE *source, GLsizei width,
+                                     GLsizei height, GLenum format,
+                                     GLenum type, ULONG sourceBytes,
+                                     ULONG rowBytes, ULONG sourceStride)
+{
+    ULONG row, column;
+    for (row = 0; row < (ULONG)height; ++row) {
+        const UBYTE *srcRow = source + row * sourceStride;
+        UBYTE *dstRow = destination + row * (ULONG)width * 4UL;
+        for (column = 0; column < (ULONG)width; ++column) {
+            ULONG value = FrontendSourceToBGRA32(
+                format, type, srcRow + column * sourceBytes);
+            dstRow[column * 4UL + 0] = (UBYTE)(value >> 24);
+            dstRow[column * 4UL + 1] = (UBYTE)(value >> 16);
+            dstRow[column * 4UL + 2] = (UBYTE)(value >> 8);
+            dstRow[column * 4UL + 3] = (UBYTE)value;
+        }
+    }
+    (void)rowBytes;
+}
+
 static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
                                         ULONG width, ULONG height,
                                         GLenum format, GLenum type,
@@ -3989,13 +4026,33 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     }
     if (!FrontendTextureBarrier(context)) return;
 
+    {
+    /* Shared staging converts the client texels to canonical BGRA8888
+     * on the PPC (native row-copy fast path) instead of handing raw
+     * client rows to the 68k ConvertPixel loop. v14 hosts cannot carry
+     * the tail types, so only peer protocol 15 canonicalizes. */
+    ULONG sharedBytes = total;
+    GLboolean canonical = FALSE;
+    if (FrontendPlatform.peerProtocol >= 15UL) {
+        sharedBytes = (ULONG)width * (ULONG)height * 4UL;
+        canonical = TRUE;
+    }
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_SHARED_V1) &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
-        FrontendEnsureTextureUploadBuffer(total)) {
-        FrontendCopyTextureBytes(FrontendPlatform.textureUploadBuffer,
-                                 source + sourceOffset, 0, total,
-                                 rowBytes, sourceStride);
-        MGLPPCFlushDataRange(FrontendPlatform.textureUploadBuffer, total);
+        FrontendEnsureTextureUploadBuffer(canonical ? sharedBytes : total)) {
+        if (canonical)
+            FrontendStageTextureBGRA(FrontendPlatform.textureUploadBuffer,
+                                     source + sourceOffset, width, height,
+                                     format, type,
+                                     MGLPPC_TEXTURE_SOURCE_BYTES(format,
+                                                                 type),
+                                     rowBytes, sourceStride);
+        else
+            FrontendCopyTextureBytes(FrontendPlatform.textureUploadBuffer,
+                                     source + sourceOffset, 0, total,
+                                     rowBytes, sourceStride);
+        MGLPPCFlushDataRange(FrontendPlatform.textureUploadBuffer,
+                             canonical ? sharedBytes : total);
         memset(&FrontendPlatform.control, 0,
                sizeof(FrontendPlatform.control));
         FrontendPlatform.control.value[0] = target;
@@ -4003,13 +4060,19 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[2] = (ULONG)internalFormat;
         FrontendPlatform.control.value[3] = (ULONG)width;
         FrontendPlatform.control.value[4] = (ULONG)height;
-        FrontendPlatform.control.value[5] =
-            FrontendPlatform.peerProtocol >= 15UL
-                ? (FrontendWireSourceFormat(format) |
-                   (FrontendWireSourceType(type) << 16)) : format;
+        if (canonical) {
+            FrontendPlatform.control.value[5] =
+                (ULONG)(FrontendWireSourceFormat(MGL_UBYTE_BGRA) |
+                        (GL_UNSIGNED_BYTE << 16));
+        } else {
+            FrontendPlatform.control.value[5] =
+                FrontendPlatform.peerProtocol >= 15UL
+                    ? (FrontendWireSourceFormat(format) |
+                       (FrontendWireSourceType(type) << 16)) : format;
+        }
         FrontendPlatform.control.value[6] =
             (ULONG)FrontendPlatform.textureUploadBuffer;
-        FrontendPlatform.control.value[7] = total;
+        FrontendPlatform.control.value[7] = canonical ? sharedBytes : total;
 #if MGLPPC_PROFILE
         chunkStart = PerfClock();
 #endif
@@ -4030,6 +4093,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #if MGLPPC_PROFILE
         PlatformProfile.textureSharedCalls++;
 #endif
+    }
     }
 
     if (!sharedUpload) {
@@ -4188,14 +4252,25 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     PlatformProfile.textureBytes += bytes;
     PlatformProfile.textureSharedCalls++;
 #endif
+    /* Canonical BGRA staging: the wire carries width*height*4 bytes, so
+     * the shared cap applies to the canonical size (the host validates
+     * the staging span at bpp 4). */
+    bytes = (ULONG)width * (ULONG)height * 4UL;
+    if (bytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES) {
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
     /* Old snapshots must be published and fenced before native invalidation. */
     if (!FrontendTextureBarrier(context)) return;
     if (!FrontendEnsureTextureUploadBuffer(bytes)) {
         SetError(context, GL_OUT_OF_MEMORY);
         return;
     }
-    FrontendCopyTextureBytes(FrontendPlatform.textureUploadBuffer,
-        (const UBYTE *)pixels + offset, 0, bytes, rowBytes, stride);
+    /* Canonical BGRA8888 staging keeps the native path on its per-row
+     * CopyMem instead of the 68k per-texel ConvertPixel loop. */
+    FrontendStageTextureBGRA(FrontendPlatform.textureUploadBuffer,
+        (const UBYTE *)pixels + offset, width, height, format, type,
+        bpp, rowBytes, stride);
     MGLPPCFlushDataRange(FrontendPlatform.textureUploadBuffer, bytes);
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = name;
@@ -4205,8 +4280,8 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     FrontendPlatform.control.value[4] = width;
     FrontendPlatform.control.value[5] = height;
     FrontendPlatform.control.value[6] =
-        (ULONG)(FrontendWireSourceFormat(format) |
-                (FrontendWireSourceType(type) << 16));
+        (ULONG)(FrontendWireSourceFormat(MGL_UBYTE_BGRA) |
+                (GL_UNSIGNED_BYTE << 16));
     FrontendPlatform.control.value[7] = (ULONG)FrontendPlatform.textureUploadBuffer;
     /* Native may fail AFTER replacing residency. Never keep a stale handle,
      * even when transport completion is lost. A later successful update or
