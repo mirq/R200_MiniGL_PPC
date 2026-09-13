@@ -131,18 +131,41 @@ production artifacts.
 
 ## Known remaining work
 
-1. **Native subimage residency churn (~19-27 ms fixed per update).**
-   Every shared subimage re-imports fresh residency
-   (`allocate+import+full-backing CopyMem`, R200 texture cache holds
-   per-address lines; in-place rewrites verified invisible). This is
-   now the largest remaining subimage component after the canonical
-   staging change. Candidate surgery lives in the classic tree's
-   `Lib_glTexSubImage2D`/EnsureTextureResident (surface pool with
-   fenced retirement) and must respect the TEXTURE_UPLOAD_PROGRESS
-   visibility gates plus phase5/7127 pixel checks.
+1. **Native subimage residency churn (attributed, then avoided).** A
+   diagnostic native build (`R200_RESIDENCY_DIAG` event timers, commit
+   68b2ce8 keep-tree, diagnostics compiled out of production again)
+   measured one 64 KiB residency rebuild: alloc ~0.8 ms + import
+   ~0.2 ms + copyback ~11 ms -- the 68060 CopyMem into the imported
+   surface runs ~5.8 MB/s through the VRAM aperture soak and scales
+   with texture size. Rather than a native surface-pool redesign, the
+   frontend gained retained canonical shadows (commit 68b2ce8): the
+   shadow keeps the last full image of every direct-eligible texture,
+   TexSubImage patches it and re-commits through the direct pipeline,
+   so shared-path subimages only occur for image-backed/non-direct
+   textures or after fallbacks.
 2. Chunked (non-direct, non-shared) TexImage still ships raw client
    rows; canonicalizing it needs chunk-texel-aware splitting (>2 MiB and
    v14 fallback paths). Low priority.
 3. Final performance claims need the three-independent-cold-boot
    median protocol (how_to_benchmark.md), which has not been run for
    the Phase-2 numbers above.
+
+## Phase 2 results (all measured windowed 640x480x32 this boot)
+
+| Operation | Report baseline | After Phase 2 |
+| --- | ---: | ---: |
+| TexImage 128 (RGBA-class, direct) | ~101-102 ms | **3-4 ms** |
+| TexImage 256 | ~101 ms | **13 ms** |
+| TexSubImage 256x256 full | 408-415 ms | **15 ms** |
+| TexSubImage 128x128 patch | ~122 ms | **8 ms** |
+| TexSubImage 128x64 luminance (lightmap) | 122-138 ms / failed | **5 ms** |
+| matrix full-128 subimage update | ~108 ms | **4-10 ms** |
+| mglWriteShotPPM | no file, 0x59 | file, 0x00 |
+
+Validation on the production stack (DLL 6C74A72D/305388, host
+573F97A3/40624 bits 00020000, native 62343673 restored after the diag
+round, drivers unchanged): probe all-err-0 with screenshots written,
+`R200_TEXTURE_UPDATE_TEST PASS CHECKS=7127 FAILURES=0` (re-run after
+the native restore), gears 136.363 FPS. Diagnostic artifacts
+(resdiag native A1D6D58B in `Work:ibdraw/resdiag.library`; prof DLLs
+in `Work:ibdraw/profdir*`) are diagnostics only and not deployed.
