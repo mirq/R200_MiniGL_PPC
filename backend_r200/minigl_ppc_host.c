@@ -1301,6 +1301,102 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
     return TRUE;
 }
 
+/* Consecutive plain-COMMIT ring entries share one vertex segment until it
+ * rotates, so they can ride to the GPU in a single CommitBatch call. The
+ * merged call amortizes the per-call service overhead (segment drain, lock,
+ * bridge query, fence) and, more importantly, resets the driver emitter's
+ * Live-state cache once instead of per entry -- fewer generated CP dwords.
+ * Flush triggers: non-plain entry, PRESENT, segment change, capacity, end
+ * of queue. Retirement is unaffected: control->retired still advances only
+ * after the merged batch's fence drains. */
+static ULONG RingAccRecords[MGLPPC_SEMANTIC_SLOT_DWORDS];
+static ULONG RingAccOffsets[192UL];
+static ULONG RingAccRecordDwords;
+static ULONG RingAccDraws;
+static ULONG RingAccSegmentIx;
+static ULONG RingAccEntries;
+static BOOL RingAccValid;
+
+static BOOL FlushCommitAccumulator(MGLPPCHostState *state,
+                                   MGLR200PrivateBridgeV2 *bridge,
+                                   BOOL *bridgeValid)
+{
+    volatile MGLPPCRingControlV1 *control = state->ringControl;
+    struct Radeon3DCommitBatch batch;
+    struct Radeon3DInfo info;
+    ULONG fence = 0;
+#if MGLPPC_PROFILE
+    ULONG stageStart;
+#endif
+
+    if (!RingAccValid)
+        return TRUE;
+    HOST_START(stageStart);
+    if (!DrainForSegment(state, RingAccSegmentIx)) {
+        printf("MiniGLPPC host: acc_drain_fail\n");
+        fflush(stdout);
+        RingAccValid = FALSE;
+        return FALSE;
+    }
+    HOST_STAGE(HostWaitTicks, stageStart);
+    if (!state->displayLocked) {
+        if (!mglLockDisplay()) {
+            RingAccValid = FALSE;
+            return FALSE;
+        }
+        state->displayLocked = 1;
+    }
+    HOST_START(stageStart);
+    if ((!*bridgeValid && !QueryBackendBridgeV2(bridge)) ||
+        bridge->deviceEpoch != state->ringDeviceEpoch) {
+        mglUnlockDisplay();
+        state->displayLocked = 0;
+        RingAccValid = FALSE;
+        return FALSE;
+    }
+    *bridgeValid = MGLPPC_HOST_TARGET_CACHE;
+    HOST_STAGE(HostQueryTicks, stageStart);
+    memset(&batch, 0, sizeof(batch));
+    batch.Size = sizeof(batch);
+    batch.Version = RADEON3D_COMMIT_BATCH_VERSION;
+    batch.SegmentId = state->vertexSegmentIds[RingAccSegmentIx];
+    batch.Records = RingAccRecords;
+    batch.RecordDwords = RingAccRecordDwords;
+    PatchRecordTargets(RingAccRecords, RingAccRecordDwords,
+                       bridge->colorSurfaceToken);
+    batch.VertexOffsets = RingAccOffsets;
+    batch.RecordCount = RingAccDraws;
+    batch.Flags = RADEON3D_SUBMIT_FENCE;
+    HOST_START(stageStart);
+    if (!Radeon3DCommitBatch(
+            (struct Radeon3DDevice *)bridge->deviceToken,
+            &batch, &fence)) {
+        memset(&info, 0, sizeof(info));
+        info.Size = sizeof(info);
+        if (Radeon3DGetInfo((struct Radeon3DDevice *)bridge->deviceToken,
+                            &info) && info.Size >= RADEON3D_INFO_V3_SIZE)
+            printf("MiniGLPPC host: acc_commit_fail draws=%lu rec=%lu "
+                   "stage=%lu\n",
+                   (unsigned long)RingAccDraws,
+                   (unsigned long)RingAccRecordDwords,
+                   (unsigned long)info.CommitFailStage);
+        else
+            printf("MiniGLPPC host: acc_commit_fail draws=%lu rec=%lu\n",
+                   (unsigned long)RingAccDraws,
+                   (unsigned long)RingAccRecordDwords);
+        fflush(stdout);
+        mglUnlockDisplay();
+        state->displayLocked = 0;
+        RingAccValid = FALSE;
+        return FALSE;
+    }
+    HOST_STAGE(HostSubmitTicks, stageStart);
+    state->semanticFence = fence;
+    state->queuedSegmentMask |= 1UL << RingAccSegmentIx;
+    RingAccValid = FALSE;
+    return TRUE;
+}
+
 static ULONG RingPoll(MGLPPCHostState *state)
 {
     volatile MGLPPCRingControlV1 *control = state->ringControl;
@@ -1372,6 +1468,20 @@ static ULONG RingPoll(MGLPPCHostState *state)
             break;
         }
         slotAddr = (ULONG *)control->slotAddrs[entry.slot];
+        /* A non-plain entry (state batch, CP emit, indirect smoke) or any
+         * entry the specialised branches below submit out of band must not
+         * jump ahead of absorbed commit records. */
+        if (RingAccValid &&
+            (!(entry.flags & MGLPPC_SEMANTIC_FLAG_COMMIT) ||
+             (entry.flags & (MGLPPC_SEMANTIC_FLAG_STATE_BATCH |
+                             MGLPPC_SEMANTIC_FLAG_CP_EMIT |
+                             MGLPPC_SEMANTIC_FLAG_INDIRECT)))) {
+            if (!FlushCommitAccumulator(state, &bridge, &bridgeValid)) {
+                control->error = 1;
+                CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
+                break;
+            }
+        }
         if (entry.flags & MGLPPC_SEMANTIC_FLAG_CP_EMIT) {
             if (!ExecuteCpEntry(state, &entry, slotAddr)) {
                 state->cpFailed = TRUE;
@@ -1551,7 +1661,6 @@ static ULONG RingPoll(MGLPPCHostState *state)
              * dword[0]=draw count, dword[1]=vertex segment pool index,
              * then records, then one vertex byte offset per draw. All of
              * it travelled (and was cache-maintained) as slot data. */
-            struct Radeon3DCommitBatch batch;
             ULONG draws, segmentIx, recordDwords;
             if (entry.dwords < MGLPPC_RING_COMMIT_HEADER_DWORDS + 1UL) {
                 control->error = 1;
@@ -1575,88 +1684,48 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
             recordDwords = entry.dwords - 2UL - draws;
-            HOST_START(stageStart);
-            if (!DrainForSegment(state, segmentIx)) {
-                printf("MiniGLPPC host: commit_drain_fail\n");
-                fflush(stdout);
-                control->error = 1;
-                break;
-            }
-            HOST_STAGE(HostWaitTicks, stageStart);
-            if (!state->displayLocked) {
-                if (!mglLockDisplay()) {
-                    printf("MiniGLPPC host: commit_lock_fail\n");
-                    fflush(stdout);
+            /* Absorb into the accumulator instead of submitting per entry;
+             * flush when the segment changes, the entry presents, or the
+             * merged batch would exceed the service limits. The PRESENT
+             * case must flush before the loop tail drains and flips. */
+            if (RingAccValid &&
+                (segmentIx != RingAccSegmentIx ||
+                 (entry.flags & MGLPPC_SEMANTIC_FLAG_PRESENT) ||
+                 RingAccDraws + draws > 192UL ||
+                 RingAccRecordDwords + recordDwords > MGLPPC_SEMANTIC_SLOT_DWORDS)) {
+                if (!FlushCommitAccumulator(state, &bridge, &bridgeValid)) {
                     control->error = 1;
+                    CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
                     break;
                 }
-                state->displayLocked = 1;
             }
-            HOST_START(stageStart);
-#if MGLPPC_PROFILE
-            if (bridgeValid)
-                ++HostBridgeCacheHits;
-#endif
-            if ((!bridgeValid && !QueryBackendBridgeV2(&bridge)) ||
-                bridge.deviceEpoch != state->ringDeviceEpoch) {
-                printf("MiniGLPPC host: commit_bridge_fail epoch=%lu\n",
-                       (unsigned long)bridge.deviceEpoch);
-                fflush(stdout);
-                mglUnlockDisplay();
-                state->displayLocked = 0;
-                control->error = 1;
-                break;
+            if (!RingAccValid) {
+                RingAccValid = TRUE;
+                RingAccRecordDwords = 0;
+                RingAccDraws = 0;
+                RingAccEntries = 0;
+                RingAccSegmentIx = segmentIx;
             }
-            bridgeValid = MGLPPC_HOST_TARGET_CACHE;
-            HOST_STAGE(HostQueryTicks, stageStart);
-            memset(&batch, 0, sizeof(batch));
-            batch.Size = sizeof(batch);
-            batch.Version = RADEON3D_COMMIT_BATCH_VERSION;
-            batch.SegmentId =
-                state->vertexSegmentIds[segmentIx];
-            batch.Records = slotAddr + MGLPPC_RING_COMMIT_HEADER_DWORDS;
-            batch.RecordDwords = recordDwords;
-            PatchRecordTargets(slotAddr + MGLPPC_RING_COMMIT_HEADER_DWORDS,
-                               recordDwords, bridge.colorSurfaceToken);
-            batch.VertexOffsets =
-                slotAddr + MGLPPC_RING_COMMIT_HEADER_DWORDS + recordDwords;
-            batch.RecordCount = draws;
-            batch.Flags = RADEON3D_SUBMIT_FENCE;
-            HOST_START(stageStart);
-            if (!Radeon3DCommitBatch(
-                    (struct Radeon3DDevice *)bridge.deviceToken,
-                    &batch, &fence)) {
-                {
-                    struct Radeon3DInfo info;
-                    memset(&info, 0, sizeof(info));
-                    info.Size = sizeof(info);
-                    if (Radeon3DGetInfo(
-                            (struct Radeon3DDevice *)bridge.deviceToken,
-                            &info) && info.Size >= RADEON3D_INFO_V3_SIZE)
-                        printf("MiniGLPPC host: commit_fail draws=%lu "
-                               "rec=%lu stage=%lu\n",
-                               (unsigned long)draws,
-                               (unsigned long)recordDwords,
-                               (unsigned long)info.CommitFailStage);
-                    else
-                        printf("MiniGLPPC host: commit_fail draws=%lu "
-                               "rec=%lu fencestage=%lu\n",
-                               (unsigned long)draws,
-                               (unsigned long)recordDwords,
-                               (unsigned long)fence);
-                    fflush(stdout);
-                }
-                mglUnlockDisplay();
-                state->displayLocked = 0;
-                control->error = 1;
-                break;
-            }
-            HOST_STAGE(HostSubmitTicks, stageStart);
-            state->semanticFence = fence;
-            state->queuedSegmentMask |= 1UL << segmentIx;
+            for (crc = 0; crc < recordDwords; ++crc)
+                RingAccRecords[RingAccRecordDwords + crc] =
+                    slotAddr[MGLPPC_RING_COMMIT_HEADER_DWORDS + crc];
+            for (crc = 0; crc < draws; ++crc)
+                RingAccOffsets[RingAccDraws + crc] =
+                    slotAddr[MGLPPC_RING_COMMIT_HEADER_DWORDS +
+                             recordDwords + crc];
+            RingAccRecordDwords += recordDwords;
+            RingAccDraws += draws;
+            RingAccEntries++;
             state->ringLastGen[entry.slot] = entry.generation;
             state->semanticExecutes++;
             HostExecuteCount++;
+            if (entry.flags & MGLPPC_SEMANTIC_FLAG_PRESENT) {
+                if (!FlushCommitAccumulator(state, &bridge, &bridgeValid)) {
+                    control->error = 1;
+                    CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
+                    break;
+                }
+            }
         } else if (entry.dwords) {
             HOST_START(stageStart);
             if (!DrainSemanticFence(state)) {
@@ -1778,6 +1847,12 @@ static ULONG RingPoll(MGLPPCHostState *state)
                     state->ibDryRun ? "dry" : "gpu");
             MGLPPCIBTrace("DH2:ibhost.log", line);
         }
+    }
+    /* Queue drained: the GPU must not sit idle on absorbed-but-unsubmitted
+     * records, and the next burst may begin with a present-only barrier. */
+    if (RingAccValid && !control->error) {
+        if (!FlushCommitAccumulator(state, &bridge, &bridgeValid))
+            control->error = 1;
     }
 #if MGLPPC_PROFILE
     ringStart = HostClock() - ringStart;

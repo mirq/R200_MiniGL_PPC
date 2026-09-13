@@ -127,6 +127,7 @@ static GLint g_depth = DEFAULT_DEPTH;
 static GLboolean g_windowed = GL_TRUE;
 static GLboolean g_running = GL_TRUE;
 static GLboolean g_profile = GL_FALSE;
+static GLboolean g_noSync = GL_FALSE;
 static ULONG g_measureFrames = DEFAULT_MEASURE_FRAMES;
 static const char *g_dumpPath = NULL;
 static GLboolean g_roomBlocks = GL_FALSE;   /* --room-blocks diagnostics */
@@ -2957,6 +2958,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[index], "--fullscreen")) g_windowed = GL_FALSE;
         else if (!strcmp(argv[index], "--window")) g_windowed = GL_TRUE;
         else if (!strcmp(argv[index], "--profile")) g_profile = GL_TRUE;
+        else if (!strcmp(argv[index], "--nosync")) g_noSync = GL_TRUE;
         else if (!strcmp(argv[index], "--dump") && index + 1 < argc) g_dumpPath = argv[++index];
         else if (!strcmp(argv[index], "--room-blocks")) g_roomBlocks = GL_TRUE;
         else if (!strcmp(argv[index], "--room-quadscreen")) g_roomQuadScreen = GL_TRUE;
@@ -3007,6 +3009,10 @@ int main(int argc, char **argv)
         IntuitionBase = NULL;
         return 22;
     }
+    /* Mirrors the gears client's -nosync: render-throughput measurement must
+     * not include the present's vblank wait (default stays sync-on). */
+    if (g_noSync)
+        mglEnableSync(GL_FALSE);
     if (!ConfigureInput()) {
         printf("minigl_testsuite: cannot enable keyboard input\n");
         mglDeleteContext();

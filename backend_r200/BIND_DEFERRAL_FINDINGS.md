@@ -77,6 +77,52 @@ record: the flush clobber above, and a control.value clobber in the upload
 path (same shared-buffer rule: PlatformCall sends and overwrites
 control.value[], so it must run before a caller prepares its own message).
 
+## Improvement 3: host commit coalescing + suite --nosync + sync-off default (2026-09-14)
+
+Profile of the post-merge stack (profiler host + DLL) showed the room-walk
+frame fully serialized on the 68k: submit ~1.7 ms/execute x 5.7 plus a
+~22 ms present stage. Two changes landed:
+
+1. **Host commit coalescing** (`minigl_ppc_host.c`): consecutive plain
+   COMMIT ring entries sharing one vertex segment now ride to the GPU in a
+   single CommitBatch call (records/offsets concatenated, one fence, one
+   emitter pass - its Live-state cache carries across entries). Flush
+   triggers: non-plain entry, PRESENT, segment change, 192-draw/8192-dword
+   capacity, end of queue. Retirement semantics untouched (control->retired
+   still advances only after the merged fence drains). Measured neutral on
+   the current workloads: the host consumes an entry (~2 ms) faster than
+   the PPC produces the next (~6 ms), so bursts rarely queue - it engages
+   during the vsync-shadow window and after stalls. Kept: correct, cheap,
+   and it protects against regressions if entry production gets burstier.
+2. **Suite `--nosync` + stack sync-off default**: profiling exposed the
+   real room-walk ceiling - the present stage was vblank-locked (22 ms),
+   which had also capped every simple suite test at the familiar ~33 fps
+   (two 60 Hz vsyncs). The suite gained `--nosync` (mirroring the gears
+   client's -nosync), and `R200PPCPlatformResetClientDefaults` now starts
+   `syncEnabled=0` (published with syncSeq 1, so the host applies it at the
+   first ring entry; no present escapes with the library's sync-on
+   default). Apps restore vsync with `mglEnableSync(GL_TRUE)`.
+
+Result on the final deployed pair (DLL `8560A1BC`, host `9C3F62B2`,
+suite `34B4A730`), fullscreen 640x480x16, verified fresh host per run:
+
+| Workload | session start | final |
+| --- | ---: | ---: |
+| room-walk 120f (default present mode) | 12.0 fps | **59.4 fps (4.9x)** |
+| quake.alias-ogre 60f | 32.6 fps (sync-capped) | **PASS 142.9 fps** |
+| gears precalc 600f | 132.7-135.1 | **135.7 fps** (explicit -nosync) |
+| lightmap-update 60f | PASS | PASS (14.4 fps nosync - the test's own per-frame TexImage2D replacement dominates; sync had masked it) |
+
+Room-walk's remaining budget at 60 fps (16.7 ms): ~10 ms host submit/present
+chain and ~6 ms PPC frontend, now overlapped; further gains need improvement
+3's original target (the ~1 ms fixed cost inside Radeon3DCommitBatch, driver
+side) or GPU-side work. The two-point model (fixed ~0.9 ms + ~39 us/record)
+still stands for that future work.
+
+Session tooling: `Work:ibdraw/hoststop --orphan` (new 68k helper) cleanly
+shuts down an orphaned host whose client died with a poisoned ring - use it
+instead of a cold cycle whenever no GL client is live.
+
 ## Pre-existing defect found during validation (NOT fixed here, backlog)
 
 `quake.world-room-walk` renders a subset of surfaces (arches, door frames,

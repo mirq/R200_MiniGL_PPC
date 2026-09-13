@@ -1559,7 +1559,12 @@ void R200PPCPlatformResetClientDefaults(void)
      * mglChooseWindowMode(GL_TRUE) (the client's -window flag) opens a
      * window on the Workbench screen. */
     FrontendPlatform.windowMode = FALSE;
-    FrontendPlatform.syncEnabled = 1;
+    /* Present default is no vblank wait: benchmark and game clients run
+     * unsynced unless they explicitly mglEnableSync(GL_TRUE). The host
+     * applies the published state at the first ring entry it consumes
+     * (syncSeq 1 != the host's 0 initial), so no present escapes with the
+     * library's own sync-on default. */
+    FrontendPlatform.syncEnabled = 0;
     FrontendPlatform.syncSeq = 1;
 }
 
