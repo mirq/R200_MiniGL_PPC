@@ -1,0 +1,66 @@
+MINIGL_SUITE version=2 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=50944e20
+MINIGL_START id=system.dispatch name="DISPATCH ABI" expected="PASS means this client and library agree on the complete public ABI."
+MINIGL_TEST version=2 id=system.dispatch result=PASS depth=16 frames=0 fps_x1000=0 gl_error=0 detail="ABI 3 table 556 bytes flags 00000008"
+MINIGL_START id=primitives.triangle name="IMMEDIATE TRIANGLE" expected="A gold triangle appears on a dark background and the center is nonempty."
+MINIGL_TEST version=2 id=primitives.triangle result=PASS depth=16 frames=120 fps_x1000=33149 gl_error=0 detail="center differs from background"
+MINIGL_PERF version=2 id=primitives.triangle clock=33151025 input=360 submitted=360 records=120 submits=240 frontend=10905 serialize=24891 execute=86594735 wait=256 present=1846476 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=depth.less name="DEPTH LESS" expected="The central square stays red; a later green square must remain hidden."
+MINIGL_TEST version=2 id=depth.less result=FAIL depth=16 frames=120 fps_x1000=33519 gl_error=0 detail="near surface does not match reference"
+MINIGL_PERF version=2 id=depth.less clock=33151025 input=1440 submitted=1440 records=120 submits=240 frontend=21498 serialize=36222 execute=86693304 wait=253 present=833480 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=blend.source-alpha name="SOURCE ALPHA" expected="The left rectangle is dark red and the right rectangle is bright red."
+MINIGL_TEST version=2 id=blend.source-alpha result=PASS depth=16 frames=120 fps_x1000=33333 gl_error=0 detail="half alpha is distinct"
+MINIGL_PERF version=2 id=blend.source-alpha clock=33151025 input=960 submitted=960 records=240 submits=360 frontend=72598 serialize=51684 execute=2812821 wait=325 present=84943611 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=120 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=matrices.translate name="TRANSLATION" expected="A blue triangle appears right of center; the old center remains empty."
+MINIGL_TEST version=2 id=matrices.translate result=PASS depth=16 frames=120 fps_x1000=33707 gl_error=0 detail="translated sample visible"
+MINIGL_PERF version=2 id=matrices.translate clock=33151025 input=360 submitted=360 records=120 submits=240 frontend=30703 serialize=23619 execute=84652601 wait=260 present=2087469 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=arrays.draw-arrays name="DRAW ARRAYS" expected="Two equal purple triangles appear on the left and right."
+MINIGL_TEST version=2 id=arrays.draw-arrays result=PASS depth=16 frames=120 fps_x1000=33333 gl_error=0 detail="array triangles visible"
+MINIGL_PERF version=2 id=arrays.draw-arrays clock=33151025 input=720 submitted=720 records=120 submits=240 frontend=12275 serialize=29905 execute=87626233 wait=256 present=632621 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=3d.rotating-cubes name="ROTATING CUBES" expected="Five solid cubes rotate in depth; nearer faces correctly hide rear faces."
+MINIGL_TEST version=2 id=3d.rotating-cubes result=PASS depth=16 frames=120 fps_x1000=33707 gl_error=0 detail="center cube visible satellites visible"
+MINIGL_PERF version=2 id=3d.rotating-cubes clock=33151025 input=14400 submitted=14400 records=600 submits=720 frontend=366364 serialize=243936 execute=83941040 wait=474 present=2230865 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=480 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=benchmark.triangles name="TRIANGLE GRID" expected="A dense animated 8 by 8 colored triangle grid fills most of the view."
+MINIGL_TEST version=2 id=benchmark.triangles result=FAIL depth=16 frames=120 fps_x1000=33333 gl_error=0 detail="64 triangle grid missing"
+MINIGL_PERF version=2 id=benchmark.triangles clock=33151025 input=23040 submitted=23040 records=120 submits=240 frontend=80843 serialize=42104 execute=87444715 wait=228 present=737276 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=lighting.availability name="LIGHTING VECTORS" expected="PASS means lighting tests can be added; SKIP is valid when unsupported."
+MINIGL_TEST version=2 id=lighting.availability result=SKIP depth=16 frames=0 fps_x1000=0 gl_error=0 detail="lighting vectors unavailable"
+MINIGL_START id=raster.prim-shade name="PRIMITIVE x SHADE" expected="Five grey shapes on black. FAIL names the primitive and shade model whose colour is wrong or missing."
+MINIGL_TEST version=2 id=raster.prim-shade result=PASS depth=16 frames=120 fps_x1000=33898 gl_error=0 detail="20 checks, all primitives both shade models"
+MINIGL_PERF version=2 id=raster.prim-shade clock=33151025 input=2640 submitted=2880 records=600 submits=720 frontend=175734 serialize=123460 execute=83948409 wait=428 present=2450848 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=360 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=raster.point-size name="POINT SIZE" expected="Five dots of increasing size. Detail lists requested->measured pixels."
+POINTDIAG size=1 count=1 box=1x1 at=319,240 centre=320,240
+POINTDIAG size=2 count=4 box=2x2 at=319,239 centre=320,240
+POINTDIAG size=4 count=16 box=4x4 at=318,238 centre=320,240
+POINTDIAG size=8 count=64 box=8x8 at=316,236 centre=320,240
+POINTDIAG size=16 count=256 box=16x16 at=312,232 centre=320,240
+MINIGL_TEST version=2 id=raster.point-size result=PASS depth=16 frames=120 fps_x1000=33707 gl_error=0 detail="px 1->1 2->2 4->4 8->8 16->16"
+MINIGL_PERF version=2 id=raster.point-size clock=33151025 input=600 submitted=3000 records=240 submits=360 frontend=99898 serialize=29702 execute=4439085 wait=309 present=82606453 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=120 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=blend.texture-alpha name="TEXTURE ALPHA FILL" expected="A yellow wash over grey. Each sample must equal the computed blend."
+MINIGL_TEST version=2 id=blend.texture-alpha result=PASS depth=16 frames=120 fps_x1000=33333 gl_error=0 detail="6 texture-alpha fills match computed blend"
+MINIGL_PERF version=2 id=blend.texture-alpha clock=33151025 input=960 submitted=960 records=240 submits=360 frontend=75228 serialize=54498 execute=3826066 wait=314 present=83126444 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=120 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=quake.alias-ogre name="TEXTURED OGRE" expected="The skin-textured Ogre rotates showing its game texture without missing faces or polygons spiking to the edges."
+MINIGL_TEST version=2 id=quake.alias-ogre result=PASS depth=16 frames=120 fps_x1000=32786 gl_error=0 detail="skinned Ogre mesh: float and integer array paths bounded"
+MINIGL_PERF version=2 id=quake.alias-ogre clock=33151025 input=117360 submitted=117360 records=480 submits=264 frontend=0 serialize=1254057 execute=78793667 wait=305 present=7127842 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=117360 draw=53329789
+MINIGL_START id=quake.alias-ogre-x4-static name="FOUR OGRES STATIC" expected="Four skin-textured Ogres remain visible and bounded in separate quadrants."
+MINIGL_TEST version=2 id=quake.alias-ogre-x4-static result=PASS depth=16 frames=120 fps_x1000=33519 gl_error=0 detail="four skinned Ogres static; all quadrants bounded"
+MINIGL_PERF version=2 id=quake.alias-ogre-x4-static clock=33151025 input=469440 submitted=469440 records=1920 submits=653 frontend=0 serialize=5234958 execute=72535935 wait=430 present=755932 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=469440 draw=86381986
+MINIGL_START id=quake.alias-ogre-x4-spin name="FOUR OGRES SPINNING" expected="Four skin-textured Ogres rotate without missing faces or edge spikes."
+MINIGL_TEST version=2 id=quake.alias-ogre-x4-spin result=PASS depth=16 frames=120 fps_x1000=33149 gl_error=0 detail="four skinned Ogres spinning; all quadrants bounded"
+MINIGL_PERF version=2 id=quake.alias-ogre-x4-spin clock=33151025 input=469440 submitted=469440 records=1920 submits=653 frontend=0 serialize=5246963 execute=73518293 wait=464 present=534013 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=469440 draw=87487850
+MINIGL_START id=quake.alias-ogre-x4-advance name="FOUR OGRES ADVANCING" expected="Four skin-textured Ogres change size and depth while remaining bounded."
+MINIGL_TEST version=2 id=quake.alias-ogre-x4-advance result=PASS depth=16 frames=120 fps_x1000=32967 gl_error=0 detail="four skinned Ogres advancing; all quadrants bounded"
+MINIGL_PERF version=2 id=quake.alias-ogre-x4-advance clock=33151025 input=469440 submitted=469440 records=1920 submits=654 frontend=0 serialize=5228115 execute=73966990 wait=414 present=623831 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=469440 draw=87224581
+MINIGL_START id=quake.world-stream name="WORLD STREAM" expected="A dense teal field remains complete; sentinel samples never disappear."
+MINIGL_TEST version=2 id=quake.world-stream result=PASS depth=16 frames=120 fps_x1000=33333 gl_error=0 detail="3072 vertices/frame; 4 sentinel pixels correct"
+MINIGL_PERF version=2 id=quake.world-stream clock=33151025 input=368640 submitted=368640 records=1560 submits=320 frontend=5486168 serialize=4148434 execute=51902121 wait=406 present=29213357 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=quake.lightmap-static name="STATIC LIGHTMAP" expected="A steady red panel isolates draw and presentation cost from dynamic residency."
+MINIGL_TEST version=2 id=quake.lightmap-static result=PASS depth=16 frames=120 fps_x1000=33707 gl_error=0 detail="static two-pass lightmap is pixel-correct"
+MINIGL_PERF version=2 id=quake.lightmap-static clock=33151025 input=960 submitted=960 records=240 submits=360 frontend=75466 serialize=53345 execute=4691404 wait=329 present=81808434 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=120 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=quake.lightmap-update name="DYNAMIC LIGHTMAP" expected="The full panel alternates red and green without stale texels or texture bleeding."
+MINIGL_TEST version=2 id=quake.lightmap-update result=PASS depth=16 frames=120 fps_x1000=27027 gl_error=0 detail="three dynamic lightmap replacements are pixel-correct"
+MINIGL_PERF version=2 id=quake.lightmap-update clock=33151025 input=960 submitted=960 records=240 submits=360 frontend=81059 serialize=56814 execute=97474 wait=335 present=47549 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=120 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=quake.particles-mixed name="WORLD AND PARTICLES" expected="Particles sweep across the blue world while the later green triangle stays intact; sampled particles match their frame-0 blend."
+MINIGL_TEST version=2 id=quake.particles-mixed result=FAIL depth=16 frames=120 fps_x1000=10869 gl_error=0 detail="surface capture failed"
+MINIGL_PERF version=2 id=quake.particles-mixed clock=33151025 input=3960 submitted=18069 records=357 submits=474 frontend=240677 serialize=70620 execute=271208402 wait=341 present=131621 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=240 merges=0 exec_fail=8 wait_fail=0 scan=0 fetches=0 draw=0
+MINIGL_START id=quake.world-room-walk name="ROOM WALKTHROUGH" expected="The textured hall stays correct from every patrol pose; baked block means match the offline reference render."

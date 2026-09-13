@@ -25,7 +25,7 @@ EXAMPLE_NAMES = library_test milestone_ballonly_library \
                  milestone_gears_stats_library milestone_gears_precalc r200_legacy_smoke \
                  r200_texture_upload_smoke r200_triangle_smoke warp_library \
                   r200_mapping_bench r200_texture_update_test r200_bind_bench r200_ib_smoke \
-                  r200_defect_probe
+                  r200_defect_probe minigl_testsuite
 EXAMPLE_OBJS = $(addprefix $(EXOBJDIR)/,$(addsuffix .o,$(EXAMPLE_NAMES)))
 EXAMPLE_DEPS = $(EXAMPLE_OBJS:.o=.d)
 EXAMPLE_WARPELFS = $(addprefix $(BINDIR)/,$(addsuffix _ppc.warpelf,$(EXAMPLE_NAMES)))
@@ -70,6 +70,9 @@ $(EXOBJDIR)/milestone_gears_precalc.o: examples/milestone_gears_stats_library.c 
 
 # Standalone protocol client: no MiniGL dispatch archive or driver linkage.
 $(EXOBJDIR)/r200_mapping_bench.o: EX_CFLAGS += -Ibackend_r200/include
+
+# Suite reads the R200 opt-in perf counters (no-op on non-R200 backends).
+$(EXOBJDIR)/minigl_testsuite.o: EX_CFLAGS += -Ibackend_r200/include
 
 $(EXOBJDIR)/mapping_bench_transport.o: backend_r200/client/minigl_ppc_transport.c Makefile.wos.gcc.common | $(EXOBJDIR)
 	$(CC) $(COMMON_CFLAGS) -Ibackend_r200/include -MMD -MP -c $< -o $@

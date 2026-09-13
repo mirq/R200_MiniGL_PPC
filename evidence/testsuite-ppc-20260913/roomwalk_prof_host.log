@@ -1,0 +1,50 @@
+MiniGLPPC host: step=backend_open
+MiniGLPPC host: step=timer
+MiniGLPPC host: ready, MiniGL 12.0
+MiniGLPPC host: step=port_added
+MiniGLPPC host: priority=-1 previous=0
+MiniGLPPC host: step=service_enter
+[mgl] ctx fullscreen=1 depth=16 mode=0
+[mgl] fs=begin
+[mgl] fs=ok buffers=3
+MiniGLPPC host: create windowed=0 w=640 h=480 depth=16
+[minigl.library] LibClose count=0
+HOST_NATIVE cache_capacity=8 records=1 overflow_contexts=0 overflow_policy=drop_new output=after_cleanup
+HOST_NATIVE context=1 scope=whole_context_including_setup end=before_teardown counter_bits=32 coverage=native_backend_only excludes=host_direct_service_calls overlaps_host_stages=1 enable_error=0 pending_gl_error=0
+HOST_NATIVE context=1 clock_hz=709379 query_error=0
+HOST_NATIVE context=1 frames=130 query_error=0
+HOST_NATIVE context=1 serialize_ticks=0 query_error=0
+HOST_NATIVE context=1 execute_ticks=0 query_error=0
+HOST_NATIVE context=1 wait_ticks=0 query_error=0
+HOST_NATIVE context=1 present_ticks=2218836 query_error=0
+HOST_NATIVE context=1 residency_ticks=0 query_error=0
+HOST_NATIVE context=1 upload_ticks=0 query_error=0
+HOST_NATIVE context=1 upload_bytes=0 query_error=0
+HOST_NATIVE context=1 upload_copies=0 query_error=0
+HOST_NATIVE context=1 upload_updates=0 query_error=0
+HOST_NATIVE context=1 upload_coalesced=0 query_error=0
+HOST_NATIVE context=1 upload_barriers=0 query_error=0
+HOST_NATIVE context=1 upload_deferred=0 query_error=0
+HOST_NATIVE context=1 texture_evictions=0 query_error=0
+HOST_NATIVE context=1 submits=0 query_error=0
+HOST_NATIVE context=1 async_submits=0 query_error=0
+HOST_NATIVE context=1 fence_waits=0 query_error=0
+HOST_NATIVE context=1 fence_poll_hits=0 query_error=0
+HOST_NATIVE context=1 texture_waits=0 query_error=0
+HOST_NATIVE context=1 buffer_waits=0 query_error=0
+HOST_NATIVE context=1 drain_waits=0 query_error=0
+HOST_NATIVE context=1 execute_failures=0 query_error=0
+HOST_NATIVE context=1 wait_failures=0 query_error=0
+HOST_NATIVE context=1 query_errors=0
+MiniGLPPC host: attribution scope=host_session_including_setup_idle_context_teardown inclusive=1 mutually_exclusive=0 counter_bits=32 busy=control+barrier+total+ring+mailbox idle=max(wall-busy,0) idle_is_cpu_idle=0
+MiniGLPPC host: session_ticks wall=36711108 busy=22078019 idle=14633089
+MiniGLPPC host: session wall_us=51751049 idle_us=20628026 msgs control=37 control_us=419378 barrier=0 barrier_us=0 execute_msgs=0 ring_us=5738796
+MiniGLPPC host: mailbox=4286 mailbox_us=24964848
+MiniGLPPC host: uploads=31 upload_fails=0
+HOST_SUBIMAGE count=0 handler_us=0 preflight_us=0 native_texsub_us=0 bridge_query_us=0
+HOST_BRIDGE_CACHE enabled=1 scope=ring_poll_burst v2_queries_including_registration=1355 hits=352
+HOST_POLL scope=host_session polls=top_level_only sample_period_loops=16 ticks=sampled_unscaled calls=sampled_including_zero_tick loops=109038 eclock_hz=709379
+HOST_POLL mailbox_ticks=272857 mailbox_calls=6814 fence_ticks=89149 fence_calls=6814 event_ticks=70932 event_calls=6814
+MiniGLPPC host: executes=1706 presents=130 eclock_hz=709379
+MiniGLPPC host: stage_ticks wait=97768 clear=0 crc=0 query=48597 submit=1385793 presentwait=17306 present=2226176 total=0 inclusive=1 mutually_exclusive=0 total_scope=execute_slot_only
+MiniGLPPC host: stopped
