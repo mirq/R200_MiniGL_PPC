@@ -453,6 +453,11 @@ struct SubmitSlot {
      * whole frame's geometry back onto the legacy path. */
     BOOL modeDecided;
     ULONG stateBatch;
+    /* Set when the pending state batch was expanded into per-draw records
+     * (header mismatch under the adaptive threshold): the slot then stays
+     * on the full-record commit shape and must never accumulate batch
+     * draws again. */
+    BOOL expanded;
     ULONG drawCount;
     ULONG vertexOffsets[MAX_SLOT_DRAWS];
     struct Radeon3DStateBatchDraw stateBatchDraws[MAX_SLOT_DRAWS];
@@ -623,6 +628,12 @@ struct MiniGLR200Context {
     struct PendingDrawState pendingDraw;
     ULONG semanticStateSerial;
     ULONG pendingSemanticStateSerial;
+    /* Mismatch submits since the last present: gates when a differing
+     * header may expand the slot into per-draw records instead of
+     * submitting. Dense same-state workloads (gears) mismatch rarely and
+     * must keep the compact state-batch shape; split-heavy world scenes
+     * cross the threshold within a frame and collapse their submits. */
+    ULONG mismatchSubmits;
     ULONG pendingProjectiveRequest;
     /* Transform mode the pending batch was opened with. screenHardwareTransform
      * itself is transient (EmitHardwareBatch raises it only around its append),

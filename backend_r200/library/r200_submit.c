@@ -68,6 +68,7 @@ void ResetSubmitSlot(struct SubmitSlot *slot)
     slot->commitMode = FALSE;
     slot->modeDecided = FALSE;
     slot->stateBatch = FALSE;
+    slot->expanded = FALSE;
     slot->drawCount = 0;
     /* segmentCursor deliberately survives the reset: the RV280 fetch
      * caches never re-read rewritten lines at the same address, so vertex

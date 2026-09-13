@@ -35,6 +35,12 @@ typedef char ScreenVertexSerializeLayoutCheck[
     sizeof(struct ScreenVertex) == 13UL * sizeof(ULONG) ? 1 : -1];
 #endif
 
+/* Mismatch submits a frame must burn before expanding slots into per-draw
+ * records. Gears-level workloads mismatch ~3x per frame and keep the compact
+ * state-batch shape; the threshold sits above them and below the world-scene
+ * split rates (~13/frame) it exists for. Reset per present. */
+#define R200_EXPAND_MISMATCH_MIN 4UL
+
 static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
                                 ULONG command)
 {
@@ -316,9 +322,16 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                               state->fog, state->perspective);
     header[1] = required;
     header[10] = context->screenVertexCount;
+    /* Accumulation requires a slot that is empty or an unexpanded state
+     * batch. An expanded slot keeps per-draw records and must never grow
+     * its draw table again, or the entry claims more records than its
+     * record stream holds and the service rejects the batch (stage 5).
+     * Clear-prefix slots keep the legacy flow: the mismatch block below
+     * submits the clear and the next slot accumulates compactly. */
     stateBatch = useCommit &&
                  (context->radeonCaps &
-                  RADEON3D_CAP_COMMIT_STATE_BATCH) != 0;
+                  RADEON3D_CAP_COMMIT_STATE_BATCH) != 0 &&
+                 !slot->expanded;
     if (stateBatch && slot->recordCount) {
         BOOL sameState = slot->stateBatch &&
                          slot->recordCount == headerDwords;
@@ -326,12 +339,42 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         for (index = 0; sameState && index < headerDwords; ++index)
             if (index != 10 && slot->records[index] != header[index])
                 sameState = FALSE;
-        if (!sameState) {
+        if (!sameState &&
+            slot->stateBatch &&
+            context->mismatchSubmits >= R200_EXPAND_MISMATCH_MIN &&
+            (slot->drawCount + 1UL) * headerDwords <= context->batchDwords) {
+            /* A differing header no longer forces a submit: expand the
+             * pending same-header batch into per-draw full records -- each
+             * carries its own texture/matrix state -- and keep filling this
+             * slot in the plain commit-record shape that the host COMMIT
+             * entry and the service already consume. Backward copy: record
+             * zero is the shared header every expansion copies from. */
+            ULONG draws = slot->drawCount;
+            index = draws;
+            while (index-- > 1UL) {
+                ULONG *destination = slot->records + index * headerDwords;
+                ULONG source;
+                for (source = 0; source < headerDwords; ++source)
+                    destination[source] = slot->records[source];
+                destination[10] = slot->stateBatchDraws[index].VertexCount;
+            }
+            slot->records[10] = slot->stateBatchDraws[0].VertexCount;
+            slot->recordCount = draws * headerDwords;
+            slot->lastDrawOffset = (draws - 1UL) * headerDwords;
+            slot->lastDrawHeaderDwords = headerDwords;
+            slot->lastDrawValid = TRUE;
+            slot->stateBatch = FALSE;
+            slot->expanded = TRUE;
+            stateBatch = FALSE;
+        } else if (!sameState) {
             /* A clear may precede the first draw without deciding slot mode.
              * State batches cannot carry clears, so submit that prefix through
              * Execute instead of presenting an empty CommitBatch. */
             if (!slot->drawCount)
                 slot->commitMode = FALSE;
+            ++context->mismatchSubmits;
+            if (context->perfEnabled)
+                context->perf.deferredSplits++;
             if (!Submit(context))
                 return FALSE;
             slot = BuildSubmitSlot(context);

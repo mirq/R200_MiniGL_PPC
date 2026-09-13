@@ -46,6 +46,37 @@ The bind wrapper no longer sends any mailbox command; the host's
 `state->semanticBoundTexture` is maintained exclusively by the upload-path
 flushes, which are the only consumers.
 
+## Improvement 2: adaptive submit merging (2026-09-13, same session)
+
+The state-batch split-on-header-mismatch cost room-walk 12.7 submits/frame
+(1.57 records each). A differing header no longer always submits: after a
+frame has burned `R200_EXPAND_MISMATCH_MIN` (4) mismatch submits, further
+mismatches expand the pending same-header batch into per-draw full records
+in place and keep filling the slot on the plain commit-record shape, which
+the host COMMIT entry and the driver already consume. A per-slot `expanded`
+flag keeps expanded slots off the batch-accumulation path (accumulating
+into an expanded slot claims more draws than the record stream holds ->
+service stage-5 reject -> sticky ring error -> gray screen; the first
+version hit exactly that), and the threshold keeps dense same-state
+workloads on the compact shape.
+
+| Workload | baseline | bind-deferral | + adaptive merge |
+| --- | ---: | ---: | ---: |
+| gears precalc 600f | 132.7-135.1 | 133.9 | **138.2 fps** |
+| room-walk 120f | 12.0 | 21.0 | **27.6 fps (2.3x)** |
+| room-walk submits/frame | 12.7 | 12.7 | **5.7** (4 compact + expansions) |
+| lightmap-update 60f | PASS | PASS | **PASS** |
+| quake.alias-ogre 60f | PASS | PASS | **PASS** |
+| blend.texture-alpha 60f | PASS | PASS | PASS |
+
+Tuning note: an unconditional expansion variant measured room-walk 31.7 fps
+(2.0 submits/frame) but regressed gears to 91.2 fps - full 44-dword headers
+per draw cost the driver more than the compact state-batch shape it replaced.
+The threshold preserves both. Two intermediate bugs are documented for the
+record: the flush clobber above, and a control.value clobber in the upload
+path (same shared-buffer rule: PlatformCall sends and overwrites
+control.value[], so it must run before a caller prepares its own message).
+
 ## Pre-existing defect found during validation (NOT fixed here, backlog)
 
 `quake.world-room-walk` renders a subset of surfaces (arches, door frames,

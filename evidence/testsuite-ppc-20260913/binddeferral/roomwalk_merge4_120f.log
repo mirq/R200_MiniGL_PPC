@@ -1,0 +1,5 @@
+MINIGL_SUITE version=2 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=50b9cfe0
+MINIGL_START id=quake.world-room-walk name="ROOM WALKTHROUGH" expected="The textured hall stays correct from every patrol pose; baked block means match the offline reference render."
+MINIGL_TEST version=2 id=quake.world-room-walk result=FAIL depth=16 frames=120 fps_x1000=27649 gl_error=0 detail="room f0 want 69,53,34 got 88,78,66"
+MINIGL_PERF version=2 id=quake.world-room-walk clock=31291875 input=587160 submitted=587160 records=2400 submits=680 frontend=0 serialize=6461375 execute=86521291 wait=432 present=1768392 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=480 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=587160 draw=104562313

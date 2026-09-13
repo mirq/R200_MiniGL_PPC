@@ -2131,7 +2131,8 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
     ULONG spin;
     volatile MGLPPCRingControlV1 *control;
     BOOL result = TRUE;
-    (void)context;
+    if (present && context)
+        context->mismatchSubmits = 0;
     if (!PlatformMailboxReady())
         return FALSE;
 #if MGLPPC_PROFILE
