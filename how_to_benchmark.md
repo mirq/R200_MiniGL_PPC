@@ -6,11 +6,12 @@ Radeon 9200). Follow it top to bottom; every step below exists because
 skipping it produced a wrong number, a stalled run, or a wedged machine.
 
 Reference numbers for the fixed workload (single samples from the
-validated sessions, see `backend_r200/HOST_LOADER_REGRESSION.md`):
+validated sessions, see `backend_r200/HOST_LOADER_REGRESSION.md` and
+`backend_r200/GLQUAKE_DEFECT_FIXES.md`):
 
 | Workload | Command below | FPS |
 | --- | --- | ---: |
-| Fullscreen 640x480x16, 3 buffers, sync off | `gears-baseline` | **134.529** |
+| Fullscreen 640x480x16, 3 buffers, sync off | `gears-baseline` | **134.529–136.363** |
 | Windowed 800x600x32, CP emitter, sync off | `benchrun` | 52–68 |
 
 These are one sample per condition, not medians. Performance claims
@@ -21,12 +22,15 @@ sample.
 
 Benchmarking is only meaningful against a verified deployment. Check
 CRC32 of every artifact before the first run of a session (bridge
-`amiga_checksum` / any CRC tool, serialized, one file at a time):
+`amiga_checksum` / any CRC tool, serialized, one file at a time).
+The 2026-09-13 defect-fix session deployed its own validated set
+(rollback copies retained as `.pre-enumfix`, `.pre-yieldfix`,
+`.pre-shadow`, `minigl.library.pre-resdiag`):
 
 | File | CRC32 | Bytes |
 | --- | --- | ---: |
-| `Work:ibdraw/minigl_ppc.dll` | `02605851` | 294768 |
-| `Work:ibdraw/mglhost` | `0FAA4EFA` | 40588 |
+| `Work:ibdraw/minigl_ppc.dll` | `6C74A72D` | 305388 |
+| `Work:ibdraw/mglhost` | `573F97A3` | 40624 |
 | `LIBS:minigl.library` | `62343673` | 127252 |
 | `LIBS:Picasso96/Radeon9200.chip` | `CEB838A6` | 77940 |
 | `LIBS:Picasso96/Prometheus.card` | `18A453D6` | 7796 |
@@ -174,7 +178,69 @@ reference; 1-buffer fullscreen shows scanout banding (visual only).
   connection; the bridge (`c:amiga-bridge`) must be running; use
   `wait_bridge.sh`, not fixed sleeps.
 
-## 6. Where the reference scripts live
+## 6. Profiling builds and performance attribution
+
+When a number is surprising, attribute it before touching code. The
+stack ships two opt-in profiler variants (diagnostics only — never
+production):
+
+- **PPC frontend**: `MGLPPC_PROFILE=1 make -f Makefile.dll.r200.gcc
+  OBJDIR=obj/dll-r200-prof WARPELF=bin/minigl_ppc_r200_prof.warpelf`.
+  On context destroy it writes buckets (badger: control, texture,
+  barrier, publish, yield breakdowns) to `DH2:mglprof/dll-profile.log`.
+- **68k host**: `MGLPPC_PROFILE=1 R200_HOST=bin/minigl_ppc_host_prof
+  make -f Makefile.dll.r200.gcc host`; at shutdown it prints session
+  attribution counts (control/barrier/mailbox/ring ticks, uploads,
+  `HOST_SUBIMAGE` handler/preflight/native/bridge breakdown) into its
+  redirected stdout.
+
+Run them from **dedicated directories** — the Hyperion loader resolves
+`minigl_ppc.dll` from the client's CWD, so a directory holding the
+profiling DLL + a fresh host from that same directory replaces the
+quiet stack for the measurement (copy `defprobe`/client + `data/`
+there too). Never benchmark profile builds against quiet numbers:
+both profilers change timing.
+
+13-September-2026 session corrections worth remembering:
+
+- Reading big logs: `Type` on a redirected host log can wedge the
+  bridge's 30 s window. `Copy` the log to a new name first, then read
+  or pull it (pull runs ~19 KB/s — a 900 KiB PPM will time out; verify
+  screenshots by reading their 20-byte header instead).
+- Raw file reads (`amiga_read_file`, offset `0`) are the fast path for
+  headers and short tails; keep grep-style filtering on the host side
+  after pulling.
+- A mistyped command like `Start:` becomes a disk requester — the
+  machine waits with a "Please insert volume Start" requester and
+  everything else stalls. After any aborted script, screenshot the
+  screen and dismiss requesters (click Cancel; clamp the mouse to a
+  corner with a large relative move, then move back by the known
+  delta) before continuing.
+- Client-side timings use `DateStamp` (50 Hz ticks). A 10-iteration
+  loop carries ±2 ms/iter of noise — use ≥20 iterations before quoting
+  sub-5 ms/it numbers.
+- `SetEnv NAME ""` leaves an EMPTY variable that GetVar treats as
+  unset-length-zero; effectively off, but prefer `GetEnv` to confirm a
+  diagnostic is truly off before a quiet run (`MGLPPC_UPLOAD_TRACE`
+  answer was empty after clearing — good; `not found` for
+  `MGLPPC_VERBOSE` — good).
+
+## 7. Deploying replacement binaries for a test round
+
+1. Build locally; record CRC32 of the `.warpelf`.
+2. Push it (serialized), CRC-verify the transfer.
+3. Convert on target: `DH2:wosbuild/Elf2Exe2 <name>.elf <name>` —
+   the converted artifact has a DIFFERENT CRC than the ELF; record it.
+4. Back up the active file (`copy X X.pre-<tag>`), then copy the new
+   binary over it and verify the ACTIVE path's CRC — never just the
+   staging path.
+5. 68k host only: after replacing `mglhost`, reapply the Sonnet
+   classification bits — `(bits & ~0x00030000) | 0x00020000` — and
+   read them back.
+6. After replacing `LIBS:minigl.library`: `Avail Flush` then
+   re-validate with a small client before heavy work.
+
+## 8. Where the reference scripts live
 
 All on the Amiga in `Work:ibdraw/` (evidence retained from the
 validated sessions):
@@ -185,7 +251,10 @@ validated sessions):
 | `benchrun` | Windowed 800x600x32 CP gears run into `run.log` |
 | `precalc` | The fixed fullscreen reference client binary |
 | `gears` | The non-precalc variant used by `benchrun` |
+| `defprobe` | Isolated defect/perf probe (`examples/r200_defect_probe.c`) |
+| `texupdate.new` | 7127-check pixel-verified texture acceptance client |
 
-The logs (`*-client.log`, `*-host.log`, `baseline*.log`, `run.log`)
-are append-evidence; do not delete them when re-running — write new
-files instead.
+The logs (`*-client.log`, `*-host.log`, `baseline*.log`, `defprobe*.log`,
+`run.log`) are append-evidence; do not delete them when re-running —
+write new files instead. Profiler-only artifacts live under
+`Work:ibdraw/profdir{,/pfrun}` and are never production deploys.
