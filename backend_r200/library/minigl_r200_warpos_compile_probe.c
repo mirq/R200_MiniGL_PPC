@@ -752,6 +752,11 @@ typedef struct R200PPCFrontendPlatform {
         struct MGLPPCEmitSurface surface;
     } cpSurfaces[16];
     GLuint nativeBoundTexture;
+    /* Deferred host shadow-bind tracking: render binds do not sync the
+     * 68k shadow (texture state travels in each draw record header); the
+     * upload completers are the only shadow consumers and flush first. */
+    GLuint hostShadowTexture;
+    BOOL hostShadowDirty;
     APTR ringSlotAllocations[MGLPPC_RING_SLOTS];
     ULONG *ringSlots[MGLPPC_RING_SLOTS];
     ULONG ringPostSerial;
@@ -2473,6 +2478,10 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     }
     R200PPCTraceUL2("create ok ctx", FrontendPlatform.control.contextId,
                     "win", FrontendPlatform.control.value[0]);
+    /* The host starts every context with its shadow unbound (host resets
+     * semanticBoundTexture on create); the PPC mirror must agree. */
+    FrontendPlatform.hostShadowTexture = 0;
+    FrontendPlatform.hostShadowDirty = TRUE;
 
     memset(&proofContext, 0, sizeof(proofContext));
     proofContext.width = FrontendPlatform.control.value[1];
@@ -3334,39 +3343,14 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
-    if (FrontendPlatform.nativeBindingKnown &&
-        FrontendPlatform.nativeBoundTexture == texture &&
-        context->boundTexture[0] == texture &&
+    if (context->boundTexture[0] == texture &&
         (!texture || context->textures[texture].generated)) {
-        volatile MGLPPCMailboxV1 *box = FrontendPlatform.mailbox;
-
-        /* Eliding the command must not hide a poisoned/abandoned transport,
-         * nor bypass PlatformCall's mailbox header validation. */
-        if (!FrontendPlatform.opened || !FrontendPlatform.registered ||
-            !FrontendPlatform.contextId ||
-            !PlatformMailboxReady() || FrontendPlatform.mailboxAbandoned ||
-            FrontendPlatform.transport.pendingMessage) {
-            FrontendPlatform.nativeBindingKnown = FALSE;
-            SetError(context, GL_INVALID_OPERATION);
-            return;
-        }
-        if (box) {
-            MGLPPCInvalidateLine32((APTR)box);
-            if (box->magic != MGLPPC_MAILBOX_MAGIC ||
-                box->version != MGLPPC_MAILBOX_VERSION ||
-                box->epoch != FrontendPlatform.epoch) {
-                FrontendPlatform.mailboxPoisoned = TRUE;
-                FrontendPlatform.mailboxAbandoned = TRUE;
-                FrontendPlatform.nativeBindingKnown = FALSE;
-                SetError(context, GL_INVALID_OPERATION);
-                return;
-            }
-        }
-        if (context->perfEnabled)
-            context->perf.stateNoops++;
+        if (context->perfEnabled) context->perf.stateNoops++;
         return;
     }
-    FrontendPlatform.nativeBindingKnown = FALSE;
+    /* DIAGNOSTIC VARIANT: keep the legacy per-bind mailbox while the
+     * deferred-sync flush is under test. Revert to pure deferral once the
+     * ogre regression is isolated. */
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = target;
     FrontendPlatform.control.value[1] = texture;
@@ -3374,11 +3358,33 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
         FrontendSetTransportError(context);
         return;
     }
+    FrontendPlatform.hostShadowTexture = texture;
+    FrontendPlatform.hostShadowDirty = FALSE;
     Lib_glBindTexture(target, texture);
-    FrontendPlatform.nativeBoundTexture = texture;
-    FrontendPlatform.nativeBindingKnown =
-        context->boundTexture[0] == texture &&
-        (!texture || context->textures[texture].generated);
+}
+
+static BOOL HostTextureShadowSync(void)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    GLuint bound;
+
+    if (!context || !FrontendPlatform.opened ||
+        !FrontendPlatform.registered || !FrontendPlatform.contextId)
+        return TRUE;
+    bound = context->boundTexture[0];
+    if (!FrontendPlatform.hostShadowDirty &&
+        FrontendPlatform.hostShadowTexture == bound)
+        return TRUE;
+    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+    FrontendPlatform.control.value[0] = GL_TEXTURE_2D;
+    FrontendPlatform.control.value[1] = bound;
+    if (!PlatformCall(MGLPPC_CMD_BIND_TEXTURE, FrontendPlatform.contextId)) {
+        FrontendSetTransportError(context);
+        return FALSE;
+    }
+    FrontendPlatform.hostShadowTexture = bound;
+    FrontendPlatform.hostShadowDirty = FALSE;
+    return TRUE;
 }
 
 static ULONG FrontendTextureLayout(struct MiniGLR200Context *context,
@@ -4173,6 +4179,10 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[6] =
             (ULONG)FrontendPlatform.textureUploadBuffer;
         FrontendPlatform.control.value[7] = canonical ? sharedBytes : total;
+        /* The host completers resolve the upload target from the 68k
+         * shadow binding, so the deferred bind must land first. */
+        if (!HostTextureShadowSync())
+            return;
 #if MGLPPC_PROFILE
         chunkStart = PerfClock();
 #endif
@@ -4212,6 +4222,8 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
             (ULONG)FrontendWireSourceFormat(format);
         FrontendPlatform.control.value[7] =
             (ULONG)FrontendWireSourceType(type);
+        if (!HostTextureShadowSync())
+            return;
         if (!PlatformCall(MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN,
                           FrontendPlatform.contextId)) {
             FrontendSetTransportError(context);
@@ -4512,6 +4524,9 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
     }
     if (!count) return;
     FrontendPlatform.nativeBindingKnown = FALSE;
+    /* The host resets its shadow binding when a deleted name was bound;
+     * force a resync before the next shadow-consuming upload. */
+    FrontendPlatform.hostShadowDirty = TRUE;
     if (!FrontendTextureBarrier(context)) return;
     while (done < count) {
         ULONG chunk = (ULONG)(count - done), index;

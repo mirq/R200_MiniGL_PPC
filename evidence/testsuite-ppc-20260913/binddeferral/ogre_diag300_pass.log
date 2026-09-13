@@ -1,0 +1,5 @@
+MINIGL_SUITE version=2 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=50944e80
+MINIGL_START id=quake.alias-ogre name="TEXTURED OGRE" expected="The skin-textured Ogre rotates showing its game texture without missing faces or polygons spiking to the edges."
+MINIGL_TEST version=2 id=quake.alias-ogre result=PASS depth=16 frames=300 fps_x1000=32537 gl_error=0 detail="skinned Ogre mesh: float and integer array paths bounded"
+MINIGL_PERF version=2 id=quake.alias-ogre clock=33134550 input=293400 submitted=293400 records=1200 submits=660 frontend=0 serialize=3170795 execute=203901439 wait=992 present=11601586 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=0 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=293400 draw=137395339

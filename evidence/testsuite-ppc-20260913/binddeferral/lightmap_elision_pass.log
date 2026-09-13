@@ -1,0 +1,5 @@
+MINIGL_SUITE version=2 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=50944e00
+MINIGL_START id=quake.lightmap-update name="DYNAMIC LIGHTMAP" expected="The full panel alternates red and green without stale texels or texture bleeding."
+MINIGL_TEST version=2 id=quake.lightmap-update result=PASS depth=16 frames=30 fps_x1000=28301 gl_error=0 detail="three dynamic lightmap replacements are pixel-correct"
+MINIGL_PERF version=2 id=quake.lightmap-update clock=27277800 input=240 submitted=240 records=60 submits=90 frontend=20085 serialize=13510 execute=17633 wait=89 present=12498 upload=0 residency=0 upload_bytes=0 upload_barriers=0 splits=30 merges=0 exec_fail=0 wait_fail=0 scan=0 fetches=0 draw=0
