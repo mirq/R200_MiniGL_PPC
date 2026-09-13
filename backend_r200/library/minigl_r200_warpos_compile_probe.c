@@ -3348,18 +3348,16 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
         if (context->perfEnabled) context->perf.stateNoops++;
         return;
     }
-    /* DIAGNOSTIC VARIANT: keep the legacy per-bind mailbox while the
-     * deferred-sync flush is under test. Revert to pure deferral once the
-     * ogre regression is isolated. */
-    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
-    FrontendPlatform.control.value[0] = target;
-    FrontendPlatform.control.value[1] = texture;
-    if (!PlatformCall(MGLPPC_CMD_BIND_TEXTURE, FrontendPlatform.contextId)) {
-        FrontendSetTransportError(context);
-        return;
-    }
-    FrontendPlatform.hostShadowTexture = texture;
-    FrontendPlatform.hostShadowDirty = FALSE;
+    /* Texture state reaches the GPU inside every draw record's header
+     * (surface token, size and filter dwords are baked in at draw-build
+     * time), so a render-path bind needs no host round-trip. The 68k
+     * shadow binding is consumed only by the upload completers; they
+     * flush the deferred bind through HostTextureShadowSync() before
+     * their mailbox command is PREPARED -- the flush must not run after
+     * this wrapper's own control.value[] is set up, because a PlatformCall
+     * both reads and overwrites that shared buffer. */
+    if (FrontendPlatform.hostShadowTexture != texture)
+        FrontendPlatform.hostShadowDirty = TRUE;
     Lib_glBindTexture(target, texture);
 }
 
@@ -4146,6 +4144,11 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_SHARED_V1) &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
         FrontendEnsureTextureUploadBuffer(canonical ? sharedBytes : total)) {
+        /* Flush the deferred bind BEFORE this branch prepares its own
+         * control.value[]: PlatformCall sends and overwrites the shared
+         * buffer, so a later flush would corrupt the upload message. */
+        if (!HostTextureShadowSync())
+            return;
         if (canonical)
             FrontendStageTextureBGRA(FrontendPlatform.textureUploadBuffer,
                                      source + sourceOffset, width, height,
@@ -4179,10 +4182,6 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[6] =
             (ULONG)FrontendPlatform.textureUploadBuffer;
         FrontendPlatform.control.value[7] = canonical ? sharedBytes : total;
-        /* The host completers resolve the upload target from the 68k
-         * shadow binding, so the deferred bind must land first. */
-        if (!HostTextureShadowSync())
-            return;
 #if MGLPPC_PROFILE
         chunkStart = PerfClock();
 #endif
@@ -4210,6 +4209,10 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #if MGLPPC_PROFILE
         PlatformProfile.textureChunkedCalls++;
 #endif
+        /* Flush the deferred bind BEFORE preparing this message; see the
+         * shared-path comment above for the control-buffer clobber risk. */
+        if (!HostTextureShadowSync())
+            return;
         memset(&FrontendPlatform.control, 0,
                sizeof(FrontendPlatform.control));
         FrontendPlatform.control.value[0] = target;
@@ -4222,8 +4225,6 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
             (ULONG)FrontendWireSourceFormat(format);
         FrontendPlatform.control.value[7] =
             (ULONG)FrontendWireSourceType(type);
-        if (!HostTextureShadowSync())
-            return;
         if (!PlatformCall(MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN,
                           FrontendPlatform.contextId)) {
             FrontendSetTransportError(context);

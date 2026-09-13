@@ -1,64 +1,71 @@
-# Deferred texture-bind sync: findings (2026-09-13)
+# Deferred texture-bind sync: resolved (2026-09-13)
 
 Goal: remove the ~20-33 per-frame `MGLPPC_CMD_BIND_TEXTURE` mailbox
 round-trips (room-walk's dominant control-message cost, ~2.3 ms of 68k time
 each). Texture state already travels in every draw record header
-(`r200_state.c`: header[4] surface token, [12] size, [13] texstate), so the
-mailbox bind looked redundant for rendering.
+(`r200_state.c`: header[4] surface token, [12] size, [13] texstate).
 
-## What was tried on hardware (A4000/MPC7410, Radeon 9200)
+## Root cause of the first failure (fixed)
 
-Baseline DLL `6C74A72D`. All runs fullscreen 640x480x16, fresh verified host,
-suite `mgltestsuite` `F9B0C429`.
+The first elision build broke `quake.alias-ogre` (no ogre rendered,
+`submitted=0`). Not a bind-semantics problem: the `HostTextureShadowSync()`
+flush was placed AFTER `R200PPCDispatchTexImage2D` had already filled the
+shared `FrontendPlatform.control.value[0..7]` with the upload parameters.
+`PlatformCall` both sends and overwrites that buffer, so the flush's BIND
+reply clobbered the following `TEXTURE_UPLOAD_SHARED` request (host got
+`glTexImage2D(0, ..., 0, 0, ...)` -> upload failed -> texture never
+materialized -> every draw of that texture dropped).
 
-| Variant | DLL CRC | blend.texture-alpha | lightmap-update | quake.alias-ogre | gears |
-| --- | --- | --- | --- | --- | --- |
-| elision (no per-render bind mailbox, flush before uploads) | `E0C69055` | PASS | PASS | **FAIL x2** (submitted=0, no ogre rendered, capture failed) | 135.1 |
-| diagnostic (legacy per-bind mailbox + flush kept) | `E148C36B`->exe | PASS | PASS | **PASS 30f + 300f** | n/a |
-| baseline | `6C74A72D` | PASS (boot1) | PASS (boot1) | PASS (visible on screen) | 135.1/132.7 |
+Why the earlier tests passed and misdirected the bisection: the direct
+upload path (name-explicit, shadow-free) requires power-of-two dimensions.
+Blend 1x1 and lightmap 64x64 took the direct path (no flush, no clobber);
+the ogre skin 264x194 is non-power-of-two and takes the shared path.
+Fix: flush BEFORE the wrapper prepares its control buffer, in both the
+shared and the chunked `UPLOAD_BEGIN` branches.
 
-The elision failure signature: vertices are input (`input=29340`) but no
-records are built (`submitted=0 records=0 fetches=30` vs `fetches=29340`
-healthy) — the vertex-array draw dies in the state-header build
-(`dropTexture0` class), before per-vertex fetch. Immediate-mode textured
-draws (blend, lightmap) work fine without the bind mailbox; only the
-`glDrawElements`/alias-array path breaks.
+## Validated result (deployed DLL E9200E10, exe CRC from ELF 2B1907DF)
 
-The host's `CMD_BIND_TEXTURE` handler only calls 68k `glBindTexture` and
-updates its shadow. Net host command streams look equivalent between the
-variants (one BIND before the upload either way — at bind time vs at upload
-time). The remaining difference is ordering relative to
-`FrontendTextureBarrier` (FlushScreenVertices + SubmitAndWait + platform
-barrier) inside `R200PPCDispatchTexImage2D`. The 68k-side consumer that
-requires the earlier bind is NOT yet identified; a verbose-trace run
-(`MGLPPC_VERBOSE=1`, host stdout) reproducing the ogre elision failure is the
-next diagnostic step.
+Baseline DLL `6C74A72D` vs deferral DLL, same boot discipline, fullscreen
+640x480x16, fresh verified host per run:
 
-## Current state
+| Test | Baseline | Deferral |
+| --- | ---: | ---: |
+| gears precalc 600f | 135.1 / 132.7 fps | **133.9 fps**, error=0 |
+| room-walk 120f | 12.0 fps | **21.0 fps (+75%)** |
+| room-walk 600f | 12.6 fps (baseline photo run) | **21.3 fps** |
+| quake.alias-ogre 60f | PASS | **PASS** (pixel-verified, submitted=all) |
+| quake.lightmap-update 60f | PASS | **PASS** (pixel-correct) |
+| blend.texture-alpha | PASS | PASS |
 
-- Active deployed DLL restored to known-good `6C74A72D`
-  (`minigl_ppc.dll.pre-binddef` backup retained). Gears 132.7 fps, error=0.
-- Diagnostic build staged as `DH2:wosbuild/mglbind2.dll` (no perf gain over
-  baseline; identical behavior plus a redundant pre-upload bind sync).
-- Source keeps the diagnostic variant (`R200PPCDispatchBindTexture` marked
-  DIAGNOSTIC) plus the deferred-sync infrastructure: `hostShadowTexture` /
-  `hostShadowDirty` tracking, reset at context create, delete-textures dirty
-  flag, `HostTextureShadowSync()` flushed before `TEXTURE_UPLOAD_SHARED` and
-  `TEXTURE_UPLOAD_BEGIN`. The infrastructure is the foundation for the
-  bind-table design below.
+Per-frame semantic mailbox messages: ~33 -> ~0 for room-walk rendering;
+uploads still flush one bind each (rare). The remaining room-walk frame
+cost is now dominated by the 12.7 submits/frame x 68k ring handling
+(improvement 2) and the end-of-frame present.
 
-## Conclusion for improvement 1
+The bind wrapper no longer sends any mailbox command; the host's
+`state->semanticBoundTexture` is maintained exclusively by the upload-path
+flushes, which are the only consumers.
 
-Texture binds cannot be silently elided: something in the 68k
-vertex-array/commit path consumes the bind stream. The fix must still DELIVER
-the bind to the host, just not as a synchronous mailbox round-trip:
+## Pre-existing defect found during validation (NOT fixed here, backlog)
 
-1. **Ring-entry bind (next step):** a small `MGLPPC_SEMANTIC_FLAG_BIND`
-   ring entry `{target, name}` posted fire-and-forget (publish ~11 us)
-   instead of the mailbox round-trip (~2.3 ms). In-order ring processing
-   guarantees the host applies it before the following commit entry.
-2. **Per-slot bind table (v16):** groups with a texture name in the commit
-   trailer, host calls `glBindTexture` between record groups. Subsumes
-   improvement 2 (submit merging across texture changes).
+`quake.world-room-walk` renders a subset of surfaces (arches, door frames,
+pillars, ceiling panels - the light gray metal texture class) as black/white
+horizontal stripes on BOTH DLL variants; photo A/B confirmed identical
+striping on baseline `6C74A72D`. The suite's pixel verify fails identically
+on both (`room f0 want 69,53,34 got 88,78,66`). Pre-existing PPC-frontend
+correctness bug, separate from the bind work; photos retained beside the
+run logs (user camera, 600-frame runs on both DLLs).
 
-Both require a matched DLL+host deployment; neither changes the driver.
+## Deployment record
+
+- Source: `R200PPCDispatchBindTexture` defers (no mailbox);
+  `HostTextureShadowSync()` flushed at the TOP of the shared and chunked
+  upload branches (before control.value[] is prepared); context-create
+  reset + delete-textures invalidation kept.
+- Deployed: `Work:ibdraw/minigl_ppc.dll` CRC `E9200E10` (305,380 bytes);
+  ELF `2B1907DF` (373,781 bytes). Baseline retained as
+  `minigl_ppc.dll.pre-binddef`. Staged: `DH2:wosbuild/mglbind3.dll`.
+- Host (`mglhost`) and `minigl.library` unchanged.
+- Host-restart discipline reminder: one fresh host per client run,
+  port verified before launch (the documented restart race bit twice
+  during this session).
