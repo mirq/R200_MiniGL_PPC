@@ -24,11 +24,19 @@
 
 #include <proto/minigl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define PROBE_W 320
 #define PROBE_H 240
+#define PROBE_MAXW 640
+#define PROBE_MAXH 480
 #define PROBE_TOL 20
+
+/* Actual window (defaults match the original 320x240 probe window;
+ * --width/--height override). The suite fails at 512x320x32, so the
+ * window size is a bisection variable. */
+static int g_winW = PROBE_W, g_winH = PROBE_H;
 
 static ULONG checks, failures;
 
@@ -90,14 +98,14 @@ static void DrawStrip(int texW)
  * x = (i+0.5)*W/texW, y = H/2 for a full-viewport Wx1 strip. */
 static void ReadStrip(UBYTE *out, int texW)
 {
-    UBYTE row[PROBE_W * 4];
+    UBYTE row[PROBE_MAXW * 4];
     int i;
 
     memset(row, 0xa5, sizeof(row));
-    glReadPixels(0, PROBE_H / 2, PROBE_W, 1,
+    glReadPixels(0, g_winH / 2, g_winW, 1,
                  GL_RGBA, GL_UNSIGNED_BYTE, row);
     for (i = 0; i < texW; ++i) {
-        int x = (i * PROBE_W + PROBE_W / 2) / texW;
+        int x = (i * g_winW + g_winW / 2) / texW;
         out[i * 4 + 0] = row[x * 4 + 0];
         out[i * 4 + 1] = row[x * 4 + 1];
         out[i * 4 + 2] = row[x * 4 + 2];
@@ -121,27 +129,28 @@ static GLuint MakeTexture(void)
 /* Diagnostic only: dump the R channel of all 16 cells of a 4x4 texture
  * drawn fullscreen, top row first. No pass/fail -- shows Swiss-cheese
  * uploads (partial direct transfers over stale VRAM) at a glance. */
-/* Cell (cx,cy) of a WxH texture on the -0.9..0.9 quad: interior sample
- * point in GL pixels (origin bottom-left). cy = 0 is the bottom row. */
+/* Cell (cx,cy) of a WxH texture on the centred 90% quad: interior sample
+ * point in GL pixels (probe read orientation, proven by the passing
+ * rowmap cases). cy = 0 is the bottom row. Scales with the window. */
 static void CellXY(int w, int h, int cx, int cy, int *px, int *py)
 {
-    *px = 16 + (cx * 288 + 144) / w;
-    *py = 12 + (cy * 216 + 108) / h;
+    *px = (g_winW / 20) + (cx * (g_winW * 9 / 10) + g_winW * 9 / 20) / w;
+    *py = (g_winH / 20) + (cy * (g_winH * 9 / 10) + g_winH * 9 / 20) / h;
 }
 
 static void DumpCells(const char *id)
 {
     char line[160];
     char *cursor = line;
-    int x, y;
+    int x, y, px, py;
     UBYTE cell[4];
 
     cursor += sprintf(cursor, "PROBE id=%s cells=", id);
     for (y = 3; y >= 0; --y)
         for (x = 0; x < 4; ++x) {
             memset(cell, 0xa5, sizeof(cell));
-            glReadPixels(x * PROBE_W / 4 + PROBE_W / 8,
-                         y * PROBE_H / 4 + PROBE_H / 8, 1, 1,
+            CellXY(4, 4, x, y, &px, &py);
+            glReadPixels(px, py, 1, 1,
                          GL_RGBA, GL_UNSIGNED_BYTE, cell);
             cursor += sprintf(cursor, "%s%d", (x || y != 3) ? "," : "",
                               (int)cell[0]);
@@ -159,15 +168,142 @@ static void DrawFullscreenTexturedQuad(void)
     glEnd();
 }
 
-int main(void)
+/* ---- Section 12 helpers: redefine bisection ----------------------- */
+
+/* Bind an existing name and redefine it. This is the suite's
+ * UploadRowmap path minus parameter setup: glTexImage2D on a texture
+ * that already has an image. */
+static void UploadInto(GLuint name, const UBYTE *img, int w, int h)
+{
+    glBindTexture(GL_TEXTURE_2D, name);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, img);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+}
+
+/* The suite's DrawRowmapScene draw sequence, minus the upload. */
+static void DrawRowmapFrame(void)
+{
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    DrawFullscreenTexturedQuad();
+    glFinish();
+}
+
+/* Sample every row centre and count mismatches as probe failures.
+ * The printed row list is the diagnosis if a case goes white. */
+static void SampleRows(const char *id, int w, int h,
+                       const UBYTE rows[4][4])
+{
+    char line[256];
+    char *cursor = line;
+    int y, px, py;
+    UBYTE cell[4];
+
+    cursor += sprintf(cursor, "PROBE id=%s rows=", id);
+    for (y = 0; y < h; ++y) {
+        CellXY(w, h, w / 2, y, &px, &py);
+        memset(cell, 0xa5, sizeof(cell));
+        glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, cell);
+        cursor += sprintf(cursor, "%s%d,%d,%d", y ? ";" : "",
+                          (int)cell[0], (int)cell[1], (int)cell[2]);
+        ++checks;
+        if (AbsDiff(cell[0], rows[y][0]) > PROBE_TOL ||
+            AbsDiff(cell[1], rows[y][1]) > PROBE_TOL ||
+            AbsDiff(cell[2], rows[y][2]) > PROBE_TOL)
+            ++failures;
+    }
+    puts(line);
+}
+
+/* Sample every row centre from a full-frame captured buffer (same pixel
+ * mapping as SampleRows / CellXY) and count mismatches as failures. */
+static void SampleRowsCapture(const char *id, int w, int h,
+                              const UBYTE rows[4][4], const UBYTE *cap)
+{
+    char line[256];
+    char *cursor = line;
+    int y, px, py;
+
+    cursor += sprintf(cursor, "PROBE id=%s rows=", id);
+    for (y = 0; y < h; ++y) {
+        const UBYTE *cell;
+        CellXY(w, h, w / 2, y, &px, &py);
+        cell = cap + (py * g_winW + px) * 4;
+        cursor += sprintf(cursor, "%s%d,%d,%d", y ? ";" : "",
+                          (int)cell[0], (int)cell[1], (int)cell[2]);
+        ++checks;
+        if (AbsDiff(cell[0], rows[y][0]) > PROBE_TOL ||
+            AbsDiff(cell[1], rows[y][1]) > PROBE_TOL ||
+            AbsDiff(cell[2], rows[y][2]) > PROBE_TOL)
+            ++failures;
+    }
+    puts(line);
+}
+
+/* Mirror of the suite's ResetGLState: everything the suite resets between
+ * the benchmark loop and the verify draw. */
+static void ResetSuiteState(void)
+{
+    glGetError();
+    glActiveTextureARB(GL_TEXTURE1_ARB);
+    glDisable(GL_TEXTURE_2D);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_FOG);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_TEXTURE_2D);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glDepthRange(0.0, 1.0);
+    glShadeModel(GL_SMOOTH);
+    glViewport(0, 0, g_winW, g_winH);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glGetError();
+}
+
+int main(int argc, char **argv)
 {
     /* Biggest case below is a 4x1 RGBA readback scratch. */
     UBYTE scratch[16 * 4];
     GLuint name = 0;
     int opened = 0, live = 0;
+    int index;
+
+    for (index = 1; index < argc; ++index) {
+        if (!strcmp(argv[index], "--width") && index + 1 < argc)
+            g_winW = atoi(argv[++index]);
+        else if (!strcmp(argv[index], "--height") && index + 1 < argc)
+            g_winH = atoi(argv[++index]);
+        else {
+            printf("usage: %s [--width W] [--height H]\n", argv[0]);
+            return 10;
+        }
+    }
+    if (g_winW < 64) g_winW = 64;
+    if (g_winH < 64) g_winH = 64;
+    if (g_winW > PROBE_MAXW) g_winW = PROBE_MAXW;
+    if (g_winH > PROBE_MAXH) g_winH = PROBE_MAXH;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    puts("TEXTURE_FORMAT_PROBE BEGIN");
+    printf("TEXTURE_FORMAT_PROBE BEGIN window=%dx%dx32\n",
+           g_winW, g_winH);
 
     if (MiniGLOpen() == 0) {
         puts("PROBE id=open result=FAIL MiniGLOpen failed");
@@ -176,13 +312,13 @@ int main(void)
     opened = 1;
     mglChooseWindowMode(GL_TRUE);
     mglChoosePixelDepth(32);
-    if (mglCreateContext(0, 0, PROBE_W, PROBE_H) == 0) {
+    if (mglCreateContext(0, 0, g_winW, g_winH) == 0) {
         puts("PROBE id=context result=FAIL mglCreateContext failed");
         goto cleanup;
     }
     live = 1;
 
-    glViewport(0, 0, PROBE_W, PROBE_H);
+    glViewport(0, 0, g_winW, g_winH);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
@@ -358,11 +494,11 @@ int main(void)
         /* Texture (0,0) is bottom-left; cell centres at 1/8,3/8,5/8,7/8
          * of each axis. Outside the patch: cell (0,0). Inside: (1,1). */
         memset(cell, 0xa5, sizeof(cell));
-        glReadPixels(PROBE_W / 8, PROBE_H / 8, 1, 1,
+        glReadPixels(g_winW / 8, g_winH / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage.outside", cell, 128, 128, 128);
         memset(cell, 0xa5, sizeof(cell));
-        glReadPixels(3 * PROBE_W / 8, 3 * PROBE_H / 8, 1, 1,
+        glReadPixels(3 * g_winW / 8, 3 * g_winH / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage.inside", cell, 255, 255, 255);
         glDeleteTextures(1, &name);
@@ -403,11 +539,11 @@ int main(void)
         glFinish();
         ExpectError("subimage-rgba.draw", GL_NO_ERROR);
         memset(cell, 0xa5, sizeof(cell));
-        glReadPixels(PROBE_W / 8, PROBE_H / 8, 1, 1,
+        glReadPixels(g_winW / 8, g_winH / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage-rgba.outside", cell, 128, 128, 128);
         memset(cell, 0xa5, sizeof(cell));
-        glReadPixels(3 * PROBE_W / 8, 3 * PROBE_H / 8, 1, 1,
+        glReadPixels(3 * g_winW / 8, 3 * g_winH / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage-rgba.inside", cell, 255, 255, 255);
         glDeleteTextures(1, &name);
@@ -487,7 +623,7 @@ int main(void)
         glFinish();
         ExpectError("subimage-pal.draw", GL_NO_ERROR);
         memset(cell, 0xa5, sizeof(cell));
-        glReadPixels(3 * PROBE_W / 8, 3 * PROBE_H / 8, 1, 1,
+        glReadPixels(3 * g_winW / 8, 3 * g_winH / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage-pal.inside", cell, 127, 127, 127);
         glDeleteTextures(1, &name);
@@ -527,7 +663,7 @@ int main(void)
         glFinish();
         ExpectError("subimage-align1.draw", GL_NO_ERROR);
         memset(cell, 0xa5, sizeof(cell));
-        glReadPixels(3 * PROBE_W / 8, 3 * PROBE_H / 8, 1, 1,
+        glReadPixels(3 * g_winW / 8, 3 * g_winH / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage-align1.inside", cell, 255, 255, 255);
         glDeleteTextures(1, &name);
@@ -627,6 +763,124 @@ int main(void)
         puts(line);
         glDeleteTextures(1, &name);
         name = 0;
+    }
+
+    /* 12. Redefine bisection. The test suite re-uploads into the SAME
+     * texture name every animation frame and then verifies, while this
+     * probe always used a fresh name per upload (and passed). If a
+     * redefinition of a live direct texture is what turns row0 white
+     * in the suite, one of these cases reproduces it standalone:
+     *   12a fresh name, single upload (control, known good);
+     *   12b same name uploaded twice before the one draw;
+     *   12c same name uploaded eight times, draw last;
+     *   12d suite frame pattern: 3x (upload, draw, swap) then final
+     *       upload + draw without swap;
+     *   12e size-changing redefinition on one name: 4x4 drawn, then
+     *       the same name redefined to 8x2 and drawn. */
+    {
+        UBYTE img4[4 * 4 * 4], img8[8 * 2 * 4];
+        static const UBYTE rows4[4][4] = {
+            { 200, 0, 0, 255 }, { 0, 200, 0, 255 },
+            { 0, 0, 200, 255 }, { 255, 255, 255, 255 }
+        };
+        static const UBYTE rows8[2][4] = {
+            { 10, 20, 30, 255 }, { 200, 210, 220, 255 }
+        };
+        GLuint fresh;
+        int x, y, rep;
+
+        for (y = 0; y < 4; ++y)
+            for (x = 0; x < 4; ++x)
+                memcpy(img4 + (y * 4 + x) * 4, rows4[y], 4);
+        for (y = 0; y < 2; ++y)
+            for (x = 0; x < 8; ++x)
+                memcpy(img8 + (y * 8 + x) * 4, rows8[y], 4);
+
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+        fresh = MakeTexture();
+        UploadInto(fresh, img4, 4, 4);
+        ExpectError("redef.a-once.upload", GL_NO_ERROR);
+        DrawRowmapFrame();
+        SampleRows("redef.a-once", 4, 4, rows4);
+        glDeleteTextures(1, &fresh);
+
+        fresh = MakeTexture();
+        UploadInto(fresh, img4, 4, 4);
+        UploadInto(fresh, img4, 4, 4);
+        DrawRowmapFrame();
+        SampleRows("redef.b-twice", 4, 4, rows4);
+        glDeleteTextures(1, &fresh);
+
+        fresh = MakeTexture();
+        for (rep = 0; rep < 8; ++rep)
+            UploadInto(fresh, img4, 4, 4);
+        DrawRowmapFrame();
+        SampleRows("redef.c-eight", 4, 4, rows4);
+        glDeleteTextures(1, &fresh);
+
+        fresh = MakeTexture();
+        for (rep = 0; rep < 3; ++rep) {
+            UploadInto(fresh, img4, 4, 4);
+            DrawRowmapFrame();
+            mglSwitchDisplay();
+        }
+        UploadInto(fresh, img4, 4, 4);
+        DrawRowmapFrame();
+        SampleRows("redef.d-swap", 4, 4, rows4);
+        glDeleteTextures(1, &fresh);
+
+        fresh = MakeTexture();
+        UploadInto(fresh, img4, 4, 4);
+        DrawRowmapFrame();
+        UploadInto(fresh, img8, 8, 2);
+        ExpectError("redef.e-resize.upload", GL_NO_ERROR);
+        DrawRowmapFrame();
+        SampleRows("redef.e-resize", 8, 2, rows8);
+        glDeleteTextures(1, &fresh);
+        fresh = 0;
+
+        /* 12f: the suite's RunTest/VerifyRowIdentity pattern end to end,
+         * 1:1: 15 benchmark-style (upload, draw, swap) frames, then
+         * ResetGLState + draw(0), then three calibration-style solid
+         * captures, then ResetGLState again, the final upload + draw,
+         * and a full-frame capture the row samples come from. Combined
+         * with --width 512 --height 320 this is the failing suite run
+         * exactly. */
+        {
+            static UBYTE cap[PROBE_MAXW * PROBE_MAXH * 4];
+            static const GLfloat calib[3][3] = {
+                { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f },
+                { 0.0f, 0.0f, 1.0f }
+            };
+            int c;
+
+            fresh = MakeTexture();
+            for (rep = 0; rep < 15; ++rep) {
+                UploadInto(fresh, img4, 4, 4);
+                DrawRowmapFrame();
+                mglSwitchDisplay();
+            }
+            ResetSuiteState();
+            UploadInto(fresh, img4, 4, 4);
+            DrawRowmapFrame();
+            for (c = 0; c < 3; ++c) {
+                glClearColor(calib[c][0], calib[c][1], calib[c][2], 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glFinish();
+                glReadPixels(0, 0, g_winW, g_winH, GL_RGBA,
+                             GL_UNSIGNED_BYTE, cap);
+            }
+            ResetSuiteState();
+            UploadInto(fresh, img4, 4, 4);
+            DrawRowmapFrame();
+            glFinish();
+            glReadPixels(0, 0, g_winW, g_winH, GL_RGBA,
+                         GL_UNSIGNED_BYTE, cap);
+            SampleRowsCapture("redef.f-suite", 4, 4, rows4, cap);
+            glDeleteTextures(1, &fresh);
+            fresh = 0;
+        }
     }
 
     mglSwitchDisplay();

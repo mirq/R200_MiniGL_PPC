@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SUITE_VERSION 4
+#define SUITE_VERSION 5
 #define DEFAULT_WIDTH  512
 #define DEFAULT_HEIGHT 320
 #define DEFAULT_DEPTH  16
@@ -274,10 +274,24 @@ static ULONG PixelToken(const SurfaceView *view, ULONG x, ULONG y)
     return token;
 }
 
+/* Capture orientation: the 68k mglLockBack surface is top-origin (AmigaOS
+ * bitmaps), while the PPC R200 stack captures through glReadPixels, whose
+ * row 0 is the BOTTOM scanline (GL standard). A vertically mirrored sample
+ * passes every uniform or vertically symmetric check, so this only became
+ * visible when the asymmetric row-identity map landed. Detected at runtime
+ * exactly like channel order, so one source is correct on both stacks. */
+static GLboolean g_captureTopOrigin = GL_FALSE;
+static GLboolean g_captureOrientationValid = GL_FALSE;
+
 static ULONG SampleNDC(const SurfaceView *view, GLfloat x, GLfloat y)
 {
     ULONG px = (ULONG)((x + 1.0f) * 0.5f * (GLfloat)view->width);
-    ULONG py = (ULONG)((1.0f - y) * 0.5f * (GLfloat)view->height);
+    ULONG py;
+
+    if (g_captureTopOrigin)
+        py = (ULONG)((1.0f - y) * 0.5f * (GLfloat)view->height);
+    else
+        py = (ULONG)((y + 1.0f) * 0.5f * (GLfloat)view->height);
     return PixelToken(view, px, py);
 }
 
@@ -343,10 +357,89 @@ static ULONG ClearAndSampleCentre(GLfloat r, GLfloat g, GLfloat b)
     return SampleNDC(&view, 0.0f, 0.0f);
 }
 
+/* Decide which end of the capture buffer holds the bottom of the screen.
+ * White and black reference clears give two tokens that differ regardless
+ * of channel order (white sets every channel bit, black keeps padding
+ * only), so plain equality decides the half-screen probe. */
+static GLboolean CalibrateCaptureOrientation(char *detail)
+{
+    SurfaceView view;
+    ULONG whiteToken, blackToken, lowToken, highToken;
+    ULONG midX, quarterY, threeQuarterY;
+
+    if (g_captureOrientationValid)
+        return GL_TRUE;
+    if (!CaptureSurface(&view)) {
+        if (detail)
+            sprintf(detail, "orientation: capture failed");
+        return GL_FALSE;
+    }
+    midX = view.width / 2UL;
+    quarterY = view.height / 4UL;
+    threeQuarterY = view.height - 1UL - quarterY;
+
+    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!CaptureSurface(&view)) {
+        if (detail)
+            sprintf(detail, "orientation: white capture failed");
+        return GL_FALSE;
+    }
+    whiteToken = PixelToken(&view, midX, view.height / 2UL);
+
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!CaptureSurface(&view)) {
+        if (detail)
+            sprintf(detail, "orientation: black capture failed");
+        return GL_FALSE;
+    }
+    blackToken = PixelToken(&view, midX, view.height / 2UL);
+
+    /* Base white, then GL scissor (Y from the bottom) paints the BOTTOM
+     * half black: top stays white for the probe. */
+    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, (GLsizei)view.width, (GLsizei)(view.height / 2L));
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
+    if (!CaptureSurface(&view)) {
+        if (detail)
+            sprintf(detail, "orientation: split capture failed");
+        return GL_FALSE;
+    }
+    lowToken = PixelToken(&view, midX, quarterY);
+    highToken = PixelToken(&view, midX, threeQuarterY);
+
+    if (lowToken == blackToken && highToken == whiteToken) {
+        /* Screen bottom at low buffer rows: GL-standard bottom-origin
+         * readback (the PPC glReadPixels capture path). */
+        g_captureTopOrigin = GL_FALSE;
+    } else if (lowToken == whiteToken && highToken == blackToken) {
+        /* Screen bottom at high buffer rows: top-origin surface (the 68k
+         * mglLockBack capture path). */
+        g_captureTopOrigin = GL_TRUE;
+    } else {
+        if (detail)
+            sprintf(detail,
+                    "orientation ambiguous lo=%08lx hi=%08lx w=%08lx b=%08lx",
+                    (unsigned long)lowToken, (unsigned long)highToken,
+                    (unsigned long)whiteToken, (unsigned long)blackToken);
+        return GL_FALSE;
+    }
+    printf("MINIGL_CAPTURE topOrigin=%d\n", g_captureTopOrigin ? 1 : 0);
+    g_captureOrientationValid = GL_TRUE;
+    return GL_TRUE;
+}
+
 static GLboolean CalibrateChannels(char *detail)
 {
     ULONG red, green, blue, common;
 
+    if (!CalibrateCaptureOrientation(detail))
+        return GL_FALSE;
     if (g_channels.valid)
         return GL_TRUE;
 
@@ -428,10 +521,15 @@ static GLboolean DumpSurfacePPM(const char *path)
         return GL_FALSE;
     fprintf(out, "P6\n%lu %lu\n255\n", (unsigned long)view.width,
             (unsigned long)view.height);
-    for (y = 0; y < view.height; ++y) for (x = 0; x < view.width; ++x) {
-        int r, g, b;
-        TokenToRGB(PixelToken(&view, x, y), &r, &g, &b);
-        fputc(r, out); fputc(g, out); fputc(b, out);
+    for (y = 0; y < view.height; ++y) {
+        /* PPM rows run top to bottom: map display rows through the
+         * calibrated capture orientation. */
+        ULONG rowY = g_captureTopOrigin ? y : (view.height - 1UL - y);
+        for (x = 0; x < view.width; ++x) {
+            int r, g, b;
+            TokenToRGB(PixelToken(&view, x, rowY), &r, &g, &b);
+            fputc(r, out); fputc(g, out); fputc(b, out);
+        }
     }
     fclose(out);
     return GL_TRUE;
@@ -456,12 +554,15 @@ static GLboolean DumpSurfaceBandPPM(const char *path, long x0, long x1)
     if (!out)
         return GL_FALSE;
     fprintf(out, "P6\n%ld %lu\n255\n", w, (unsigned long)view.height);
-    for (y = 0; y < (long)view.height; ++y)
+    for (y = 0; y < (long)view.height; ++y) {
+        ULONG rowY = g_captureTopOrigin ? (ULONG)y
+                                        : (view.height - 1UL - (ULONG)y);
         for (x = x0; x <= x1; ++x) {
             int r, g, b;
-            TokenToRGB(PixelToken(&view, (ULONG)x, (ULONG)y), &r, &g, &b);
+            TokenToRGB(PixelToken(&view, (ULONG)x, rowY), &r, &g, &b);
             fputc(r, out); fputc(g, out); fputc(b, out);
         }
+    }
     fclose(out);
     return GL_TRUE;
 }
@@ -2391,13 +2492,28 @@ static void CheckRowCells(CheckLog *log, const char *id,
     char what[64];
     int cy;
 
+    /* The pattern IS the diagnosis: print every sampled row so a failure
+     * log shows shifted vs stale vs all-white rows directly. */
+    printf("MINIGL_ROWMAP id=%s rows=", id);
     for (cy = 0; cy < h; ++cy) {
+        int r = -1, g = -1, b = -1;
+
         CellNDCWH(w, h, w / 2, cy, &x, &y);
+        if (!SampleRGB(x, y, &r, &g, &b)) {
+            ++log->checks;
+            ++log->failures;
+            if (!log->first[0])
+                strcpy(log->first, "surface capture failed");
+            printf("%scapture-failed", cy ? ";" : "");
+            return;
+        }
+        printf("%s%d,%d,%d", cy ? ";" : "", r, g, b);
         sprintf(what, "%s.row%d", id, cy);
-        CheckRGB(log, what, x, y,
-                 (int)rows[cy][0], (int)rows[cy][1], (int)rows[cy][2],
-                 TEXFMT_TOL);
+        CheckValues(log, what, r, g, b,
+                    (int)rows[cy][0], (int)rows[cy][1], (int)rows[cy][2],
+                    TEXFMT_TOL);
     }
+    printf("\n");
 }
 
 static GLboolean VerifyRowIdentity(char *detail)
