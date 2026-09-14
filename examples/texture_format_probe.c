@@ -121,6 +121,14 @@ static GLuint MakeTexture(void)
 /* Diagnostic only: dump the R channel of all 16 cells of a 4x4 texture
  * drawn fullscreen, top row first. No pass/fail -- shows Swiss-cheese
  * uploads (partial direct transfers over stale VRAM) at a glance. */
+/* Cell (cx,cy) of a WxH texture on the -0.9..0.9 quad: interior sample
+ * point in GL pixels (origin bottom-left). cy = 0 is the bottom row. */
+static void CellXY(int w, int h, int cx, int cy, int *px, int *py)
+{
+    *px = 16 + (cx * 288 + 144) / w;
+    *py = 12 + (cy * 216 + 108) / h;
+}
+
 static void DumpCells(const char *id)
 {
     char line[160];
@@ -522,6 +530,101 @@ int main(void)
         glReadPixels(3 * PROBE_W / 8, 3 * PROBE_H / 8, 1, 1,
                      GL_RGBA, GL_UNSIGNED_BYTE, cell);
         ExpectRGB("subimage-align1.inside", cell, 255, 255, 255);
+        glDeleteTextures(1, &name);
+        name = 0;
+    }
+
+    /* 11. Row-identity map: distinct solid rows pin down the exact
+     * write stride, sample stride, and stale fill in one shot.
+     *   11a 4x4 rows R/G/B/W, one sample per row;
+     *   11b 8x2 rows dark/bright, one sample per row;
+     *   11c 16x2 same colours (width*4 == 64: no pitch gap expected).
+     * Informational only (no pass/fail): the pattern IS the result. */
+    {
+        UBYTE img4[4 * 4 * 4], img8[8 * 2 * 4], img16[16 * 2 * 4];
+        static const UBYTE rows4[4][4] = {
+            { 200, 0, 0, 255 }, { 0, 200, 0, 255 },
+            { 0, 0, 200, 255 }, { 255, 255, 255, 255 }
+        };
+        int x, y, px, py;
+        UBYTE cell[4];
+        char line[192];
+        char *cursor;
+
+        for (y = 0; y < 4; ++y)
+            for (x = 0; x < 4; ++x)
+                memcpy(img4 + (y * 4 + x) * 4, rows4[y], 4);
+        for (y = 0; y < 2; ++y)
+            for (x = 0; x < 8; ++x) {
+                img8[(y * 8 + x) * 4 + 0] = y ? 200 : 10;
+                img8[(y * 8 + x) * 4 + 1] = y ? 210 : 20;
+                img8[(y * 8 + x) * 4 + 2] = y ? 220 : 30;
+                img8[(y * 8 + x) * 4 + 3] = 255;
+            }
+        for (y = 0; y < 2; ++y)
+            for (x = 0; x < 16; ++x) {
+                img16[(y * 16 + x) * 4 + 0] = y ? 200 : 10;
+                img16[(y * 16 + x) * 4 + 1] = y ? 210 : 20;
+                img16[(y * 16 + x) * 4 + 2] = y ? 220 : 30;
+                img16[(y * 16 + x) * 4 + 3] = 255;
+            }
+        name = MakeTexture();
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, img4);
+        ExpectError("rowmap4.upload", GL_NO_ERROR);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        DrawFullscreenTexturedQuad();
+        glFinish();
+        ExpectError("rowmap4.draw", GL_NO_ERROR);
+        cursor = line + sprintf(line, "PROBE id=rowmap4 rows=");
+        for (y = 0; y < 4; ++y) {
+            CellXY(4, 4, 1, y, &px, &py);
+            memset(cell, 0xa5, sizeof(cell));
+            glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, cell);
+            cursor += sprintf(cursor, "%s%d,%d,%d", y ? ";" : "",
+                              (int)cell[0], (int)cell[1], (int)cell[2]);
+        }
+        puts(line);
+        glDeleteTextures(1, &name);
+        name = MakeTexture();
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 2, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, img8);
+        ExpectError("rowmap8.upload", GL_NO_ERROR);
+        glClear(GL_COLOR_BUFFER_BIT);
+        DrawFullscreenTexturedQuad();
+        glFinish();
+        ExpectError("rowmap8.draw", GL_NO_ERROR);
+        cursor = line + sprintf(line, "PROBE id=rowmap8 rows=");
+        for (y = 0; y < 2; ++y) {
+            CellXY(8, 2, 3, y, &px, &py);
+            memset(cell, 0xa5, sizeof(cell));
+            glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, cell);
+            cursor += sprintf(cursor, "%s%d,%d,%d", y ? ";" : "",
+                              (int)cell[0], (int)cell[1], (int)cell[2]);
+        }
+        puts(line);
+        glDeleteTextures(1, &name);
+        name = MakeTexture();
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 2, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, img16);
+        ExpectError("rowmap16.upload", GL_NO_ERROR);
+        glClear(GL_COLOR_BUFFER_BIT);
+        DrawFullscreenTexturedQuad();
+        glFinish();
+        ExpectError("rowmap16.draw", GL_NO_ERROR);
+        cursor = line + sprintf(line, "PROBE id=rowmap16 rows=");
+        for (y = 0; y < 2; ++y) {
+            CellXY(16, 2, 7, y, &px, &py);
+            memset(cell, 0xa5, sizeof(cell));
+            glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, cell);
+            cursor += sprintf(cursor, "%s%d,%d,%d", y ? ";" : "",
+                              (int)cell[0], (int)cell[1], (int)cell[2]);
+        }
+        puts(line);
         glDeleteTextures(1, &name);
         name = 0;
     }
