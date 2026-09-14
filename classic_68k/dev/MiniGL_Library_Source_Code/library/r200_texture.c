@@ -587,8 +587,23 @@ BOOL BeginDirectTexture(struct MiniGLR200Context *context,
                 texture->directSurface.Pitch * height, CACRF_ClearD);
     bridge->cpuAddress = (ULONG)texture->directSurface.CpuAddress;
     bridge->pitch = texture->directSurface.Pitch;
+    if (!want565) {
+        /* The GPU samples POT textures at 32-byte-aligned rows
+         * ((width*4+31)&~31: the same rule TextureStorageBytes uses for
+         * the CPU image and SyncTextureDirty uses for its copy), while
+         * the p96/import CPU mapping pads rows to 64. Grant the sampling
+         * pitch: the PPC fill, its flush, and the commit span all derive
+         * from it. min() keeps the grant inside the surface for any
+         * present or future pitch combination, so widths where both
+         * rules agree (16 and up) behave exactly as before. Small POT
+         * direct uploads (4x4, 8x2, ...) otherwise sample every other
+         * row from stale padding (observed as 170-grey rows). */
+        ULONG gpuPitch = (width * 4UL + 31UL) & ~31UL;
+        if (gpuPitch < bridge->pitch)
+            bridge->pitch = gpuPitch;
+    }
     bridge->format = texture->directSurface.Format;
-    bridge->bytes = texture->directSurface.Pitch * height;
+    bridge->bytes = bridge->pitch * height;
     bridge->deviceEpoch = context->deviceEpoch;
     bridge->flags = 0UL;
     return TRUE;
@@ -1036,9 +1051,15 @@ static BOOL MaterializeDirectTexture(struct MiniGLR200Context *context,
      * are clean: discard stale cache contents before reading the live lease.
      * Never derive an address from GpuAddress or touch MMIO here. */
     CacheClearE(surface.CpuAddress, span, CACRF_ClearD);
-    for (row = 0; row < height; ++row)
-        CopyMem((const UBYTE *)surface.CpuAddress + row * surface.Pitch,
-                image + row * stride, rowBytes);
+    /* Read back at the granted sampling pitch (see BeginDirectTexture),
+     * not the CPU-mapping pitch: direct content sits at the GPU stride.
+     * min() mirrors the grant exactly (BGRA32-only path, POT sizes). */
+    {
+        ULONG readStride = surface.Pitch < stride ? surface.Pitch : stride;
+        for (row = 0; row < height; ++row)
+            CopyMem((const UBYTE *)surface.CpuAddress + row * readStride,
+                    image + row * stride, rowBytes);
+    }
     texture->image = image;
     texture->imageBytes = bytes;
     texture->dirtyRects = dirtyRects;
