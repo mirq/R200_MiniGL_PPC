@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SUITE_VERSION 2
+#define SUITE_VERSION 3
 #define DEFAULT_WIDTH  512
 #define DEFAULT_HEIGHT 320
 #define DEFAULT_DEPTH  16
@@ -1908,6 +1908,408 @@ static GLboolean VerifyQuakeLightmap(char *detail)
     return log.failures == 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Texture source formats (L/LA/A/BGRA/ARGB).                          */
+/*                                                                     */
+/* Every format is uploaded with distinct per-channel bytes and read   */
+/* back through the same calibrated surface the other tests use, so a  */
+/* wrong expansion, a swapped channel order, or a bad source stride    */
+/* fails naming the exact texel. GL_ALPHA expands to white RGB on      */
+/* every MiniGL backend (the R200 ConvertPixel and the mglQ3 A8_ARGB   */
+/* agree); that is MiniGL's documented behaviour, not the GL-spec      */
+/* zero-RGB that Mesa produces. MGL_UBYTE_* sources exist only on the  */
+/* R200 backend, so those two tests SKIP elsewhere.                    */
+/* ------------------------------------------------------------------ */
+
+#define TEXFMT_TOL 16
+
+static GLuint UploadFormatTexture(GLenum internal, GLenum format,
+                                  int width, int height,
+                                  const UBYTE *texels)
+{
+    GLuint name = 0;
+
+    glGenTextures(1, &name);
+    glBindTexture(GL_TEXTURE_2D, name);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, width, height, 0, format,
+                 GL_UNSIGNED_BYTE, texels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    return name;
+}
+
+/* The bound Wx1 texture stretched over the -0.9..0.9 fullscreen quad:
+ * texel i is centred at this NDC x (sampled at y = 0). */
+static GLfloat StripTexelX(int index, int texW)
+{
+    return -0.9f + ((GLfloat)index + 0.5f) * (1.8f / (GLfloat)texW);
+}
+
+/* A 4x4 texture on the same quad: cell (cx, cy), cy = 0 at the texture
+ * bottom row, is centred at this NDC position. */
+static void CellNDC(int cx, int cy, GLfloat *x, GLfloat *y)
+{
+    *x = -0.9f + ((GLfloat)cx + 0.5f) * 0.45f;
+    *y = -0.9f + ((GLfloat)cy + 0.5f) * 0.45f;
+}
+
+static GLuint g_lumTexture;
+static GLuint g_lumAlphaTexture;
+static GLuint g_alphaFormatTexture;
+static GLuint g_bgraTexture;
+static GLuint g_argbTexture;
+static GLuint g_subimageTexture;
+
+/* Texture objects survive ResetGLState; create once, re-bind after. */
+static void BindLuminance(void)
+{
+    static const UBYTE texels[4] = { 0, 85, 170, 255 };
+
+    if (!g_lumTexture)
+        g_lumTexture = UploadFormatTexture(GL_LUMINANCE, GL_LUMINANCE,
+                                           4, 1, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_lumTexture);
+}
+
+static void BindLuminanceAlpha(void)
+{
+    static const UBYTE texels[4] = { 200, 255, 200, 128 };
+
+    if (!g_lumAlphaTexture)
+        g_lumAlphaTexture = UploadFormatTexture(GL_LUMINANCE_ALPHA,
+                                                GL_LUMINANCE_ALPHA,
+                                                2, 1, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_lumAlphaTexture);
+}
+
+static void BindAlphaFormat(void)
+{
+    static const UBYTE texels[2] = { 255, 128 };
+
+    if (!g_alphaFormatTexture)
+        g_alphaFormatTexture = UploadFormatTexture(GL_ALPHA, GL_ALPHA,
+                                                   2, 1, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_alphaFormatTexture);
+}
+
+static void BindBGRA(void)
+{
+    static const UBYTE texels[8] =
+        { 200, 150, 100, 255, 10, 20, 30, 255 };
+
+    if (!g_bgraTexture)
+        g_bgraTexture = UploadFormatTexture(GL_RGBA, MGL_UBYTE_BGRA,
+                                            2, 1, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_bgraTexture);
+}
+
+static void BindARGB(void)
+{
+    static const UBYTE texels[8] =
+        { 255, 100, 150, 200, 255, 30, 20, 10 };
+
+    if (!g_argbTexture)
+        g_argbTexture = UploadFormatTexture(GL_RGBA, MGL_UBYTE_ARGB,
+                                            2, 1, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_argbTexture);
+}
+
+static void DrawLuminanceScene(void)
+{
+    BindLuminance();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    DrawFullscreenQuad();
+}
+
+static void DrawLuminanceAlphaScene(void)
+{
+    BindLuminanceAlpha();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    DrawFullscreenQuad();
+    glDisable(GL_BLEND);
+}
+
+static void DrawAlphaFormatScene(void)
+{
+    BindAlphaFormat();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    DrawFullscreenQuad();
+    glDisable(GL_BLEND);
+}
+
+static void DrawBGRAScene(void)
+{
+    BindBGRA();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    DrawFullscreenQuad();
+}
+
+static void DrawARGBScene(void)
+{
+    BindARGB();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    DrawFullscreenQuad();
+}
+
+static void DrawLuminance(ULONG frame)
+{
+    (void)frame;
+    DrawLuminanceScene();
+}
+
+static void DrawLuminanceAlpha(ULONG frame)
+{
+    (void)frame;
+    DrawLuminanceAlphaScene();
+}
+
+static void DrawAlphaFormat(ULONG frame)
+{
+    (void)frame;
+    DrawAlphaFormatScene();
+}
+
+static void DrawBGRA(ULONG frame)
+{
+    (void)frame;
+    DrawBGRAScene();
+}
+
+static void DrawARGB(ULONG frame)
+{
+    (void)frame;
+    DrawARGBScene();
+}
+
+static GLboolean VerifyLuminance(char *detail)
+{
+    static const int want[4] = { 0, 85, 170, 255 };
+    CheckLog log;
+    char what[64];
+    int i;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrawLuminanceScene();
+    for (i = 0; i < 4; ++i) {
+        sprintf(what, "texel%d", i);
+        CheckRGB(&log, what, StripTexelX(i, 4), 0.0f,
+                 want[i], want[i], want[i], TEXFMT_TOL);
+    }
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "4 luminance texels expand to exact grey");
+    return log.failures == 0;
+}
+
+static GLboolean VerifyLuminanceAlpha(char *detail)
+{
+    CheckLog log;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrawLuminanceAlphaScene();
+    CheckRGB(&log, "opaque", StripTexelX(0, 2), 0.0f,
+             200, 200, 200, TEXFMT_TOL);
+    CheckRGB(&log, "half", StripTexelX(1, 2), 0.0f,
+             100, 100, 100, TEXFMT_TOL);
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "luminance and alpha channels both correct");
+    return log.failures == 0;
+}
+
+static GLboolean VerifyAlphaFormat(char *detail)
+{
+    CheckLog log;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrawAlphaFormatScene();
+    CheckRGB(&log, "full", StripTexelX(0, 2), 0.0f,
+             255, 255, 255, TEXFMT_TOL);
+    CheckRGB(&log, "half", StripTexelX(1, 2), 0.0f,
+             128, 128, 128, TEXFMT_TOL);
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "alpha texture blends as white at both strengths");
+    return log.failures == 0;
+}
+
+static GLboolean VerifyBGRA(char *detail)
+{
+    CheckLog log;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrawBGRAScene();
+    CheckRGB(&log, "texel0", StripTexelX(0, 2), 0.0f,
+             100, 150, 200, TEXFMT_TOL);
+    CheckRGB(&log, "texel1", StripTexelX(1, 2), 0.0f,
+             30, 20, 10, TEXFMT_TOL);
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "BGRA bytes land on the exact channels");
+    return log.failures == 0;
+}
+
+static GLboolean VerifyARGB(char *detail)
+{
+    CheckLog log;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrawARGBScene();
+    CheckRGB(&log, "texel0", StripTexelX(0, 2), 0.0f,
+             100, 150, 200, TEXFMT_TOL);
+    CheckRGB(&log, "texel1", StripTexelX(1, 2), 0.0f,
+             30, 20, 10, TEXFMT_TOL);
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "ARGB bytes land on the exact channels");
+    return log.failures == 0;
+}
+
+/* Mid-grey base, re-uploaded before every patch so each sub-case starts
+ * from the same content. Tight unpack rows: the suite pins alignment
+ * explicitly instead of relying on the default. */
+static void UploadSubimageBase(void)
+{
+    UBYTE base[4 * 4 * 4];
+    int x, y;
+
+    for (y = 0; y < 4; ++y)
+        for (x = 0; x < 4; ++x) {
+            base[(y * 4 + x) * 4 + 0] = 128;
+            base[(y * 4 + x) * 4 + 1] = 128;
+            base[(y * 4 + x) * 4 + 2] = 128;
+            base[(y * 4 + x) * 4 + 3] = 255;
+        }
+    if (!g_subimageTexture) {
+        glGenTextures(1, &g_subimageTexture);
+        glBindTexture(GL_TEXTURE_2D, g_subimageTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, g_subimageTexture);
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, base);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+}
+
+static void DrawSubimageScene(GLenum format, const UBYTE *patch,
+                              GLint align)
+{
+    UploadSubimageBase();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glDisable(GL_BLEND);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, align);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 1, 2, 2,
+                    format, GL_UNSIGNED_BYTE, patch);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    DrawFullscreenQuad();
+}
+
+static void DrawSubimageFormats(ULONG frame)
+{
+    static const UBYTE patch[4] = { 255, 255, 255, 255 };
+
+    (void)frame;
+    DrawSubimageScene(GL_LUMINANCE, patch, 1);
+}
+
+static GLboolean VerifySubimageFormats(char *detail)
+{
+    static const UBYTE whiteL[4] = { 255, 255, 255, 255 };
+    static const UBYTE whiteRGBA[16] = {
+        255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255
+    };
+    CheckLog log;
+    GLfloat ox, oy, ix, iy;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    CellNDC(0, 0, &ox, &oy);
+    CellNDC(1, 1, &ix, &iy);
+    DrawSubimageScene(GL_LUMINANCE, whiteL, 1);
+    CheckRGB(&log, "lum.outside", ox, oy, 128, 128, 128, TEXFMT_TOL);
+    CheckRGB(&log, "lum.inside", ix, iy, 255, 255, 255, TEXFMT_TOL);
+    DrawSubimageScene(GL_LUMINANCE, whiteL, 4);
+    CheckRGB(&log, "lum4.outside", ox, oy, 128, 128, 128, TEXFMT_TOL);
+    CheckRGB(&log, "lum4.inside", ix, iy, 255, 255, 255, TEXFMT_TOL);
+    DrawSubimageScene(GL_RGBA, whiteRGBA, 1);
+    CheckRGB(&log, "rgba.outside", ox, oy, 128, 128, 128, TEXFMT_TOL);
+    CheckRGB(&log, "rgba.inside", ix, iy, 255, 255, 255, TEXFMT_TOL);
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "luminance and RGBA patches land exactly");
+    return log.failures == 0;
+}
+
+static GLboolean R200Available(char *reason)
+{
+    if (MiniGLDispatch->backendFlags & MINIGL_BACKEND_FLAG_R200)
+        return GL_TRUE;
+    strcpy(reason, "needs R200 backend");
+    return GL_FALSE;
+}
+
 #define QUAKE_PARTICLE_COUNT 24
 
 /* Quarter-wave-accurate sine table: keeps the animated particle field free
@@ -2501,6 +2903,30 @@ static MiniGLTest g_tests[] = {
      "by Quake's screen flash.",
      "A yellow wash over grey. Each sample must equal the computed blend.",
      DrawAlphaFill, VerifyAlphaFill, AlwaysAvailable, GL_TRUE, {0}},
+    {"texture.luminance", "TEXTURE", "LUMINANCE UPLOAD",
+     "Upload a 4-texel GL_LUMINANCE ramp and render it back.",
+     "Four grey steps from black to white; FAIL names the texel whose grey is wrong.",
+     DrawLuminance, VerifyLuminance, AlwaysAvailable, GL_TRUE, {0}},
+    {"texture.luminance-alpha", "TEXTURE", "LUMINANCE-ALPHA UPLOAD",
+     "Upload GL_LUMINANCE_ALPHA texels and blend them over black.",
+     "An opaque light-grey texel and a half-alpha texel at half brightness.",
+     DrawLuminanceAlpha, VerifyLuminanceAlpha, AlwaysAvailable, GL_TRUE, {0}},
+    {"texture.alpha", "TEXTURE", "ALPHA UPLOAD",
+     "Upload GL_ALPHA texels, modulate with white, and blend over black.",
+     "MiniGL expands alpha textures to white RGB: full and half white washes.",
+     DrawAlphaFormat, VerifyAlphaFormat, AlwaysAvailable, GL_TRUE, {0}},
+    {"texture.bgra", "TEXTURE", "BGRA BYTE ORDER",
+     "Upload an MGL_UBYTE_BGRA texture with distinct bytes per channel.",
+     "Blue/green/red channels land exactly; R200 backend only.",
+     DrawBGRA, VerifyBGRA, R200Available, GL_TRUE, {0}},
+    {"texture.argb", "TEXTURE", "ARGB BYTE ORDER",
+     "Upload an MGL_UBYTE_ARGB texture with distinct bytes per channel.",
+     "Blue/green/red channels land exactly; R200 backend only.",
+     DrawARGB, VerifyARGB, R200Available, GL_TRUE, {0}},
+    {"texture.subimage-formats", "TEXTURE", "SUBIMAGE FORMATS",
+     "Patch a resident texture with luminance and RGBA subimages.",
+     "Patched regions turn white, surroundings stay grey; FAIL isolates the broken format.",
+     DrawSubimageFormats, VerifySubimageFormats, AlwaysAvailable, GL_TRUE, {0}},
     {"quake.alias-ogre", "QUAKE", "TEXTURED OGRE",
      "Render the real Quake Ogre mesh with its original game skin through "
      "its strided alias-array layout, alternating float and integer paths.",
