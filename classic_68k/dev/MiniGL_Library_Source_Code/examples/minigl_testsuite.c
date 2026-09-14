@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SUITE_VERSION 3
+#define SUITE_VERSION 4
 #define DEFAULT_WIDTH  512
 #define DEFAULT_HEIGHT 320
 #define DEFAULT_DEPTH  16
@@ -2310,6 +2310,119 @@ static GLboolean R200Available(char *reason)
     return GL_FALSE;
 }
 
+/* ------------------------------------------------------------------ */
+/* Row-identity map: distinct solid rows pin down the exact write      */
+/* stride versus sample stride of the upload path. A pitch mismatch    */
+/* shows as shifted or stale rows (the direct-path bug read back      */
+/* [red,stale,green,stale] for a [red,green,blue,white] upload); the   */
+/* pattern IS the diagnosis, so every row is reported, not just the   */
+/* first failure.                                                      */
+/* ------------------------------------------------------------------ */
+
+static GLuint g_rowmap4Texture;
+static GLuint g_rowmap8Texture;
+static GLuint g_rowmap16Texture;
+
+static const UBYTE g_rowmap4Rows[4][4] = {
+    { 200, 0, 0, 255 }, { 0, 200, 0, 255 },
+    { 0, 0, 200, 255 }, { 255, 255, 255, 255 }
+};
+
+static const UBYTE g_rowmap2Rows[2][4] = {
+    { 10, 20, 30, 255 }, { 200, 210, 220, 255 }
+};
+
+/* Cell (cx, cy) of a WxH texture on the -0.9..0.9 quad (cy = 0 bottom). */
+static void CellNDCWH(int w, int h, int cx, int cy, GLfloat *x, GLfloat *y)
+{
+    *x = -0.9f + ((GLfloat)cx + 0.5f) * (1.8f / (GLfloat)w);
+    *y = -0.9f + ((GLfloat)cy + 0.5f) * (1.8f / (GLfloat)h);
+}
+
+static void UploadRowmap(GLuint *slot, int w, int h,
+                         const UBYTE rows[4][4])
+{
+    UBYTE texels[16 * 2 * 4];
+    int x, y;
+
+    for (y = 0; y < h; ++y)
+        for (x = 0; x < w; ++x) {
+            texels[(y * w + x) * 4 + 0] = rows[y][0];
+            texels[(y * w + x) * 4 + 1] = rows[y][1];
+            texels[(y * w + x) * 4 + 2] = rows[y][2];
+            texels[(y * w + x) * 4 + 3] = rows[y][3];
+        }
+    if (!*slot) {
+        glGenTextures(1, slot);
+        glBindTexture(GL_TEXTURE_2D, *slot);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, *slot);
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, texels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+}
+
+static void DrawRowmapScene(int w, int h, GLuint *slot,
+                            const UBYTE rows[4][4])
+{
+    UploadRowmap(slot, w, h, rows);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    DrawFullscreenQuad();
+}
+
+static void DrawRowIdentity(ULONG frame)
+{
+    (void)frame;
+    DrawRowmapScene(4, 4, &g_rowmap4Texture, g_rowmap4Rows);
+}
+
+static void CheckRowCells(CheckLog *log, const char *id,
+                          int w, int h, const UBYTE rows[4][4])
+{
+    GLfloat x, y;
+    char what[64];
+    int cy;
+
+    for (cy = 0; cy < h; ++cy) {
+        CellNDCWH(w, h, w / 2, cy, &x, &y);
+        sprintf(what, "%s.row%d", id, cy);
+        CheckRGB(log, what, x, y,
+                 (int)rows[cy][0], (int)rows[cy][1], (int)rows[cy][2],
+                 TEXFMT_TOL);
+    }
+}
+
+static GLboolean VerifyRowIdentity(char *detail)
+{
+    CheckLog log;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrawRowmapScene(4, 4, &g_rowmap4Texture, g_rowmap4Rows);
+    CheckRowCells(&log, "map4", 4, 4, g_rowmap4Rows);
+    DrawRowmapScene(8, 2, &g_rowmap8Texture, g_rowmap2Rows);
+    CheckRowCells(&log, "map8", 8, 2, g_rowmap2Rows);
+    DrawRowmapScene(16, 2, &g_rowmap16Texture, g_rowmap2Rows);
+    CheckRowCells(&log, "map16", 16, 2, g_rowmap2Rows);
+    if (log.failures)
+        strncpy(detail, log.first, 95);
+    else
+        sprintf(detail, "all rows identity-mapped at 4x4, 8x2 and 16x2");
+    return log.failures == 0;
+}
+
 #define QUAKE_PARTICLE_COUNT 24
 
 /* Quarter-wave-accurate sine table: keeps the animated particle field free
@@ -2927,6 +3040,10 @@ static MiniGLTest g_tests[] = {
      "Patch a resident texture with luminance and RGBA subimages.",
      "Patched regions turn white, surroundings stay grey; FAIL isolates the broken format.",
      DrawSubimageFormats, VerifySubimageFormats, AlwaysAvailable, GL_TRUE, {0}},
+    {"texture.row-identity", "TEXTURE", "ROW IDENTITY MAP",
+     "Upload distinct solid rows at 4x4, 8x2 and 16x2 and read one cell per row.",
+     "Every row reads back its own colour; shifted or stale rows name a pitch mismatch.",
+     DrawRowIdentity, VerifyRowIdentity, AlwaysAvailable, GL_TRUE, {0}},
     {"quake.alias-ogre", "QUAKE", "TEXTURED OGRE",
      "Render the real Quake Ogre mesh with its original game skin through "
      "its strided alias-array layout, alternating float and integer paths.",
