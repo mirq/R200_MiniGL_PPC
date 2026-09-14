@@ -1,0 +1,1551 @@
+; MiniGL quick regression package (AmigaDOS)
+; Usage:  Execute Work:ibdraw/regress AUTO    - all tests, no questions
+;         Execute Work:ibdraw/regress MANUAL - briefed, then Accept/Re-run/Finish/Reject
+; Optional 2nd arg: frames per test (default 60 auto, 600 manual)
+; Requires: Work:ibdraw/mgltestsuite + hostrun + hoststop deployed.
+; Each test gets a fresh 68k host; logs land in Work:ibdraw/regress/.
+; The shell is left in Work:ibdraw afterwards.
+
+FailAt 21
+If NOT EXISTS Work:ibdraw/mgltestsuite
+   Echo "Work:ibdraw/mgltestsuite missing - deploy the suite first."
+   Quit
+EndIf
+Set mode "$1"
+If "$mode" EQ "" Set mode "AUTO"
+Set frames "60"
+If "$mode" EQ "MANUAL" Set frames "600"
+Set ovf "$2"
+If "$ovf" NE "" Set frames "$ovf"
+Set stop ""
+Echo "*NMiniGL regression - mode=$mode frames=$frames*N"
+Delete >NIL: Work:ibdraw/regress ALL QUIET
+makedir >NIL: Work:ibdraw/regress
+CD Work:ibdraw
+; clear any orphan host from a previous crashed session
+Work:ibdraw/hoststop --orphan >NIL:
+
+; --- 1/31 system.dispatch ---
+If "$stop" EQ "1" Skip >end
+Set cur "system.dispatch"
+Set retried ""
+Echo "*N=== 1/31: system.dispatch ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Validate ABI version, table size, and runtime dispatch table.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_1
+mgltestsuite --test system.dispatch --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/system.dispatch.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_1
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/system.dispatch.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_1
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 2/31 primitives.triangle ---
+If "$stop" EQ "1" Skip >end
+Set cur "primitives.triangle"
+Set retried ""
+Echo "*N=== 2/31: primitives.triangle ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Draw and sample a solid immediate-mode triangle.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_2
+mgltestsuite --test primitives.triangle --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/primitives.triangle.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_2
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/primitives.triangle.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_2
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 3/31 depth.less ---
+If "$stop" EQ "1" Skip >end
+Set cur "depth.less"
+Set retried ""
+Echo "*N=== 3/31: depth.less ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Verify a near surface hides a later far surface.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_3
+mgltestsuite --test depth.less --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/depth.less.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_3
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/depth.less.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_3
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 4/31 blend.source-alpha ---
+If "$stop" EQ "1" Skip >end
+Set cur "blend.source-alpha"
+Set retried ""
+Echo "*N=== 4/31: blend.source-alpha ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Compare half-alpha, opaque, and background pixels.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_4
+mgltestsuite --test blend.source-alpha --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/blend.source-alpha.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_4
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/blend.source-alpha.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_4
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 5/31 matrices.translate ---
+If "$stop" EQ "1" Skip >end
+Set cur "matrices.translate"
+Set retried ""
+Echo "*N=== 5/31: matrices.translate ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Verify modelview translation moves triangle coverage.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_5
+mgltestsuite --test matrices.translate --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/matrices.translate.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_5
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/matrices.translate.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_5
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 6/31 arrays.draw-arrays ---
+If "$stop" EQ "1" Skip >end
+Set cur "arrays.draw-arrays"
+Set retried ""
+Echo "*N=== 6/31: arrays.draw-arrays ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render two equal triangles through glDrawArrays.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_6
+mgltestsuite --test arrays.draw-arrays --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/arrays.draw-arrays.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_6
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/arrays.draw-arrays.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_6
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 7/31 3d.rotating-cubes ---
+If "$stop" EQ "1" Skip >end
+Set cur "3d.rotating-cubes"
+Set retried ""
+Echo "*N=== 7/31: 3d.rotating-cubes ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Exercise perspective, modelview transforms, depth, and colored faces.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_7
+mgltestsuite --test 3d.rotating-cubes --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/3d.rotating-cubes.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_7
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/3d.rotating-cubes.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_7
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 8/31 benchmark.triangles ---
+If "$stop" EQ "1" Skip >end
+Set cur "benchmark.triangles"
+Set retried ""
+Echo "*N=== 8/31: benchmark.triangles ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Measure 64 immediate triangles including presentation.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_8
+mgltestsuite --test benchmark.triangles --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/benchmark.triangles.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_8
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/benchmark.triangles.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_8
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 9/31 lighting.availability ---
+If "$stop" EQ "1" Skip >end
+Set cur "lighting.availability"
+Set retried ""
+Echo "*N=== 9/31: lighting.availability ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Report whether optional ABI v4 lighting is available.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_9
+mgltestsuite --test lighting.availability --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/lighting.availability.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_9
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/lighting.availability.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_9
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 10/31 raster.prim-shade ---
+If "$stop" EQ "1" Skip >end
+Set cur "raster.prim-shade"
+Set retried ""
+Echo "*N=== 10/31: raster.prim-shade ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Draw every filled primitive type in both shade models and compare each against its exact expected colour.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_10
+mgltestsuite --test raster.prim-shade --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/raster.prim-shade.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_10
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/raster.prim-shade.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_10
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 11/31 raster.point-size ---
+If "$stop" EQ "1" Skip >end
+Set cur "raster.point-size"
+Set retried ""
+Echo "*N=== 11/31: raster.point-size ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render points at 1, 2, 4, 8 and 16 pixels and measure the rendered width of each.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_11
+mgltestsuite --test raster.point-size --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/raster.point-size.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_11
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/raster.point-size.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_11
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 12/31 blend.texture-alpha ---
+If "$stop" EQ "1" Skip >end
+Set cur "blend.texture-alpha"
+Set retried ""
+Echo "*N=== 12/31: blend.texture-alpha ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Modulated 1x1 alpha texture blended over known backgrounds, as used by Quake's screen flash.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_12
+mgltestsuite --test blend.texture-alpha --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/blend.texture-alpha.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_12
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/blend.texture-alpha.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_12
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 13/31 texture.luminance ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.luminance"
+Set retried ""
+Echo "*N=== 13/31: texture.luminance ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Upload a 4-texel GL_LUMINANCE ramp and render it back.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_13
+mgltestsuite --test texture.luminance --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.luminance.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_13
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.luminance.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_13
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 14/31 texture.luminance-alpha ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.luminance-alpha"
+Set retried ""
+Echo "*N=== 14/31: texture.luminance-alpha ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Upload GL_LUMINANCE_ALPHA texels and blend them over black.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_14
+mgltestsuite --test texture.luminance-alpha --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.luminance-alpha.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_14
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.luminance-alpha.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_14
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 15/31 texture.alpha ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.alpha"
+Set retried ""
+Echo "*N=== 15/31: texture.alpha ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Upload GL_ALPHA texels, modulate with white, and blend over black.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_15
+mgltestsuite --test texture.alpha --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.alpha.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_15
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.alpha.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_15
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 16/31 texture.bgra ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.bgra"
+Set retried ""
+Echo "*N=== 16/31: texture.bgra ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Upload an MGL_UBYTE_BGRA texture with distinct bytes per channel.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_16
+mgltestsuite --test texture.bgra --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.bgra.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_16
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.bgra.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_16
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 17/31 texture.argb ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.argb"
+Set retried ""
+Echo "*N=== 17/31: texture.argb ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Upload an MGL_UBYTE_ARGB texture with distinct bytes per channel.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_17
+mgltestsuite --test texture.argb --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.argb.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_17
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.argb.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_17
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 18/31 texture.subimage-formats ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.subimage-formats"
+Set retried ""
+Echo "*N=== 18/31: texture.subimage-formats ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Patch a resident texture with luminance and RGBA subimages.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_18
+mgltestsuite --test texture.subimage-formats --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.subimage-formats.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_18
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.subimage-formats.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_18
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 19/31 texture.row-identity ---
+If "$stop" EQ "1" Skip >end
+Set cur "texture.row-identity"
+Set retried ""
+Echo "*N=== 19/31: texture.row-identity ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Upload distinct solid rows at 4x4, 8x2 and 16x2 and read one cell per row.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_19
+mgltestsuite --test texture.row-identity --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/texture.row-identity.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_19
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/texture.row-identity.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_19
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 20/31 quake.alias-ogre ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.alias-ogre"
+Set retried ""
+Echo "*N=== 20/31: quake.alias-ogre ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render the real Quake Ogre mesh with its original game skin through its strided alias-array layout, alternating float and integer paths.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_20
+mgltestsuite --test quake.alias-ogre --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.alias-ogre.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_20
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.alias-ogre.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_20
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 21/31 quake.alias-ogre-x4-static ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.alias-ogre-x4-static"
+Set retried ""
+Echo "*N=== 21/31: quake.alias-ogre-x4-static ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render four real Quake Ogre meshes at mixed depths with fixed transforms.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_21
+mgltestsuite --test quake.alias-ogre-x4-static --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.alias-ogre-x4-static.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_21
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.alias-ogre-x4-static.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_21
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 22/31 quake.alias-ogre-x4-spin ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.alias-ogre-x4-spin"
+Set retried ""
+Echo "*N=== 22/31: quake.alias-ogre-x4-spin ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render four real Quake Ogre meshes spinning independently at mixed depths.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_22
+mgltestsuite --test quake.alias-ogre-x4-spin --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.alias-ogre-x4-spin.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_22
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.alias-ogre-x4-spin.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_22
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 23/31 quake.alias-ogre-x4-advance ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.alias-ogre-x4-advance"
+Set retried ""
+Echo "*N=== 23/31: quake.alias-ogre-x4-advance ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render four real Quake Ogre meshes moving toward and away from the viewer.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_23
+mgltestsuite --test quake.alias-ogre-x4-advance --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.alias-ogre-x4-advance.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_23
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.alias-ogre-x4-advance.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_23
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 24/31 quake.world-stream ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.world-stream"
+Set retried ""
+Echo "*N=== 24/31: quake.world-stream ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Sustain one large merged world-style triangle list to exhaust and rotate streaming segments.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_24
+mgltestsuite --test quake.world-stream --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.world-stream.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_24
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.world-stream.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_24
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 25/31 quake.lightmap-static ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.lightmap-static"
+Set retried ""
+Echo "*N=== 25/31: quake.lightmap-static ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render Quake's two-pass ZERO/SRC_COLOR lightmap without texture updates.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_25
+mgltestsuite --test quake.lightmap-static --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.lightmap-static.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_25
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.lightmap-static.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_25
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 26/31 quake.lightmap-update ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.lightmap-update"
+Set retried ""
+Echo "*N=== 26/31: quake.lightmap-update ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Replace a resident lightmap every frame and apply Quake's ZERO/SRC_COLOR pass.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_26
+mgltestsuite --test quake.lightmap-update --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.lightmap-update.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_26
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.lightmap-update.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_26
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 27/31 quake.particles-mixed ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.particles-mixed"
+Set retried ""
+Echo "*N=== 27/31: quake.particles-mixed ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Mix TCL world triangles with 24 animated blended points orbiting between world draws.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_27
+mgltestsuite --test quake.particles-mixed --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.particles-mixed.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_27
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.particles-mixed.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_27
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 28/31 quake.world-room-walk ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.world-room-walk"
+Set retried ""
+Echo "*N=== 28/31: quake.world-room-walk ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Walk the real Quake e1m1 entrance hall out and back: world geometry plus doors in texture-chained batches, depth-tested, no effects.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_28
+mgltestsuite --test quake.world-room-walk --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.world-room-walk.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_28
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.world-room-walk.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_28
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 29/31 quake.fog-linear ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.fog-linear"
+Set retried ""
+Echo "*N=== 29/31: quake.fog-linear ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Render near, middle, and far surfaces with Quake-style linear vertex fog.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_29
+mgltestsuite --test quake.fog-linear --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.fog-linear.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_29
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.fog-linear.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_29
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 30/31 quake.pickup-flash ---
+If "$stop" EQ "1" Skip >end
+Set cur "quake.pickup-flash"
+Set retried ""
+Echo "*N=== 30/31: quake.pickup-flash ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Pulse Quake's textured device-coordinate MGL_FLATFAN blend: a green burst fading over 0.75 s every 3 s, plain scene between pulses.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_30
+mgltestsuite --test quake.pickup-flash --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/quake.pickup-flash.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_30
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/quake.pickup-flash.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_30
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+; --- 31/31 present.stability ---
+If "$stop" EQ "1" Skip >end
+Set cur "present.stability"
+Set retried ""
+Echo "*N=== 31/31: present.stability ==="
+If "$mode" EQ "MANUAL" Echo "YOU WILL SEE: Draw and present one identical frame repeatedly and check the result never drifts.*NStarting in 3 s..."
+If "$mode" EQ "MANUAL" Delay 150
+Delay 40
+Run >NIL: Execute Work:ibdraw/hostrun
+Delay 150
+Lab run_31
+mgltestsuite --test present.stability --fullscreen --width 640 --height 480 --depth 16 --frames $frames >Work:ibdraw/regress/present.stability.log
+If ERROR
+   If "$retried" EQ ""
+      Echo "   * setup error - fresh host, retrying once *"
+      Set retried "1"
+      Delay 50
+      Run >NIL: Execute Work:ibdraw/hostrun
+      Delay 150
+      Skip >run_31
+   EndIf
+      Echo "   * SETUP FAILED - see log; cleaning orphan host *"
+      Work:ibdraw/hoststop --orphan >NIL:
+EndIf
+Type Work:ibdraw/regress/present.stability.log
+If "$mode" EQ "MANUAL"
+   Ask "    Accept this result? (y/n)"
+   If WARN
+      Ask "    Run this test again? (y/n)"
+      If WARN
+         Ask "    Finish testing (skip all remaining)? (y/n)"
+         If WARN
+            Set stop "1"
+            Echo "    REJECTED - moving to next test*N"
+         Else
+            Echo "    FINISH chosen - skipping remaining tests*N"
+         EndIf
+      Else
+         Set retried "1"
+         Delay 50
+         Run >NIL: Execute Work:ibdraw/hostrun
+         Delay 150
+         Skip >run_31
+      EndIf
+   Else
+      Echo "    accepted.*N"
+   EndIf
+EndIf
+
+Lab end
+Echo "*N===== Regression run complete ====="
+Echo "Logs: Work:ibdraw/regress/ (one per test)"
+Echo "Machine-readable records: Type T:minigl-testsuite.log"
+List Work:ibdraw/regress FILES
