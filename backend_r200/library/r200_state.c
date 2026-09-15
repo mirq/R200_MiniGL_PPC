@@ -1064,6 +1064,20 @@ void Lib_glEnable(GLenum capability)
         if (context->zOffsetEnabled) goto noop;
         context->zOffsetEnabled = TRUE;
         semanticChange = TRUE;
+    } else if (capability == MGL_PERSPECTIVE_MAPPING ||
+               (capability >= 200 && capability <= 400)) {
+        /* Quake toggles MGL_PERSPECTIVE_MAPPING per-frame (R_SetupGL vs
+         * GL_Set2D). R200 always does perspective-correct; flatfan is
+         * already affine. Accept any MGL-range enum as no-op to avoid
+         * spurious INVALID_ENUM from enum-parity shifts. */
+        goto noop;
+    } else if (capability == GL_DITHER) {
+        /* VID_Init enables dithering before GL_Init and every texture
+         * load (gl_vidamiga.c:738). The Radeon3D semantic interface has
+         * no dither lever, so accept it as an advisory no-op; rejecting
+         * it set a sticky INVALID_ENUM that the game's undrained load
+         * path misattributed to every later texture upload. */
+        goto noop;
     } else if (capability == GL_LIGHTING) {
         if (!(context->radeonCaps & RADEON3D_CAP_HW_LIGHTING)) {
             SetError(context, GL_INVALID_OPERATION);
@@ -1161,6 +1175,12 @@ void Lib_glDisable(GLenum capability)
         if (!context->zOffsetEnabled) goto noop;
         context->zOffsetEnabled = FALSE;
         semanticChange = TRUE;
+    } else if (capability == MGL_PERSPECTIVE_MAPPING ||
+               (capability >= 200 && capability <= 400)) {
+        goto noop;
+    } else if (capability == GL_DITHER) {
+        /* Advisory no-op, see Lib_glEnable. */
+        goto noop;
     } else if (capability == GL_LIGHTING) {
         if (!(context->radeonCaps & RADEON3D_CAP_HW_LIGHTING)) {
             SetError(context, GL_INVALID_OPERATION);

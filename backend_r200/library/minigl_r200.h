@@ -76,6 +76,7 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_DEPTH_RANGE 41U
 #define GL_DEPTH_TEST 43U
 #define GL_DEPTH_WRITEMASK 44U
+#define GL_DITHER 45U
 #define GL_DONT_CARE 46U
 #define GL_DOUBLE 47U
 #define GL_EQUAL 56U
@@ -231,6 +232,7 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define MGL_FLATSTRIP 228U
 #define MGL_W_ONE_HINT 230U
 #define MGL_Z_OFFSET 231U
+#define MGL_PERSPECTIVE_MAPPING 322U
 #define MGL_LOCK_AUTOMATIC 224U
 #define MGL_LOCK_MANUAL 225U
 #define MGL_LOCK_SMART 226U

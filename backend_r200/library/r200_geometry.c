@@ -2072,8 +2072,8 @@ BOOL CaptureMtexPolygon(struct MiniGLR200Context *context)
 
     if (context->vertexCount < 3UL)
         return FALSE;
-    if (context->vertexCount > 4UL)
-        return FALSE; /* large fans take the normal path */
+    if (context->vertexCount > 16UL)
+        return FALSE; /* V19 queued arbitrary n-gons; R200 queue now holds up to 16 */
     if (!context->mtexQueue) {
         capacity = MtexQueueCapacity();
         context->mtexQueue = AllocMem(capacity * sizeof(struct MtexPolygon),
@@ -2165,6 +2165,7 @@ void FlushMtexBuffer(struct MiniGLR200Context *context, GLenum blendSource,
         BOOL passFailed = FALSE;
 
         /* Pass 1: unit 0 only. */
+        context->textureEnabled[0] = TRUE;
         context->textureEnabled[1] = FALSE;
         context->activeTexture = 0;
         BumpSemanticStateSerial(context);
@@ -2238,6 +2239,7 @@ void Lib_glBegin(GLenum primitive)
     context->insideBegin = TRUE;
     context->primitive = primitive;
     context->vertexCount = 0;
+    context->texCoordFeedMask = 0;
 }
 
 static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
@@ -2289,8 +2291,16 @@ void Lib_glEnd(void)
     }
     context->insideBegin = FALSE;
     /* V19 parity: GL_POLYGON with texture unit 1 enabled goes to the
-     * two-pass multitexture queue instead of drawing immediately. */
+     * two-pass multitexture queue instead of drawing immediately --
+     * but only for the classic fake-multitexture feed order, where unit 0
+     * is fed explicitly and unit 1 implicitly (glMultiTexCoord2fARB on
+     * unit 0 while unit 1 is active, then glTexCoord2f, as Quake's
+     * R_RenderBrushPoly/mglMtexTV23fv does). A client that drives unit 1
+     * explicitly with glMultiTexCoord2fARB (Quake's R_DrawSequentialPoly
+     * real-multitexture path) draws immediately through both units, like
+     * QUADS/TRIANGLE_FAN always do. */
     if (context->primitive == GL_POLYGON && context->textureEnabled[1] &&
+        !(context->texCoordFeedMask & 2UL) &&
         CaptureMtexPolygon(context))
         return;
     if (!EmitPrimitive(context, context->vertices, context->vertexCount,
@@ -2302,8 +2312,10 @@ void Lib_glTexCoord2f(GLfloat s, GLfloat t)
 {
     struct MiniGLR200Context *context=CurrentContext();
     if (context) {
-        context->currentS[0]=s;
-        context->currentT[0]=t;
+        ULONG unit = context->activeTexture;
+        if (unit > 1UL) unit = 0;
+        context->currentS[unit]=s;
+        context->currentT[unit]=t;
     }
 }
 void Lib_glTexCoord2fv(GLfloat *value)
@@ -2351,6 +2363,10 @@ void Lib_glMultiTexCoord2fARB(GLenum unit, GLfloat s, GLfloat t)
     }
     index=(ULONG)(unit-GL_TEXTURE0_ARB);
     context->currentS[index]=s; context->currentT[index]=t;
+    /* Explicit per-unit feed (see Lib_glEnd): distinguishes Quake's real
+     * dual-unit path from the classic fake-multitexture feed order. The
+     * legacy implicit glTexCoord2f deliberately does not set this. */
+    context->texCoordFeedMask |= 1UL << index;
 }
 
 void Lib_glMultiTexCoord2fvARB(GLenum unit, GLfloat *value)

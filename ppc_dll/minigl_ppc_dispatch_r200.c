@@ -91,10 +91,46 @@ void R200ABI3DeleteContext(void)
 #define Lib_mglWriteShotPPM R200PPCDispatchWriteShotPPM
 #define Lib_mglEmergencyCloseScreen R200PPCDispatchEmergencyCloseScreen
 
+/* GLTexImage2D/glTexSubImage2D are the only table entries with more than
+ * eight arguments; PowerOpen (vbcc/WarpOS) clients pass the overflow
+ * arguments at different stack offsets than the SysV ABI this DLL is
+ * built with. Route both slots through the ABI-bridging trampolines in
+ * backend_r200/client/r200_poweropen_bridge.s. */
+extern void R200PowerTexImage2D(void);
+extern void R200PowerTexSubImage2D(void);
+#define R200_TABLE_GLTexImage2D R200PowerTexImage2D
+#define R200_TABLE_GLTexSubImage2D R200PowerTexSubImage2D
+
 #include "../backend_r200/generated/dispatch_table_abi3.c"
 
 typedef char R200DispatchABI3SizeCheck[
     sizeof(MGLDispatchTable) == 0x22c ? 1 : -1];
+
+/* PowerOpen (vbcc) client ABI bridge -- see MGLTexImage2DArgs in
+ * include/libraries/minigl_dispatch.h. PowerOpen places arguments 9+
+ * at different stack offsets than the SysV ABI this DLL is built with,
+ * so a vbcc client cannot call the ten-argument table entries
+ * directly. These two helpers take only register arguments (context +
+ * one pointer), which both ABIs pass identically, and forward to the
+ * normal frontend entry points. Exported by name; clients fetch them
+ * with dllGetProcAddress(). */
+void __saveds MGLTexImage2DBlock(GLcontext context,
+                                 const MGLTexImage2DArgs *args)
+{
+    (void)context;
+    Lib_glTexImage2D(args->target, args->level, args->internalformat,
+                     args->width, args->height, args->border,
+                     args->format, args->type, args->pixels);
+}
+
+void __saveds MGLTexSubImage2DBlock(GLcontext context,
+                                    const MGLTexSubImage2DArgs *args)
+{
+    (void)context;
+    Lib_glTexSubImage2D(args->target, args->level, args->xoffset,
+                        args->yoffset, args->width, args->height,
+                        args->format, args->type, args->pixels);
+}
 
 void R200PPCDispatchExit(void)
 {
@@ -176,6 +212,8 @@ dll_tExportSymbol DLL_ExportSymbols[] = {
     { (void *)dllLoadResource,       (char *)"dllLoadResource" },
     { (void *)dllFreeResource,       (char *)"dllFreeResource" },
     { (void *)MGLGetDispatchTable,   (char *)"MGLGetDispatchTable" },
+    { (void *)MGLTexImage2DBlock,    (char *)"MGLTexImage2DBlock" },
+    { (void *)MGLTexSubImage2DBlock, (char *)"MGLTexSubImage2DBlock" },
     { (void *)MGLPPCClientAttach,    (char *)"MGLPPCClientAttach" },
     { (void *)MGLPPCClientDetach,    (char *)"MGLPPCClientDetach" },
     { NULL, NULL }

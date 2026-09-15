@@ -1,0 +1,71 @@
+diff --git a/examples/milestone_ballonly_library.c b/examples/milestone_ballonly_library.c
+index 1e79427..eb53dc9 100644
+--- a/examples/milestone_ballonly_library.c
++++ b/examples/milestone_ballonly_library.c
+@@ -32,9 +32,14 @@
+ #include <proto/minigl.h>
+ #include <math.h>
+ #include <stdio.h>
++#include <stdlib.h> /* atoi(): implicit declaration is an error under gcc 15 */
++/* Native AmigaOS structures (DateStamp) need two-byte packing on the
++ * WarpOS GCC toolchain; the MiniGL headers above must NOT be packed. */
++#pragma pack(push,2)
+ #include <proto/graphics.h>
+ #include <proto/dos.h>
+ #include <dos/dos.h>
++#pragma pack(pop)
+ 
+ #ifndef D
+ #ifdef DEBUG
+diff --git a/examples/milestone_bounce_interactive_library.c b/examples/milestone_bounce_interactive_library.c
+index bf7e0e8..6fdae2c 100644
+--- a/examples/milestone_bounce_interactive_library.c
++++ b/examples/milestone_bounce_interactive_library.c
+@@ -34,8 +34,14 @@
+ #include <proto/minigl.h>
+ #include <math.h>
+ #include <stdio.h>
++#include <stdlib.h> /* atoi(): implicit declaration is an error under gcc 15 */
++/* Native AmigaOS structures (Window, RastPort, GfxBase) need two-byte
++ * packing on the WarpOS GCC toolchain; the MiniGL headers above must NOT
++ * be packed. */
++#pragma pack(push,2)
+ #include <proto/graphics.h>
+ #include <proto/exec.h>
++#pragma pack(pop)
+ 
+ #ifndef D
+ #ifdef DEBUG
+@@ -62,9 +68,10 @@ static GLfloat G = -0.05f;
+ static GLfloat rot = 0.0f;
+ static GLboolean do_cage = GL_TRUE;
+ 
+-#ifndef __GNUC__
++/* Always defined: this toolchain has no library auto-open, and main() calls
++ * OpenLibrary("graphics.library") itself regardless of compiler. With the
++ * former #ifndef __GNUC__ guard GfxBase was an undefined symbol at link. */
+ struct GfxBase *GfxBase = NULL;
+-#endif
+ 
+ /* stricmp is not provided by every GCC/libnix configuration. */
+ static int local_stricmp(const char *a, const char *b)
+diff --git a/examples/milestone_gears_stats_library.c b/examples/milestone_gears_stats_library.c
+index 7470d4c..973d642 100644
+--- a/examples/milestone_gears_stats_library.c
++++ b/examples/milestone_gears_stats_library.c
+@@ -54,10 +54,15 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
++/* Native AmigaOS structures (DateStamp, Window, RastPort, GfxBase) need
++ * two-byte packing on the WarpOS GCC toolchain; the MiniGL headers above
++ * must NOT be packed. */
++#pragma pack(push,2)
+ #include <proto/graphics.h>
+ #include <proto/dos.h>
+ #include <dos/dos.h>
+ #include <proto/exec.h>
++#pragma pack(pop)
+ 
+ #ifndef D
+ #define D(x) do { printf x; } while (0)

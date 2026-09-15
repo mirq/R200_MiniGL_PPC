@@ -186,6 +186,16 @@ def main():
 
     externs, thunks, entries, unsupported = [], [], [], []
 
+    # Entries overridable by the dispatcher. GLTexImage2D/glTexSubImage2D
+    # have more than eight arguments, where the PowerOpen ABI (vbcc/WarpOS
+    # clients) and the SysV ABI (this GCC-built DLL) disagree on stack
+    # argument locations; the R200 dispatcher replaces these two table
+    # slots with ABI-bridging assembly trampolines.
+    OVERRIDABLE_ENTRIES = {
+        "GLTexImage2D": "R200_TABLE_GLTexImage2D",
+        "GLTexSubImage2D": "R200_TABLE_GLTexSubImage2D",
+    }
+
     for ret, name, args in fields:
         if name in SPECIAL:
             _, extern, thunk = SPECIAL[name]
@@ -207,7 +217,7 @@ def main():
             body = "    (void)context;\n" if drops_context else ""
             body += f"    {'return ' if ret != 'void' else ''}{call};"
             thunks.append(f"static {ret} R200_{name}({params})\n{{\n{body}\n}}")
-            entries.append("R200_" + name)
+            entries.append(OVERRIDABLE_ENTRIES.get(name, "R200_" + name))
             continue
 
         # No backend implementation: raise GL_INVALID_OPERATION and return zero.
@@ -231,7 +241,16 @@ def main():
         + "\n */\n\n"
     )
     out.append("\n\n".join(thunks))
-    out.append("\n\nconst MGLDispatchTable MiniGLDispatchTable = {\n")
+    out.append(
+        "\n\n/* Overridable ABI-bridge slots (see OVERRIDABLE_ENTRIES). */\n"
+        "#ifndef R200_TABLE_GLTexImage2D\n"
+        "#define R200_TABLE_GLTexImage2D R200_GLTexImage2D\n"
+        "#endif\n"
+        "#ifndef R200_TABLE_GLTexSubImage2D\n"
+        "#define R200_TABLE_GLTexSubImage2D R200_GLTexSubImage2D\n"
+        "#endif\n"
+    )
+    out.append("\nconst MGLDispatchTable MiniGLDispatchTable = {\n")
     out.append("    MINIGL_DISPATCH_ABI_VERSION,\n")
     out.append("    (ULONG)sizeof(MGLDispatchTable),\n")
     out.append("    MINIGL_BACKEND_FLAG_R200,\n")

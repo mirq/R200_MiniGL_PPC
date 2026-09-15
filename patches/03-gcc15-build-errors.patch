@@ -1,0 +1,38 @@
+diff --git a/hyperion_dll/dll.c b/hyperion_dll/dll.c
+index e0c9b2e..364f743 100644
+--- a/hyperion_dll/dll.c
++++ b/hyperion_dll/dll.c
+@@ -141,7 +141,7 @@ void *dllInternalLoadLibrary(char *filename,char *portname,int raiseusecount)
+ 		SystemTags(commandline,
+ 			SYS_Asynch, TRUE,
+ 			SYS_Output, output,
+-			SYS_Input,  NULL, //FIXME: some dll's might need stdin
++			SYS_Input,  0L, //FIXME: some dll's might need stdin (0L: pointer NULL in a ULONG tag array is an error under gcc 15)
+ 			NP_StackSize, 10000, //Messagehandler doesn't need a big stack (FIXME: but DLL_(De)Init might)
+ 			TAG_DONE);
+ 
+diff --git a/mglQ3/src/matrix.c b/mglQ3/src/matrix.c
+index 654ceca..a172b1f 100644
+--- a/mglQ3/src/matrix.c
++++ b/mglQ3/src/matrix.c
+@@ -16,6 +16,7 @@
+ #include <math.h>
+ 
+ #include <stdlib.h>
++#include <stdio.h> /* printf in the MGLPrintMatrix* diagnostics (was only included under __VBCC__) */
+ 
+ #ifdef __VBCC__
+ #include <stdio.h>
+diff --git a/mglQ3/src/context.c b/mglQ3/src/context.c
+index 5258f38..bf92bfe 100644
+--- a/mglQ3/src/context.c
++++ b/mglQ3/src/context.c
+@@ -68,6 +68,8 @@ static GLboolean newGuardBand = GL_FALSE;	// Default: guardband clipping is off
+ 
+ static struct TagItem tags[7];
+ 
++extern struct Library *UtilityBase; /* defined in init.c */
++
+ static GLboolean sys_MaybeOpenVidLibs(void)
+ {
+ 	#ifdef __PPC__

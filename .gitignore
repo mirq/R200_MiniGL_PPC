@@ -1,0 +1,5 @@
+# Runtime / evidence logs — raw captures, not for version control.
+# Keep the *.md summaries (README.md, SESSION.md, ANALYSIS.md), drop raw logs.
+*.log
+*.log.*
+logs/

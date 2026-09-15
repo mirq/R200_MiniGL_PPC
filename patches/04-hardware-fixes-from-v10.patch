@@ -1,0 +1,97 @@
+diff --git a/mglQ3/src/aclip.c b/mglQ3/src/aclip.c
+index 329c036..3d95e3c 100644
+--- a/mglQ3/src/aclip.c
++++ b/mglQ3/src/aclip.c
+@@ -661,7 +661,14 @@ int AE_ClipTriangle(GLcontext context, PolyBuffer *in, PolyBuffer *out, int *cli
+ 	{
+ 		DOCLIP_F(MGL_CLIP_NEGW, ClipWZero);
+ 
+-		if((or_codes & MGL_CLIP_NEGW) && (or_codes != MGL_CLIP_NEGW))
++		/* The W-zero clip creates vertices at w=CLIP_EPS whose outcodes
++		 * (near/left/right) MUST be folded back into or_codes even when the
++		 * triangle's only clip bit was NEGW: a large polygon with one
++		 * behind-camera vertex and on-screen ones otherwise (a floor) has
++		 * or_codes == NEGW exactly, and skipping the recompute sent 1/w=1e7
++		 * vertices to the Voodoo (whole-triangle texture corruption,
++		 * hardware-confirmed 2026-09-01). Same fix as the V10 tree. */
++		if(or_codes & MGL_CLIP_NEGW)
+ 		{
+ 		   	or_codes = context->VertexBuffer[a->verts[0]].outcode | context->VertexBuffer[a->verts[1]].outcode;
+ 
+@@ -686,7 +693,14 @@ int AE_ClipTriangle(GLcontext context, PolyBuffer *in, PolyBuffer *out, int *cli
+ 	{
+ 		DOCLIP(MGL_CLIP_NEGW, ClipWZero);
+ 
+-		if((or_codes & MGL_CLIP_NEGW) && (or_codes != MGL_CLIP_NEGW))
++		/* The W-zero clip creates vertices at w=CLIP_EPS whose outcodes
++		 * (near/left/right) MUST be folded back into or_codes even when the
++		 * triangle's only clip bit was NEGW: a large polygon with one
++		 * behind-camera vertex and on-screen ones otherwise (a floor) has
++		 * or_codes == NEGW exactly, and skipping the recompute sent 1/w=1e7
++		 * vertices to the Voodoo (whole-triangle texture corruption,
++		 * hardware-confirmed 2026-09-01). Same fix as the V10 tree. */
++		if(or_codes & MGL_CLIP_NEGW)
+ 		{
+ 		   	or_codes = context->VertexBuffer[a->verts[0]].outcode | context->VertexBuffer[a->verts[1]].outcode;
+ 
+diff --git a/mglQ3/src/context.c b/mglQ3/src/context.c
+index 3b23e30..5258f38 100644
+--- a/mglQ3/src/context.c
++++ b/mglQ3/src/context.c
+@@ -72,6 +72,44 @@ static GLboolean sys_MaybeOpenVidLibs(void)
+ {
+ 	#ifdef __PPC__
+ 
++	/* WarpOS direct dispatch (MiniGLOpen() -> dllLoadLibrary() ->
++	 * MGLGetDispatchTable()) never runs MGLInit() (init.c), which is the only
++	 * place stock MiniGL opens intuition/graphics/utility. Without these the
++	 * screen/window calls below go through NULL library bases (hardware-
++	 * confirmed crash on the A4000T, 2026-08-20). Same fix as the V10 tree. */
++	if (!IntuitionBase)
++	{
++		IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 0L);
++
++		if (!IntuitionBase)
++		{
++			printf("Error opening intuition.library\n");
++			return GL_FALSE;
++		}
++	}
++
++	if (!GfxBase)
++	{
++		GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0L);
++
++		if (!GfxBase)
++		{
++			printf("Error opening graphics.library\n");
++			return GL_FALSE;
++		}
++	}
++
++	if (!UtilityBase)
++	{
++		UtilityBase = OpenLibrary("utility.library", 0L);
++
++		if (!UtilityBase)
++		{
++			printf("Error opening utility.library\n");
++			return GL_FALSE;
++		}
++	}
++
+ 	if (!Warp3DPPCBase)
+ 	{
+ 		Warp3DPPCBase = OpenLibrary("Warp3DPPC.library", 2L);
+@@ -842,7 +880,10 @@ static GLboolean vid_OpenWindow(GLcontext context, int w, int h)
+ 	context->NumBuffers = 0;		// Indicates we're using a window
+ 	context->DoSync	    = GL_TRUE;		// Enable sync'ing
+ 
+-	context->w3dBitMap  = AllocBitMap(w, h, 8, BMF_MINPLANES|BMF_DISPLAYABLE, context->w3dWindow->RPort->BitMap);
++	/* Depth must follow the window's real bitmap (a hardcoded 8 gave slowly
++	 * cycling garbage colours on a 16-bit Voodoo3 screen, hardware-confirmed
++	 * 2026-08-20). Same fix as the V10 tree. */
++	context->w3dBitMap  = AllocBitMap(w, h, GetBitMapAttr(context->w3dWindow->RPort->BitMap, BMA_DEPTH), BMF_MINPLANES|BMF_DISPLAYABLE, context->w3dWindow->RPort->BitMap);
+ 
+ 	if (!context->w3dBitMap)
+ 		goto Duh;

@@ -465,8 +465,10 @@ void ConvertPixel(struct MiniGLR200Context *context,
         b=(UBYTE)((value&31)*255/31);
     } else if (type==MGL_UNSIGNED_SHORT_4_4_4_4) {
         UWORD value; CopyBytes(&value,source,2);
-        r=(UBYTE)(((value>>12)&15)*17); g=(UBYTE)(((value>>8)&15)*17);
-        b=(UBYTE)(((value>>4)&15)*17); a=(UBYTE)((value&15)*17);
+        /* See FrontendSourceToBGRA32: R200 HW is ARGB4444, Quake stores
+         * inverted light in the high nibble (alpha). */
+        a=(UBYTE)(((value>>12)&15)*17); r=(UBYTE)(((value>>8)&15)*17);
+        g=(UBYTE)(((value>>4)&15)*17); b=(UBYTE)((value&15)*17);
     } else if (format==GL_ALPHA) a=source[0],r=g=b=255;
     else if (format==GL_LUMINANCE) r=g=b=source[0];
     else if (format==GL_LUMINANCE_ALPHA) r=g=b=source[0],a=source[1];

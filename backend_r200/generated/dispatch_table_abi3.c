@@ -954,6 +954,14 @@ static void R200_MGLForceNewRenderPass(GLcontext context)
     (void)context;
 }
 
+/* Overridable ABI-bridge slots (see OVERRIDABLE_ENTRIES). */
+#ifndef R200_TABLE_GLTexImage2D
+#define R200_TABLE_GLTexImage2D R200_GLTexImage2D
+#endif
+#ifndef R200_TABLE_GLTexSubImage2D
+#define R200_TABLE_GLTexSubImage2D R200_GLTexSubImage2D
+#endif
+
 const MGLDispatchTable MiniGLDispatchTable = {
     MINIGL_DISPATCH_ABI_VERSION,
     (ULONG)sizeof(MGLDispatchTable),
@@ -1035,9 +1043,9 @@ const MGLDispatchTable MiniGLDispatchTable = {
     R200_GLTexCoordPointer,
     R200_GLTexEnvi,
     R200_GLTexGeni,
-    R200_GLTexImage2D,
+    R200_TABLE_GLTexImage2D,
     R200_GLTexParameteri,
-    R200_GLTexSubImage2D,
+    R200_TABLE_GLTexSubImage2D,
     R200_GLTranslated,
     R200_GLTranslatef,
     R200_GLULookAt,

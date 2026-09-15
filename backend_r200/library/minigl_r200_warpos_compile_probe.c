@@ -3345,11 +3345,7 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
         SetError(context, GL_INVALID_VALUE);
         return;
     }
-    if (context->activeTexture != 0) {
-        SetError(context, GL_INVALID_OPERATION);
-        return;
-    }
-    if (context->boundTexture[0] == texture &&
+    if (context->boundTexture[context->activeTexture] == texture &&
         (!texture || context->textures[texture].generated)) {
         if (context->perfEnabled) context->perf.stateNoops++;
         return;
@@ -3361,8 +3357,13 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
      * flush the deferred bind through HostTextureShadowSync() before
      * their mailbox command is PREPARED -- the flush must not run after
      * this wrapper's own control.value[] is set up, because a PlatformCall
-     * both reads and overwrites that shared buffer. */
-    if (FrontendPlatform.hostShadowTexture != texture)
+     * both reads and overwrites that shared buffer.
+     * Quake uploads lightmaps while unit 1 is active (gl_rsurf.c:2160),
+     * so binds must be allowed on either unit. Only unit 0's binding is
+     * shadowed to the host (semanticBoundTexture); unit 1's binding is
+     * local to the draw records. */
+    if (context->activeTexture == 0 &&
+        FrontendPlatform.hostShadowTexture != texture)
         FrontendPlatform.hostShadowDirty = TRUE;
     Lib_glBindTexture(target, texture);
 }
@@ -3699,11 +3700,15 @@ static ULONG FrontendSourceToBGRA32(GLenum format, GLenum type,
         g = ((value >> 5) & 63UL) * 255UL / 63UL;
         b = (value & 31UL) * 255UL / 31UL;
     } else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) {
+        /* Quake's 4444 lightmaps (gl_rsurf.c R_BuildLightMap) store the
+         * inverted light in the FIRST nibble of the first byte, which
+         * must become alpha for the SRC_ALPHA blend. The R200 hardware
+         * format is ARGB4444, so the high nibble is alpha. */
         ULONG value = ((ULONG)src[0] << 8) | src[1];
-        r = ((value >> 12) & 15UL) * 17UL;
-        g = ((value >> 8) & 15UL) * 17UL;
-        b = ((value >> 4) & 15UL) * 17UL;
-        a = (value & 15UL) * 17UL;
+        a = ((value >> 12) & 15UL) * 17UL;
+        r = ((value >> 8) & 15UL) * 17UL;
+        g = ((value >> 4) & 15UL) * 17UL;
+        b = (value & 15UL) * 17UL;
     } else if (format == GL_ALPHA) {
         a = src[0];
     } else if (format == GL_LUMINANCE) {
@@ -3754,18 +3759,37 @@ static GLenum FrontendWireSourceType(GLenum type)
  * single largest cost the profile host attributed to shared subimage
  * updates (HOST_SUBIMAGE native_texsub_us). */
 static void FrontendStageTextureBGRA(UBYTE *destination,
-                                     const UBYTE *source, GLsizei width,
-                                     GLsizei height, GLenum format,
-                                     GLenum type, ULONG sourceBytes,
-                                     ULONG rowBytes, ULONG sourceStride)
+                                      const UBYTE *source, GLsizei width,
+                                      GLsizei height, GLenum format,
+                                      GLenum type, ULONG sourceBytes,
+                                      ULONG rowBytes, ULONG sourceStride)
 {
     ULONG row, column;
+    /* Paletted sources (Quake's GL_Upload8_EXT path) expand through the
+     * PPC-side palette mirror that Lib_glColorTable maintains. The 68k
+     * native palette is never synchronized across CPUs (see protocol
+     * notes), so the frontend always canonicalizes indices to BGRA here
+     * and the wire never carries raw indices. Entries are stored in BGRA
+     * destination order (see ConvertPixel), hence the byte-exact copy. */
+    const UBYTE (*palette)[4] = NULL;
+    if (format == GL_COLOR_INDEX && type == GL_UNSIGNED_BYTE) {
+        struct MiniGLR200Context *cc = CurrentContext();
+        if (cc)
+            palette = (const UBYTE (*)[4])cc->colorTable;
+    }
     for (row = 0; row < (ULONG)height; ++row) {
         const UBYTE *srcRow = source + row * sourceStride;
         UBYTE *dstRow = destination + row * (ULONG)width * 4UL;
         for (column = 0; column < (ULONG)width; ++column) {
-            ULONG value = FrontendSourceToBGRA32(
-                format, type, srcRow + column * sourceBytes);
+            ULONG value;
+            if (palette) {
+                const UBYTE *entry = palette[srcRow[column * sourceBytes]];
+                value = ((ULONG)entry[0] << 24) | ((ULONG)entry[1] << 16) |
+                        ((ULONG)entry[2] << 8) | (ULONG)entry[3];
+            } else {
+                value = FrontendSourceToBGRA32(
+                    format, type, srcRow + column * sourceBytes);
+            }
             dstRow[column * 4UL + 0] = (UBYTE)(value >> 24);
             dstRow[column * 4UL + 1] = (UBYTE)(value >> 16);
             dstRow[column * 4UL + 2] = (UBYTE)(value >> 8);
@@ -3949,6 +3973,10 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
     return TRUE;
 }
 
+/* EXT_paletted_texture internalformat (Quake gl_draw.c:30). No stack
+ * header defines it; the value is fixed by the extension. */
+#define MGL_COLOR_INDEX8_EXT 0x80E5UL
+
 void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                                GLint internalFormat, GLsizei width,
                                GLsizei height, GLint border, GLenum format,
@@ -3968,23 +3996,45 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #endif
     BOOL chunkOk;
     BOOL sharedUpload = FALSE;
+    /* Paletted sources: Quake's GL_Upload8_EXT path (gl_draw.c:30,
+     * GL_COLOR_INDEX8_EXT internalformat with GL_COLOR_INDEX indices).
+     * Indices always expand through the frontend palette mirror into
+     * canonical BGRA staging (see FrontendStageTextureBGRA); the wire
+     * never carries raw indices because the native palette is not
+     * synchronized across CPUs. */
+    BOOL paletted = (format == GL_COLOR_INDEX && type == GL_UNSIGNED_BYTE);
+    /* Classic MiniGL clients (original V19 headers, 68k ports and
+     * MOS2WOS conversions like Silent Hill) use the pre-re-anchor tail
+     * numbering: BGRA 237, ARGB 238, 565 239, 4444 240, plus the legacy
+     * 16-bit pairing (format = GL_UNSIGNED_SHORT, type = 565/4444).
+     * Accept both numberings and normalise to the dispatch numbering
+     * the validation, wire translation and native backend use. */
+    if (format >= 237U && format <= 240U) format -= 4U;
+    if (type >= 239U && type <= 240U) type -= 4U;
+    if (format == GL_UNSIGNED_SHORT) {
+        if (type == MGL_UNSIGNED_SHORT_5_6_5) format = GL_RGB;
+        else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) format = GL_RGBA;
+    }
     if (!StateChangeAllowed(context)) return;
     if (!(FrontendPlatform.capabilities & MGLPPC_CAP_SEMANTIC_TEXTURE_V1)) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
     /* Internalformat accepts the same resolved list as the native
-     * backend (raw component counts 3/4 included, GL 1.0 style). The
-     * DIRECT path never forwards it, the shared/chunked paths pass it
-     * through to native glTexImage2D; validating here gives the client
-     * the documented error code at the documented call. */
+     * backend (raw component counts 3/4 included, GL 1.0 style), plus
+     * the EXT_paletted_texture internalformat for paletted uploads
+     * (always expanded PPC-side; never forwarded). The DIRECT path
+     * never forwards it, the shared/chunked paths pass it through to
+     * native glTexImage2D; validating here gives the client the
+     * documented error code at the documented call. */
     if (internalFormat != GL_RGB && internalFormat != GL_RGB5_A1 &&
         internalFormat != GL_RGBA &&
         internalFormat != 3 && internalFormat != 4 &&
         internalFormat != GL_ALPHA &&
         internalFormat != GL_LUMINANCE &&
         internalFormat != GL_LUMINANCE_ALPHA &&
-        internalFormat != GL_COLOR_INDEX) {
+        internalFormat != GL_COLOR_INDEX &&
+        internalFormat != (GLint)MGL_COLOR_INDEX8_EXT) {
         SetError(context, GL_INVALID_ENUM);
         return;
     }
@@ -4008,10 +4058,13 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     if (format != GL_RGB && format != GL_RGBA &&
         format != MGL_UBYTE_BGRA && format != MGL_UBYTE_ARGB &&
         format != GL_ALPHA && format != GL_LUMINANCE &&
-        format != GL_LUMINANCE_ALPHA) {
-        /* COLOR_INDEX is native-accepted but the frontend and native
-         * palettes are not synchronized across CPUs (see protocol
-         * notes); reject it here like the subimage path always has. */
+        format != GL_LUMINANCE_ALPHA && !paletted) {
+        SetError(context, GL_INVALID_ENUM);
+        return;
+    }
+    if (paletted && FrontendPlatform.peerProtocol < 15UL) {
+        /* Paletted uploads canonicalize PPC-side (see below); a
+         * protocol-14 host cannot carry the canonical BGRA packing. */
         SetError(context, GL_INVALID_ENUM);
         return;
     }
@@ -4045,12 +4098,13 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     PlatformProfile.textureCalls++;
     PlatformProfile.textureBytes += total;
 #endif
-    if (context->activeTexture != 0 || context->boundTexture[0] == 0) {
+    if (context->boundTexture[context->activeTexture] == 0) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
-    texture = &context->textures[context->boundTexture[0]];
+    texture = &context->textures[context->boundTexture[context->activeTexture]];
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
+        !paletted &&
         level == 0 && width <= 2048 && height <= 2048 &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
         !(width & (width - 1UL)) && !(height & (height - 1UL))) {
@@ -4140,10 +4194,17 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     /* Shared staging converts the client texels to canonical BGRA8888
      * on the PPC (native row-copy fast path) instead of handing raw
      * client rows to the 68k ConvertPixel loop. v14 hosts cannot carry
-     * the tail types, so only peer protocol 15 canonicalizes. */
+     * the tail types, so only peer protocol 15 canonicalizes --
+     * paletted uploads always canonicalize (indices expand through the
+     * frontend palette mirror; v14 paletted was rejected above). */
     ULONG sharedBytes = total;
     GLboolean canonical = FALSE;
-    if (FrontendPlatform.peerProtocol >= 15UL) {
+    ULONG stageSourceBytes = MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
+    if (paletted) {
+        sharedBytes = (ULONG)width * (ULONG)height * 4UL;
+        canonical = TRUE;
+        stageSourceBytes = 1UL;
+    } else if (FrontendPlatform.peerProtocol >= 15UL) {
         sharedBytes = (ULONG)width * (ULONG)height * 4UL;
         canonical = TRUE;
     }
@@ -4158,9 +4219,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         if (canonical)
             FrontendStageTextureBGRA(FrontendPlatform.textureUploadBuffer,
                                      source + sourceOffset, width, height,
-                                     format, type,
-                                     MGLPPC_TEXTURE_SOURCE_BYTES(format,
-                                                                 type),
+                                     format, type, stageSourceBytes,
                                      rowBytes, sourceStride);
         else
             FrontendCopyTextureBytes(FrontendPlatform.textureUploadBuffer,
@@ -4172,7 +4231,12 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                sizeof(FrontendPlatform.control));
         FrontendPlatform.control.value[0] = target;
         FrontendPlatform.control.value[1] = (ULONG)level;
-        FrontendPlatform.control.value[2] = (ULONG)internalFormat;
+        /* Paletted sources travel canonicalized (BGRA texels); the
+         * native side only validates internalformat, so forward plain
+         * GL_COLOR_INDEX instead of 0x80E5, which native rejects (its
+         * storage is BGRA32 either way). */
+        FrontendPlatform.control.value[2] = paletted
+            ? (ULONG)GL_COLOR_INDEX : (ULONG)internalFormat;
         FrontendPlatform.control.value[3] = (ULONG)width;
         FrontendPlatform.control.value[4] = (ULONG)height;
         if (canonical) {
@@ -4212,6 +4276,14 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     }
 
     if (!sharedUpload) {
+        /* Paletted uploads must go through canonical shared staging
+         * (the chunked path would hand raw indices to the unsynchronized
+         * native palette). Reaching here means staging was unavailable;
+         * fail loudly instead of uploading wrong texels. */
+        if (paletted) {
+            FrontendSetTransportError(context);
+            return;
+        }
 #if MGLPPC_PROFILE
         PlatformProfile.textureChunkedCalls++;
 #endif
@@ -4336,13 +4408,21 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     } else if (format == MGL_UNSIGNED_SHORT_4_4_4_4 && type == GL_UNSIGNED_SHORT) {
         format = GL_RGBA; type = MGL_UNSIGNED_SHORT_4_4_4_4;
     }
-    bpp = MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
+    /* Classic numbering/pairing compatibility, see TexImage2D. */
+    if (format >= 237U && format <= 240U) format -= 4U;
+    if (type >= 239U && type <= 240U) type -= 4U;
+    if (format == GL_UNSIGNED_SHORT) {
+        if (type == MGL_UNSIGNED_SHORT_5_6_5) format = GL_RGB;
+        else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) format = GL_RGBA;
+    }
+    bpp = (format == GL_COLOR_INDEX && type == GL_UNSIGNED_BYTE)
+              ? 1UL : MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
     if (!bpp) {
         SetError(context, GL_INVALID_ENUM);
         return;
     }
-    name = context->boundTexture[0];
-    if (context->activeTexture != 0 || !name || name >= MAX_TEXTURES) {
+    name = context->boundTexture[context->activeTexture];
+    if (!name || name >= MAX_TEXTURES) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
@@ -4389,8 +4469,11 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
      * patch PPC-side memory and re-commit the WHOLE image through the
      * direct pipeline (fresh BEGIN surface per commit, aperture-rate
      * fill, no 68k copyback, no native residency churn). Same
-     * eligibility rules as the direct TexImage path plus the shadow. */
+     * eligibility rules as the direct TexImage path plus the shadow.
+     * Paletted sources skip it (FrontendShadowPatch cannot expand
+     * indices); they take the canonical shared path below. */
     if (texture->shadow &&
+        format != GL_COLOR_INDEX &&
         texture->shadowWidth == (ULONG)texture->width &&
         texture->shadowHeight == (ULONG)texture->height &&
         level == 0 &&

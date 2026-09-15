@@ -50,6 +50,11 @@ void dllExportSymbol(dll_tSymbolQuery *sym)
 	*sym->SymbolPointer=0L;  //Symbol not found
 }
 
+/* Calling-convention of the client that opened this DLL. The PowerOpen
+ * and SysV PPC ABIs differ for arguments 9+; DLL entry points with more
+ * than eight parameters consult this (see r200_poweropen_bridge.s). */
+dll_tStackType dllClientStackType = DLLSTACK_SYSV;
+
 /* 
 ** The actual main function of a DLL
 */
@@ -109,6 +114,8 @@ int main(int argc, char **argv)
 	* private DLLs, or when stack frame compatibility can be 100% assured.
 	* FIXME: Not handled for now
 	*/
+					dllClientStackType =
+						msg->dllMessageData.dllOpen.StackType;
 					opencount++;
 					if(opencount>0)
 						expunge=0L;

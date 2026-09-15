@@ -75,6 +75,7 @@ OBJS = $(OBJDIR)/minigl_ppc_dispatch_r200.o \
        $(OBJDIR)/minigl_ppc_yield.o \
        $(OBJDIR)/minigl_ppc_serial.o \
        $(OBJDIR)/minigl_warpos_cache_flush.o \
+       $(OBJDIR)/r200_poweropen_bridge.o \
        $(OBJDIR)/dllstartup.o \
        $(OBJDIR)/dll.o \
        $(OBJDIR)/dllimport.o
@@ -137,6 +138,9 @@ $(OBJDIR)/minigl_ppc_serial.o: $(R200_CLIENT)/minigl_ppc_serial.s | $(OBJDIR)
 
 $(OBJDIR)/minigl_warpos_cache_flush.o: \
               $(R200_CLIENT)/minigl_warpos_cache_flush.s | $(OBJDIR)
+	$(CC) $(WOS_ARCH_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/r200_poweropen_bridge.o: $(R200_CLIENT)/r200_poweropen_bridge.s | $(OBJDIR)
 	$(CC) $(WOS_ARCH_CFLAGS) -c $< -o $@
 
 $(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c | $(OBJDIR)

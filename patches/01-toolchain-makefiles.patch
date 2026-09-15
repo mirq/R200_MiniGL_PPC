@@ -1,0 +1,213 @@
+diff --git a/Makefile.dll.gcc b/Makefile.dll.gcc
+index cdab506..5aa447b 100644
+--- a/Makefile.dll.gcc
++++ b/Makefile.dll.gcc
+@@ -1,20 +1,33 @@
+ # WarpOS MiniGL V19 PPC DLL using Hyperion's DLL runtime.
+ # The MiniGL implementation is the bundled mglQ3 tree.
+-CC      := ppc-amigaos-gcc
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
++# ppc-morphos-wos-toolchain), same adaptation as the V10 tree: -warpup ->
++# -DWARPUP --specs=warpup, -lppcamiga (vintage toolchain only) -> -lamigawos
++# (classic amiga.lib helpers CreatePort/DeletePort... used by hyperion_dll).
++CC      := ppc-morphos-gcc
+ CPU     ?= 604e
+ OBJDIR  ?= obj/dll
+ OUT     ?= bin/minigl_ppc.dll
++# Elf2Exe2 is an AmigaOS-native binary and cannot run on the Linux build host;
++# WarpOS's patched loader runs the raw linked PPC ELF directly (hardware-
++# confirmed with the V10 DLL in every port), so this is a no-op by default.
++ELF2EXE2 ?= true
+ 
+ MGLQ3_DIR ?= mglQ3
+ MGLQ3_LIB ?= $(MGLQ3_DIR)/lib/libmgl-wos.a
+ 
+-CFLAGS = -warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
++# include/mgl is the bundled core's own header set (mglQ3/include/mgl copied
++# over the shipped V3D-fork headers, which reference a nonexistent
++# backend/include/v3d_vertex.h). mglQ3/include itself is NOT on the path: its
++# 68k-style proto/, inline/, pragmas/ and Warp3D/ copies would shadow the
++# toolchain's PPC cross-call headers.
++CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
+          -fomit-frame-pointer \
+-         -I$(MGLQ3_DIR)/include -Iinclude -Ihyperion_dll
++         -Iinclude -Ihyperion_dll
+ 
+ # Override if the local WarpOS toolchain/backend needs additional libraries.
+ MGLQ3_LIBS  ?= -lm
+-WARPUP_LIBS ?= -lppcamiga
++WARPUP_LIBS ?= -lamigawos
+ 
+ OBJS = $(OBJDIR)/minigl_ppc_dispatch.o \
+        $(OBJDIR)/dllstartup.o \
+@@ -46,7 +59,7 @@ $(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+ 
+ $(OUT): $(OBJS) $(MGLQ3_LIB) | bin
+ 	$(CC) $(CFLAGS) $(OBJS) $(MGLQ3_LIB) $(MGLQ3_LIBS) $(WARPUP_LIBS) -o $@
+-	elf2exe2 $@ $@
++	$(ELF2EXE2) $@ $@
+ 
+ clean:
+ 	rm -rf $(OBJDIR) $(OUT)
+diff --git a/Makefile.dll.stub.gcc b/Makefile.dll.stub.gcc
+index 7a2a893..e970281 100644
+--- a/Makefile.dll.stub.gcc
++++ b/Makefile.dll.stub.gcc
+@@ -3,16 +3,18 @@
+ # The output uses the normal runtime filename so it can be copied directly
+ # in place of the real DLL for testing, but lives in bin/stub to avoid
+ # overwriting the real build.
+-CC      := ppc-amigaos-gcc
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay; see Makefile.dll.gcc.
++CC      := ppc-morphos-gcc
+ CPU     ?= 604e
+ OBJDIR  ?= obj/dll_stub
+ OUT     ?= bin/stub/minigl_ppc.dll
++ELF2EXE2 ?= true
+ 
+-CFLAGS = -warpup -mcpu=$(CPU) -O2 -mmultiple -Wall -Wno-unused-parameter \
++CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O2 -mmultiple -Wall -Wno-unused-parameter \
+          -fomit-frame-pointer \
+          -Iinclude -Ihyperion_dll
+ 
+-WARPUP_LIBS ?= -lppcamiga
++WARPUP_LIBS ?= -lamigawos
+ 
+ OBJS = $(OBJDIR)/minigl_ppc_dispatch_stub.o \
+        $(OBJDIR)/dllstartup.o \
+@@ -39,7 +41,7 @@ $(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+ 
+ $(OUT): $(OBJS) | bin/stub
+ 	$(CC) $(CFLAGS) $(OBJS) $(WARPUP_LIBS) -o $@
+-	elf2exe2 $@ $@
++	$(ELF2EXE2) $@ $@
+ 
+ clean:
+ 	rm -rf $(OBJDIR) $(OUT)
+diff --git a/Makefile.import.gcc b/Makefile.import.gcc
+index 12b0642..47fecf7 100644
+--- a/Makefile.import.gcc
++++ b/Makefile.import.gcc
+@@ -1,20 +1,24 @@
+ # WarpOS MiniGL V19 direct-dispatch client import library + shared test examples
+-CC      := ppc-amigaos-gcc
+-AR      := ppc-amigaos-ar
+-RANLIB  := ppc-amigaos-ranlib
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
++# ppc-morphos-wos-toolchain); see Makefile.dll.gcc for the flag/lib mapping.
++CC      := ppc-morphos-gcc
++AR      := ppc-morphos-ar
++RANLIB  := ppc-morphos-ranlib
+ 
+ CPU       ?= 604e
+ OBJDIR    ?= obj/import
+ BINDIR    ?= bin/examples
+ OUTLIB    ?= lib/libminigl_dispatch_ppc.a
+ 
+-COMMON_CFLAGS = -warpup -mcpu=$(CPU) -O2 -mmultiple -Wall \
++COMMON_CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O2 -mmultiple -Wall \
+                 -fomit-frame-pointer -Iinclude -Ihyperion_dll
+ CFLAGS    = $(COMMON_CFLAGS)
+ EX_CFLAGS = $(COMMON_CFLAGS)
+ 
+-# WarpOS support for Exec/DOS calls made by the examples and Hyperion loader.
+-WARPUP_LIBS ?= -lppcamiga
++# Exec/DOS support comes from the warpup specs' default libs (-lcwos
++# -lglosswos -lgccwos); -lamigawos adds the classic amiga.lib helpers the
++# Hyperion DLL runtime uses.
++WARPUP_LIBS ?= -lamigawos
+ MATH_LIBS   ?= -lm
+ 
+ OBJS = $(OBJDIR)/minigl_ppc_base.o \
+diff --git a/deps_build_minigl_v19.sh b/deps_build_minigl_v19.sh
+new file mode 100644
+index 0000000..271d5bc
+--- /dev/null
++++ b/deps_build_minigl_v19.sh
+@@ -0,0 +1,33 @@
++#!/bin/bash
++# Build the MiniGL_WOS V19 package with the ppc-morphos-wos-toolchain image:
++#   lib/libminigl_dispatch_ppc.a   (client import archive the ports link)
++#   mglQ3/lib/libmgl-wos.a         (bundled MiniGL core)
++#   bin/minigl_ppc.dll             (the DLL shipped next to every port's ELF)
++#   bin/stub/minigl_ppc.dll        (backend-free diagnostic stub)
++# Run from WSL (via the PowerShell tool):
++#   wsl -d Ubuntu -- bash /mnt/c/Users/mvick/ClaudeCode/MiniGL_WOS/deps_build_minigl_v19.sh [clean]
++set -e
++DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++LOG="$DIR/build-$(date +%Y%m%d-%H%M%S).log"
++echo "log: $LOG"
++docker run --rm \
++	-v "$DIR":/work \
++	-w /work \
++	ppc-morphos-wos-toolchain:latest \
++	bash -c "
++		set -e
++		if [ \"$1\" = clean ]; then
++			make -f Makefile.import.gcc clean
++			make -f Makefile.dll.gcc clean
++			make -f Makefile.dll.stub.gcc clean
++		fi
++		make -f Makefile.import.gcc importlib
++		make -f Makefile.dll.gcc
++		make -f Makefile.dll.stub.gcc
++		echo '=== outputs ==='
++		ls -la lib/libminigl_dispatch_ppc.a mglQ3/lib/libmgl-wos.a bin/minigl_ppc.dll bin/stub/minigl_ppc.dll
++	" 2>&1 | tee "$LOG"
++rc=${PIPESTATUS[0]}
++echo "build exit: $rc" | tee -a "$LOG"
++echo "errors: $(grep -c 'error:' "$LOG")  warnings: $(grep -c 'warning:' "$LOG")"
++exit $rc
+diff --git a/mglQ3/Makefile.wos.gcc b/mglQ3/Makefile.wos.gcc
+index 4fa468b..7a7c6f4 100644
+--- a/mglQ3/Makefile.wos.gcc
++++ b/mglQ3/Makefile.wos.gcc
+@@ -1,16 +1,26 @@
+ # Build the bundled mglQ3 core for WarpOS/PPC with GCC.
+-CC      := ppc-amigaos-gcc
+-AR      := ppc-amigaos-ar
+-RANLIB  := ppc-amigaos-ranlib
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
++# ppc-morphos-wos-toolchain). Flags follow the hardware-proven V10 backend
++# build (Makefile.backend.gcc there): -O3, no fast-math (clip/W math), no
++# unwind tables, -DINLINE=__inline. The image's os-includeppc already carries
++# Warp3D/, powerpc/ and the proto/ headers sysinc.h needs; the bundled
++# mglQ3/include (mgl/, pragmas/, clib/, inline/) is searched first.
++CC      := ppc-morphos-gcc
++AR      := ppc-morphos-ar
++RANLIB  := ppc-morphos-ranlib
+ 
+ CPU     ?= 604e
+ OBJDIR  ?= obj_wos_gcc
+ LIBDIR  ?= lib
+ LIBNAME ?= $(LIBDIR)/libmgl-wos.a
+ 
+-CFLAGS = -std=c99 -warpup -mcpu=$(CPU) -O2 -ffast-math -mmultiple \
+-         -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow \
+-         -DNDEBUG -D__PPC__ -Iinclude -Wall -Wextra
++CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
++         -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-fast-math \
++         -fno-strict-aliasing -DINLINE=__inline -I../include -Isrc
++# -I../include (the package's public headers, = these mgl/ headers) rather
++# than -Iinclude: mglQ3/include also carries 68k-style proto/, inline/,
++# clib/, pragmas/ and Warp3D/ copies that would shadow the toolchain's PPC
++# cross-call headers (Warp3D, cybergraphics) with #pragma libcall stubs.
+ 
+ SOURCES = src/context.c src/init.c src/fog.c src/texture.c src/others.c \
+           src/matrix.c src/vertexbuffer.c src/hclip.c src/draw.c src/aclip.c \
+diff --git a/probe_dll_symbols.sh b/probe_dll_symbols.sh
+new file mode 100644
+index 0000000..52fa819
+--- /dev/null
++++ b/probe_dll_symbols.sh
+@@ -0,0 +1,10 @@
++#!/bin/bash
++# Sanity check of the built V19 artifacts: exported bootstrap symbols, the V19
++# dispatch tail, and no unexpected undefined symbols in the DLL.
++docker run --rm -v /mnt/c/Users/mvick/ClaudeCode/MiniGL_WOS:/work -w /work ppc-morphos-wos-toolchain:latest bash -c '
++NM=/opt/ppc-morphos/bin/ppc-morphos-nm
++echo "=== DLL: bootstrap + tail ==="; $NM bin/minigl_ppc.dll | grep -E " [TtDd] (MGLGetDispatchTable|dllFindResource|dllLoadResource|dllFreeResource|PPC_GLMultiDrawArrays|PPC_MGLGetInputWindowHandle|GLInterleavedArrays|MGLEmergencyCloseScreen|MGLCreateContext|GLBegin)$"
++echo "=== DLL: undefined ==="; $NM bin/minigl_ppc.dll | grep " U " | head
++echo "=== import lib exports ==="; $NM lib/libminigl_dispatch_ppc.a | grep -E " [TDB] (MiniGLOpen|MiniGLClose|MiniGLDispatch|MiniGLBase)$"
++echo "=== core lib: a few ==="; $NM mglQ3/lib/libmgl-wos.a | grep -E " T (GLTexImage2D|GLDrawElements|GLLockArrays|MGLSetPointer|MGLMainLoop)$"
++'

@@ -1,0 +1,2603 @@
+diff --git a/Makefile.dll.gcc b/Makefile.dll.gcc
+index cdab506..5aa447b 100644
+--- a/Makefile.dll.gcc
++++ b/Makefile.dll.gcc
+@@ -1,20 +1,33 @@
+ # WarpOS MiniGL V19 PPC DLL using Hyperion's DLL runtime.
+ # The MiniGL implementation is the bundled mglQ3 tree.
+-CC      := ppc-amigaos-gcc
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
++# ppc-morphos-wos-toolchain), same adaptation as the V10 tree: -warpup ->
++# -DWARPUP --specs=warpup, -lppcamiga (vintage toolchain only) -> -lamigawos
++# (classic amiga.lib helpers CreatePort/DeletePort... used by hyperion_dll).
++CC      := ppc-morphos-gcc
+ CPU     ?= 604e
+ OBJDIR  ?= obj/dll
+ OUT     ?= bin/minigl_ppc.dll
++# Elf2Exe2 is an AmigaOS-native binary and cannot run on the Linux build host;
++# WarpOS's patched loader runs the raw linked PPC ELF directly (hardware-
++# confirmed with the V10 DLL in every port), so this is a no-op by default.
++ELF2EXE2 ?= true
+ 
+ MGLQ3_DIR ?= mglQ3
+ MGLQ3_LIB ?= $(MGLQ3_DIR)/lib/libmgl-wos.a
+ 
+-CFLAGS = -warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
++# include/mgl is the bundled core's own header set (mglQ3/include/mgl copied
++# over the shipped V3D-fork headers, which reference a nonexistent
++# backend/include/v3d_vertex.h). mglQ3/include itself is NOT on the path: its
++# 68k-style proto/, inline/, pragmas/ and Warp3D/ copies would shadow the
++# toolchain's PPC cross-call headers.
++CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
+          -fomit-frame-pointer \
+-         -I$(MGLQ3_DIR)/include -Iinclude -Ihyperion_dll
++         -Iinclude -Ihyperion_dll
+ 
+ # Override if the local WarpOS toolchain/backend needs additional libraries.
+ MGLQ3_LIBS  ?= -lm
+-WARPUP_LIBS ?= -lppcamiga
++WARPUP_LIBS ?= -lamigawos
+ 
+ OBJS = $(OBJDIR)/minigl_ppc_dispatch.o \
+        $(OBJDIR)/dllstartup.o \
+@@ -46,7 +59,7 @@ $(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+ 
+ $(OUT): $(OBJS) $(MGLQ3_LIB) | bin
+ 	$(CC) $(CFLAGS) $(OBJS) $(MGLQ3_LIB) $(MGLQ3_LIBS) $(WARPUP_LIBS) -o $@
+-	elf2exe2 $@ $@
++	$(ELF2EXE2) $@ $@
+ 
+ clean:
+ 	rm -rf $(OBJDIR) $(OUT)
+diff --git a/Makefile.dll.stub.gcc b/Makefile.dll.stub.gcc
+index 7a2a893..e970281 100644
+--- a/Makefile.dll.stub.gcc
++++ b/Makefile.dll.stub.gcc
+@@ -3,16 +3,18 @@
+ # The output uses the normal runtime filename so it can be copied directly
+ # in place of the real DLL for testing, but lives in bin/stub to avoid
+ # overwriting the real build.
+-CC      := ppc-amigaos-gcc
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay; see Makefile.dll.gcc.
++CC      := ppc-morphos-gcc
+ CPU     ?= 604e
+ OBJDIR  ?= obj/dll_stub
+ OUT     ?= bin/stub/minigl_ppc.dll
++ELF2EXE2 ?= true
+ 
+-CFLAGS = -warpup -mcpu=$(CPU) -O2 -mmultiple -Wall -Wno-unused-parameter \
++CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O2 -mmultiple -Wall -Wno-unused-parameter \
+          -fomit-frame-pointer \
+          -Iinclude -Ihyperion_dll
+ 
+-WARPUP_LIBS ?= -lppcamiga
++WARPUP_LIBS ?= -lamigawos
+ 
+ OBJS = $(OBJDIR)/minigl_ppc_dispatch_stub.o \
+        $(OBJDIR)/dllstartup.o \
+@@ -39,7 +41,7 @@ $(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+ 
+ $(OUT): $(OBJS) | bin/stub
+ 	$(CC) $(CFLAGS) $(OBJS) $(WARPUP_LIBS) -o $@
+-	elf2exe2 $@ $@
++	$(ELF2EXE2) $@ $@
+ 
+ clean:
+ 	rm -rf $(OBJDIR) $(OUT)
+diff --git a/Makefile.import.gcc b/Makefile.import.gcc
+index 12b0642..47fecf7 100644
+--- a/Makefile.import.gcc
++++ b/Makefile.import.gcc
+@@ -1,20 +1,24 @@
+ # WarpOS MiniGL V19 direct-dispatch client import library + shared test examples
+-CC      := ppc-amigaos-gcc
+-AR      := ppc-amigaos-ar
+-RANLIB  := ppc-amigaos-ranlib
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
++# ppc-morphos-wos-toolchain); see Makefile.dll.gcc for the flag/lib mapping.
++CC      := ppc-morphos-gcc
++AR      := ppc-morphos-ar
++RANLIB  := ppc-morphos-ranlib
+ 
+ CPU       ?= 604e
+ OBJDIR    ?= obj/import
+ BINDIR    ?= bin/examples
+ OUTLIB    ?= lib/libminigl_dispatch_ppc.a
+ 
+-COMMON_CFLAGS = -warpup -mcpu=$(CPU) -O2 -mmultiple -Wall \
++COMMON_CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O2 -mmultiple -Wall \
+                 -fomit-frame-pointer -Iinclude -Ihyperion_dll
+ CFLAGS    = $(COMMON_CFLAGS)
+ EX_CFLAGS = $(COMMON_CFLAGS)
+ 
+-# WarpOS support for Exec/DOS calls made by the examples and Hyperion loader.
+-WARPUP_LIBS ?= -lppcamiga
++# Exec/DOS support comes from the warpup specs' default libs (-lcwos
++# -lglosswos -lgccwos); -lamigawos adds the classic amiga.lib helpers the
++# Hyperion DLL runtime uses.
++WARPUP_LIBS ?= -lamigawos
+ MATH_LIBS   ?= -lm
+ 
+ OBJS = $(OBJDIR)/minigl_ppc_base.o \
+diff --git a/deps_build_minigl_v19.sh b/deps_build_minigl_v19.sh
+new file mode 100644
+index 0000000..271d5bc
+--- /dev/null
++++ b/deps_build_minigl_v19.sh
+@@ -0,0 +1,33 @@
++#!/bin/bash
++# Build the MiniGL_WOS V19 package with the ppc-morphos-wos-toolchain image:
++#   lib/libminigl_dispatch_ppc.a   (client import archive the ports link)
++#   mglQ3/lib/libmgl-wos.a         (bundled MiniGL core)
++#   bin/minigl_ppc.dll             (the DLL shipped next to every port's ELF)
++#   bin/stub/minigl_ppc.dll        (backend-free diagnostic stub)
++# Run from WSL (via the PowerShell tool):
++#   wsl -d Ubuntu -- bash /mnt/c/Users/mvick/ClaudeCode/MiniGL_WOS/deps_build_minigl_v19.sh [clean]
++set -e
++DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++LOG="$DIR/build-$(date +%Y%m%d-%H%M%S).log"
++echo "log: $LOG"
++docker run --rm \
++	-v "$DIR":/work \
++	-w /work \
++	ppc-morphos-wos-toolchain:latest \
++	bash -c "
++		set -e
++		if [ \"$1\" = clean ]; then
++			make -f Makefile.import.gcc clean
++			make -f Makefile.dll.gcc clean
++			make -f Makefile.dll.stub.gcc clean
++		fi
++		make -f Makefile.import.gcc importlib
++		make -f Makefile.dll.gcc
++		make -f Makefile.dll.stub.gcc
++		echo '=== outputs ==='
++		ls -la lib/libminigl_dispatch_ppc.a mglQ3/lib/libmgl-wos.a bin/minigl_ppc.dll bin/stub/minigl_ppc.dll
++	" 2>&1 | tee "$LOG"
++rc=${PIPESTATUS[0]}
++echo "build exit: $rc" | tee -a "$LOG"
++echo "errors: $(grep -c 'error:' "$LOG")  warnings: $(grep -c 'warning:' "$LOG")"
++exit $rc
+diff --git a/examples/milestone_ballonly_library.c b/examples/milestone_ballonly_library.c
+index 1e79427..eb53dc9 100644
+--- a/examples/milestone_ballonly_library.c
++++ b/examples/milestone_ballonly_library.c
+@@ -32,9 +32,14 @@
+ #include <proto/minigl.h>
+ #include <math.h>
+ #include <stdio.h>
++#include <stdlib.h> /* atoi(): implicit declaration is an error under gcc 15 */
++/* Native AmigaOS structures (DateStamp) need two-byte packing on the
++ * WarpOS GCC toolchain; the MiniGL headers above must NOT be packed. */
++#pragma pack(push,2)
+ #include <proto/graphics.h>
+ #include <proto/dos.h>
+ #include <dos/dos.h>
++#pragma pack(pop)
+ 
+ #ifndef D
+ #ifdef DEBUG
+diff --git a/examples/milestone_bounce_interactive_library.c b/examples/milestone_bounce_interactive_library.c
+index bf7e0e8..6fdae2c 100644
+--- a/examples/milestone_bounce_interactive_library.c
++++ b/examples/milestone_bounce_interactive_library.c
+@@ -34,8 +34,14 @@
+ #include <proto/minigl.h>
+ #include <math.h>
+ #include <stdio.h>
++#include <stdlib.h> /* atoi(): implicit declaration is an error under gcc 15 */
++/* Native AmigaOS structures (Window, RastPort, GfxBase) need two-byte
++ * packing on the WarpOS GCC toolchain; the MiniGL headers above must NOT
++ * be packed. */
++#pragma pack(push,2)
+ #include <proto/graphics.h>
+ #include <proto/exec.h>
++#pragma pack(pop)
+ 
+ #ifndef D
+ #ifdef DEBUG
+@@ -62,9 +68,10 @@ static GLfloat G = -0.05f;
+ static GLfloat rot = 0.0f;
+ static GLboolean do_cage = GL_TRUE;
+ 
+-#ifndef __GNUC__
++/* Always defined: this toolchain has no library auto-open, and main() calls
++ * OpenLibrary("graphics.library") itself regardless of compiler. With the
++ * former #ifndef __GNUC__ guard GfxBase was an undefined symbol at link. */
+ struct GfxBase *GfxBase = NULL;
+-#endif
+ 
+ /* stricmp is not provided by every GCC/libnix configuration. */
+ static int local_stricmp(const char *a, const char *b)
+diff --git a/examples/milestone_gears_stats_library.c b/examples/milestone_gears_stats_library.c
+index 7470d4c..973d642 100644
+--- a/examples/milestone_gears_stats_library.c
++++ b/examples/milestone_gears_stats_library.c
+@@ -54,10 +54,15 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
++/* Native AmigaOS structures (DateStamp, Window, RastPort, GfxBase) need
++ * two-byte packing on the WarpOS GCC toolchain; the MiniGL headers above
++ * must NOT be packed. */
++#pragma pack(push,2)
+ #include <proto/graphics.h>
+ #include <proto/dos.h>
+ #include <dos/dos.h>
+ #include <proto/exec.h>
++#pragma pack(pop)
+ 
+ #ifndef D
+ #define D(x) do { printf x; } while (0)
+diff --git a/hyperion_dll/dll.c b/hyperion_dll/dll.c
+index e0c9b2e..364f743 100644
+--- a/hyperion_dll/dll.c
++++ b/hyperion_dll/dll.c
+@@ -141,7 +141,7 @@ void *dllInternalLoadLibrary(char *filename,char *portname,int raiseusecount)
+ 		SystemTags(commandline,
+ 			SYS_Asynch, TRUE,
+ 			SYS_Output, output,
+-			SYS_Input,  NULL, //FIXME: some dll's might need stdin
++			SYS_Input,  0L, //FIXME: some dll's might need stdin (0L: pointer NULL in a ULONG tag array is an error under gcc 15)
+ 			NP_StackSize, 10000, //Messagehandler doesn't need a big stack (FIXME: but DLL_(De)Init might)
+ 			TAG_DONE);
+ 
+diff --git a/include/mgl/config.h b/include/mgl/config.h
+index cda4bb5..c5a7a73 100644
+--- a/include/mgl/config.h
++++ b/include/mgl/config.h
+@@ -21,7 +21,7 @@
+ ** (only the lazy programmer needs this overhead :))
+ */
+ 
+-#define CLAMP_COLORS 1
++//#define CLAMP_COLORS 1
+ 
+ /* This define enables some sanity-checks for vertexarrays.
+ **
+diff --git a/include/mgl/context.h b/include/mgl/context.h
+index 61fcddd..1748f1f 100644
+--- a/include/mgl/context.h
++++ b/include/mgl/context.h
+@@ -1,59 +1,15 @@
+ /*
+- * MiniGLV3D fork of MiniGL/include/mgl/context.h -- Phase G.
++ * $Id: context.h,v 1.1.1.1 2000/04/07 19:44:51 tfrieden Exp $
+  *
+- * GLcontext_t redefined around V3DDevice/V3DContext instead of
+- * W3D_Context. Pure GL-API bookkeeping (matrix stacks, vertex/normal
+- * buffers, boolean GL_* state, client-array state, etc.) is UNCHANGED --
+- * this is not a redesign of MiniGL's state machine, only of the fields
+- * that named a Warp3D type directly and therefore could not compile
+- * without Warp3D.h.
++ * $Date: 2000/04/07 19:44:51 $
++ * $Revision: 1.1.1.1 $
+  *
+- * Field-by-field disposition of every W3D_*-typed field the original had:
+- *  - W3D_Context* w3dContext -> replaced by embedding V3DDevice device
+- *    and V3DContext context directly (matches every demo's own pattern --
+- *    no pointer indirection, no separate alloc/free step for the backend
+- *    context).
+- *  - W3D_Fog w3dFog, W3D_Scissor scissor -> DROPPED. V3DContext already
+- *    owns this state field-for-field (backend.fog_start/fog_end/
+- *    fog_density/fog_r/g/b/a matches W3D_Fog exactly; backend.scissor_x/
+- *    y/w/h matches W3D_Scissor exactly) -- Phase H's fog.c/others.c read
+- *    and write backend.fog_* / backend.scissor_* directly instead of a separate
+- *    GLcontext-side copy. Also dropped the now-redundant w3dFogMode
+- *    (backend.fog_mode is the one source of truth).
+- *  - W3D_Color CurrentColor -> replaced by MGLColor CurrentColor (a
+- *    plain r/g/b/a float struct, defined in vertexbuffer.h -- reverts
+- *    the original's own "//was MGLColor" comment, which noted this field
+- *    used to be exactly this shape before being changed to W3D_Color for
+- *    a since-irrelevant Warp3D optimization).
+- *  - W3D_Double ClearDepth -> double (W3D_Double's own underlying type,
+- *    per Warp3D.h: typedef double W3D_Double -- no behavior change, just
+- *    naming the real type directly instead of through a Warp3D alias).
+- *  - W3D_Texture** w3dTexBuffer, GLubyte** w3dTexMemory, GLint
+- *    TexBufferSize -> replaced by V3DTexture** textureObjects (array of
+- *    backend texture objects indexed by GL texture name, GLuint
+- *    glGenTextures's job) + textureObjectCount. w3dTexMemory (a parallel
+- *    raw-CPU-data mirror per Warp3D texture) has no analog -- V3DTexture
+- *    already owns its uploaded GPU memory directly (texture_mem), no
+- *    separate CPU-side shadow copy needed. Per-unit CURRENTLY BOUND
+- *    texture (as opposed to this all-textures-by-name array) is already
+- *    V3DContext's job too (backend.bound_texture[V3D_MAX_TEXUNIT]) --
+- *    Phase H's texture.c binds by writing backend.bound_texture[unit],
+- *    not a new GLcontext-side field.
+- *  - ULONG w3dChipID, w3dFormat, w3dAlphaFormat; GLint w3dBytesPerTexel
+- *    -> DROPPED entirely. Warp3D-hardware-capability-negotiation fields
+- *    (which of several possible pixel formats does THIS card support) --
+- *    V3D is one fixed, known target (RGBA8 always), nothing to negotiate.
+- *  - struct BitMap* w3dBitMap, struct RastPort* w3dRastPort -> kept
+- *    (CyberGraphX/intuition types, not Warp3D-specific), plus NEW fields
+- *    (bitmapLock, vmembase, bprow) matching what every demo's own
+- *    Milestone1Screen-adjacent local state already does for the direct
+- *    framebuffer address/stride -- promoted from demo-local to
+- *    GLcontext-owned since context.c (Phase H) needs it, not just demos.
+- *  - struct Window* w3dWindow, struct Screen* w3dScreen, struct
+- *    ScreenBuffer* Buffers[3] -> kept unchanged (not Warp3D types).
++ * (C) 1999 by Hyperion
++ * All rights reserved
++ *
++ * This file is part of the MiniGL library project
++ * See the file Licence.txt for more details
+  *
+- * Everything else below this comment block is identical to the original
+- * MiniGL/include/mgl/context.h.
+  */
+ 
+ #ifndef __CONTEXT_H
+@@ -63,21 +19,30 @@
+ #include "mgl/config.h"
+ #include "mgl/vertexbuffer.h"
+ 
+-#include "../../../backend/include/v3d_device.h"
+-#include "../../../backend/include/v3d_context.h"
+-#include "../../../backend/include/v3d_texture.h"
+-
+-#pragma amiga-align
++#pragma pack(push,2)
+ 
+ #include <intuition/intuition.h>
+ 
++#ifdef __PPC__
++
++#include <devices/timer.h>
++
++typedef struct LockTimeHandle_s
++{
++	struct timeval StartTime;
++} LockTimeHandle;
++
++#else
++
+ typedef struct LockTimeHandle_s
+ {
+ 	ULONG s_hi, s_lo;
+ 	ULONG e_freq;
+ } LockTimeHandle;
+ 
+-#pragma default-align
++#endif
++
++#pragma pack(pop)
+ 
+ typedef struct GLcontext_t * GLcontext;
+ 
+@@ -97,13 +62,7 @@ typedef enum
+ 	GLCS_TEXTURE = 0x01,
+ 	GLCS_COLOR   = 0x02,
+ 	GLCS_VERTEX  = 0x04,
+-	/* Real vertex-array multitexture (2026-08-25): unit 1's own
+-	 * GL_TEXTURE_COORD_ARRAY enable, set/cleared by
+-	 * GLEnableClientState/GLDisableClientState while
+-	 * ClientActiveTexture==1 -- see GatherVertexFromArray/
+-	 * GatherVertexFromIndex for the consuming side. */
+-	GLCS_TEXTURE1 = 0x08,
+-	GLCS_MASK    = 0x0F,
++	GLCS_MASK    = 0x07,
+ } ClientStates;
+ 
+ typedef void (*KeyHandlerFn)(char key);
+@@ -126,64 +85,23 @@ We define all pointers as UBYTE to avoid problems with badly aligned arrays.
+ #define AP_VOLATILE           1<<4 //current array range is "recycled" after drawing operation so it is okay to modify data in the current arrays.
+ 
+ 
+-/*
+- * Phase J redesign: the original's w_buffer/w_off fields existed purely
+- * to feed Warp3D's own hardware array-pointer register a synthetic W
+- * component via raw pointer arithmetic (see the real MiniGL source's own
+- * GLTexCoordPointer/GLVertexPointer) -- a hardware-interface trick with
+- * no V3D equivalent, since this port always gathers app-array data into
+- * context->VertexBuffer[] itself (Stage 3/4) rather than handing a raw
+- * pointer+stride to a hardware register the way Warp3D did. Dropped;
+- * texcoordsize/vertexsize added instead (this port's own gather step
+- * needs to know how many components the app actually supplied, not a
+- * byte offset into someone else's buffer). colormode/vertexmode are
+- * repurposed too -- see MGLAColorMode below and GLVertexPointer's own
+- * comment (vertexsize replaces the original's GL_INT/AP_FIXPOINT fixed-
+- * point path entirely; not supported, flagged GL_INVALID_ENUM instead of
+- * silently mishandled -- no demo/shader in this project needs it).
+- */
+-typedef enum
+-{
+-	MGLA_COLOR_UBYTE_RGB  = 0,
+-	MGLA_COLOR_UBYTE_RGBA = 1,
+-	MGLA_COLOR_FLOAT_RGB  = 2,
+-	MGLA_COLOR_FLOAT_RGBA = 3,
+-
+-	/* Phase L3 (glquake port): glquake calls glColorPointer(4,
+-	 * MGL_UBYTE_ARGB, ...) whenever gl_smoothmodels is true (defaults to
+-	 * on) -- a real, distinct memory layout, not just a differently-named
+-	 * alias for RGBA. Byte order confirmed against the original mglq3
+-	 * fork's own Convert_UB_ARGB: byte0=A, byte1=R, byte2=G, byte3=B, a
+-	 * genuine 4-way permutation. See vertexarray.c's own GLColorPointer/
+-	 * GatherVertexFromArray comments for the gather-side implementation. */
+-	MGLA_COLOR_UBYTE_ARGB = 4
+-} MGLAColorMode;
+-
+ typedef struct MGLAPointer_s
+ {
+ 	GLubyte	*texcoords;	//application array
+ 	GLint	texcoordstride;
+-	GLint	texcoordsize;	//1-4 as supplied by glTexCoordPointer; only the first 2 (u,v) are ever consumed (this port's shaders have no q/w texcoord input)
+-
+-	/* Real vertex-array multitexture (2026-08-25, ioq3 r_vertexLight=0
+-	 * stall investigation): unit 1's own texcoord array, set by
+-	 * glTexCoordPointer while ClientActiveTexture==1 -- mirrors the unit-0
+-	 * fields above exactly. See GLCS_TEXTURE1 (this file) and
+-	 * GatherVertexFromArray/GatherVertexFromIndex (vertexarray.c/
+-	 * vertexelements.c) for the consuming side. */
+-	GLubyte	*texcoords1;	//application array, unit 1
+-	GLint	texcoordstride1;
+-	GLint	texcoordsize1;
++
++	GLubyte	*w_buffer;      //w coord pointer
++	GLint	w_off;		//w-offset rel. to texcoords
+ 
+ 	GLubyte	*colors;	//application array
+ 	GLint	colorstride;
+-	ULONG	colormode;	//MGLAColorMode, NOT a w3d bitfield
++	ULONG	colormode;	//w3d bitfield
+ 
+ 	GLubyte	*verts;		//application array
+ 	GLint	vertexstride;
+-	GLint	vertexsize;	//2-4 as supplied by glVertexPointer; w defaults to 1.0 if not supplied (size<4)
++	ULONG	vertexmode;	// fff / ddd / ffd
+ 
+-	//GL_EXT_compiled_vertex_arrays (Stage 4+ follow-up, fields present but unused until then):
++	//GL_EXT_compiled_vertex_arrays:
+ 	GLuint	lockfirst;	//start of locked range
+ 	GLsizei	locksize;
+ 	GLuint	transformed;	//vertexbuffer offset
+@@ -205,6 +123,11 @@ typedef struct GLarray_t
+ 	GLvoid*     pointer;        /* Pointer to the actual data */
+ } GLarray;
+ 
++#if 0
++typedef void (*DrawElementsFn)(GLcontext context, GLenum mode, GLsizei count, GLenum type, const GLvoid *indices);
++typedef void (*DrawArraysFn)(GLcontext context, GLenum mode, GLint first, GLsizei count);
++#endif
++
+ struct GLcontext_t
+ {
+ 	/*
+@@ -260,33 +183,6 @@ struct GLcontext_t
+ 
+ 	UWORD     * ElementIndex; //for glArrayElement and index conversion in glDrawElements
+ 
+-	/* Quake2 investigation (2026-08-16), REAL BUG FIX: glArrayElement(i)
+-	 * must behave like real OpenGL and use the CURRENT texcoord (as of
+-	 * THIS call) for any vertex whose GL_TEXTURE_COORD_ARRAY isn't
+-	 * bound -- e.g. gl_mesh.c's alias-model path calls qglTexCoord2f()
+-	 * then qglArrayElement() per vertex, inside one glBegin/glEnd block,
+-	 * relying on exactly this snapshot-per-call semantic (it can't use a
+-	 * real texcoord array: MD2 texcoords are per-seam-corner, not
+-	 * indexable by vertex the way position/color are). GLArrayElement
+-	 * only records the vertex index though -- gathering is deferred to
+-	 * GLEnd/GLDrawElements, which used to read CurrentTexS/CurrentTexT
+-	 * at THAT later time, by when it had already been overwritten by
+-	 * every subsequent qglTexCoord2f call in the same primitive, so
+-	 * every vertex in a strip/fan ended up stamped with the LAST
+-	 * vertex's texcoord (hardware-confirmed symptom: textures went flat
+-	 * -- one uniform texel per primitive -- while lighting stayed
+-	 * correct, since color already came from a real per-vertex array).
+-	 * Fix: GLArrayElement (vertexbuffer_min.c) snapshots CurrentTexS/T
+-	 * into these parallel arrays at the same slot as ElementIndex;
+-	 * GatherVertexFromIndex (vertexelements.c) reads the snapshot for
+-	 * that slot instead of the live scalar, but only when gathering the
+-	 * internal GLEnd-driven batch (indices == context->ElementIndex) --
+-	 * a genuine direct glDrawElements() call with the caller's own index
+-	 * array (e.g. demos/varray.c) never populated these, so it keeps
+-	 * using the live CurrentTexS/T scalar exactly as before. */
+-	GLfloat   * ElementTexS;
+-	GLfloat   * ElementTexT;
+-
+ 	/*
+ 	** Vertex buffers
+ 	** A call to glVertex*() will fill one entry of the vertex buffer
+@@ -298,6 +194,23 @@ struct GLcontext_t
+ 	GLuint      VertexBufferPointer;        // Next free entry
+ 	GLuint      VertexBufferSize;           // Size of the buffer
+ 
++	/*
++	** Surgeon: Normals are only used in auto-texcoord generation and are not part of the W3D_Vertex struct used for drawing.
++	** Besides, Normals are more often specified for a surface rather than for single verts.
++	** The solution is a normal-buffer with position in the buffer recorded in glVertex*() functions.
++	** With propewr implementation I believe this should generate a lot of cache hits in v_GenTexCoords :)
++	**
++	** Note: CurrentNormal is now unused
++	**
++	**
++	** A similar approach for colors is worth considering
++	** (see vertexbuffer.h for a suggestion)
++	** ubyte colors could be kept in that format until further down the pipeline.
++	** If colors were stored in a buffer, the check for shademodel currently within glVertex could be delayed until after on/off-screen culling.
++	** With smoothshading enabled, colorcopy and optional conversion from ubyte to float should probably be delayed until after the backface tests.
++	**
++	*/
++
+ 	MGLNormal * NormalBuffer;
+ 	GLuint	    NormalBufferPointer;
+ 
+@@ -305,12 +218,16 @@ struct GLcontext_t
+ 	** Current colors
+ 	*/
+ 	GLuint      ClearColor;
+-	double      ClearDepth;
+-	MGLColor    CurrentColor;
++	W3D_Double  ClearDepth;
++	W3D_Color   CurrentColor; //was MGLColor
+ 
+- //Surgeon: minimize color-update calls
++ //Surgeon: minimize W3D_SetCurrentColor calls
+ 	GLboolean   UpdateCurrentColor;
+ 
++#if 0 //exchanged for normalbuffer approach - Surgeon
++	MGLNormal   CurrentNormal;
++#endif
++
+ 	GLfloat     CurrentTexS, CurrentTexT, CurrentTexQ;
+ 	GLboolean   CurrentTexQValid;
+ 	/*
+@@ -327,9 +244,17 @@ struct GLcontext_t
+ 	** *z is set by glDepthRange, which also sets near and far.
+ 	*/
+ 
++//	GLdouble    sx,sy,sz;
++//	GLdouble    ax,ay,az;
++#if 0 //surgeon: double precision not needed
++	GLdouble    sx,ax;
++	GLdouble    sy,ay;
++	GLdouble    sz,az;
++#else
+ 	GLfloat    sx,ax;
+ 	GLfloat    sy,ay;
+ 	GLfloat    sz,az;
++#endif
+ 	GLdouble    near,far;
+ 
+ 	GLuint	    ClipFlags;	//surgeon: viewport flags used with guardband clipping
+@@ -344,7 +269,7 @@ struct GLcontext_t
+ 	//  1 means back + ccw or front + cw
+ 	// -1 means back + cw  or front + ccw
+ 
+-	GLint	    CurrentCullSign;
++	GLint	    CurrentCullSign;	
+ 
+ 	// Pixel states
+ 	GLint       PackAlign;
+@@ -365,24 +290,6 @@ struct GLcontext_t
+ 	GLboolean   PointSmooth_State;
+ 	GLboolean   Dither_State;
+ 	GLboolean   ZOffset_State;
+-	/* SPLIT (2026-08-30) from ZOffset_State -- see context.c's
+-	 * MGLSetState comment for why GL_POLYGON_OFFSET_FILL and MGL_Z_OFFSET
+-	 * no longer share one flag. */
+-	GLboolean   PolygonOffsetFill_State;
+-
+-	/* Phase L4 (glquake port): per-channel write enable, glColorMask.
+-	 * Real GL default is TRUE for all 4 (nothing masked). Read fresh every
+-	 * draw call by gl_EmitCullBlendState (draw.c), same "rebuild from live
+-	 * GL state" pattern as Blend_State/CullFace_State -- glquake toggles
+-	 * this twice within a single frame (r_stereo anaglyph mode), so it
+-	 * cannot be a once-per-frame value the way gl_EnsureDrawState's other
+-	 * state is. See gl_EmitCullBlendState's own comment for the confirmed
+-	 * V3D_OP_COLOR_WRITE_MASKS bit-layout derivation (cross-checked
+-	 * against MESA's v3dx_emit.c/nir_to_vir.c). */
+-	GLboolean   ColorMaskR;
+-	GLboolean   ColorMaskG;
+-	GLboolean   ColorMaskB;
+-	GLboolean   ColorMaskA;
+ 
+ 	/*
+ 	** 'Internal' states
+@@ -400,43 +307,12 @@ struct GLcontext_t
+ 	DrawFn      CurrentDraw;
+ 
+ 	/*
+-	** V3D backend -- replaces the Warp3D-specific fields this struct used
+-	** to carry directly (see this file's header comment for the full
+-	** field-by-field mapping).
++	** Warp3D specific stuff
+ 	*/
+ 
+-	/* Named "backend", not "context" -- almost every MiniGL function takes
+-	 * a parameter literally named `context` (GLcontext context), and
+-	 * `context->context` would be a needless readability/typo trap. */
+-	V3DDevice               device;
+-	V3DContext               backend;
+-
+-	/* PiStorm3D allocator-consistency cleanup (2026-08-29): this struct's
+-	 * own allocation record (MGLCreateContext uses v3d_mem_alloc/
+-	 * MEMF_CLEAR instead of malloc+memset now, matching every other
+-	 * allocation in this driver). Held directly on the struct so
+-	 * MGLDeleteContext can free it correctly later via the normal
+-	 * v3d_mem_free(device, &selfMem) path -- same convention as every
+-	 * other v3d_mem this driver frees. */
+-	v3d_mem                 selfMem;
+-
+-	struct Window *         v3dWindow;
+-	struct Screen *         v3dScreen;
+-
+-	/* Dedicated to MGLMainLoop's (others.c) IDCMP input needs only --
+-	 * NOT the same signal as v3dWindow (which means "true windowed
+-	 * RENDERING mode, v3dBitMap is the real render target" throughout
+-	 * this codebase). In real windowed mode, inputWindow == v3dWindow
+-	 * (one window serves both purposes). In fullscreen mode, v3dWindow
+-	 * stays NULL (correctly, for every other v3dWindow-fork in this
+-	 * codebase) but inputWindow points at a small borderless backdrop
+-	 * window opened purely so Intuition has somewhere to deliver
+-	 * keyboard/mouse messages -- a bare Screen has no message port of
+-	 * its own. Found via a real crash: MGLMainLoop used to call
+-	 * mglGetWindowHandle() (== v3dWindow) unconditionally, NULL in every
+-	 * normal fullscreen build, causing GetMsg(NULL->UserPort) -- a
+-	 * guaranteed crash for any interactive fullscreen demo. */
+-	struct Window *         inputWindow;
++	W3D_Context *           w3dContext;
++	struct Window *         w3dWindow;
++	struct Screen *         w3dScreen;
+ 
+ 	GLboolean		ArrayTexBound;
+ 
+@@ -446,75 +322,27 @@ struct GLcontext_t
+ 	GLint                   VirtualBinding;
+ 	GLuint			VirtualTexUnits; //Surgeon
+ 	GLuint	    		ActiveTexture; //THF
+-	/* Real vertex-array multitexture (2026-08-25): the CLIENT active
+-	 * texture unit (glClientActiveTextureARB), which array glTexCoordPointer/
+-	 * glEnableClientState(GL_TEXTURE_COORD_ARRAY) target -- kept as its own
+-	 * field rather than reusing ActiveTexture above (the SERVER active
+-	 * unit, for binding/texenv) since real GL spec keeps these
+-	 * independent, even though every current caller (GL_SelectTexture,
+-	 * ioq3's tr_backend.c) always sets both together with the same unit. */
+-	GLuint			ClientActiveTexture;
+-
+-	V3DTexture **           textureObjects;   /* indexed by GL texture name (glGenTextures) */
+-	GLint                   textureObjectCount;
++
++	W3D_Texture **          w3dTexBuffer;
++	GLubyte **              w3dTexMemory;
++	GLint                   TexBufferSize;
+ 	struct ScreenBuffer *   Buffers[3];
+-	struct BitMap *         v3dBitMap; // If in windowed mode
+-	struct RastPort *       v3dRastPort; // for windowed ClipBlit mode
++	struct BitMap *         w3dBitMap; // If in windowed mode
++	struct RastPort *       w3dRastPort; // for windowed ClipBlit mode
+ 	int                     BufNr;
+ 	int                     NumBuffers;
+-
+-	APTR                    bitmapLock;   /* handle from LockBitMapTags, matches every demo's own pattern */
+-	ULONG                   vmembase;     /* direct framebuffer address, from bitmapLock */
+-	ULONG                   bprow;        /* bytes per row, from bitmapLock */
+-
+-	/* MGLV3D_ENABLE_DOUBLE_BUFFER + MGLV3D_DOUBLE_BUFFER_HOLD_LOCK only
+-	 * (context.c) -- both buffers' LockBitMapTags handles/addresses,
+-	 * queried once at open and cached, instead of re-locking every
+-	 * MGLSwitchDisplay. Unused (zeroed) in every other build config. */
+-	APTR                    bitmapLocks[2];
+-	ULONG                   vmembases[3];   /* [2] used by MGLV3D_DOUBLE_BUFFER_TRIPLE_NOSYNC only */
+-
+-	/* MGLV3D_ENABLE_DOUBLE_BUFFER + MGLV3D_DOUBLE_BUFFER_SAFEMSG only
+-	 * (context.c) -- the REAL AmigaOS double-buffer synchronization
+-	 * protocol (graphics.library/AllocDBufInfo autodoc's own reference
+-	 * algorithm), replacing the mn_ReplyPort=NULL/busy-poll pattern every
+-	 * other double-buffer variant uses. dbufSafePort receives a message
+-	 * when the buffer just flipped AWAY from is safe to write into again;
+-	 * dbufDispPort receives one when it's safe to call ChangeScreenBuffer
+-	 * again (confirms the last flip was actually displayed at least once).
+-	 * dbufSafeToWrite/dbufSafeToChange track whether a wait is currently
+-	 * owed, matching the autodoc example's SafeToWrite/SafeToChange
+-	 * flags exactly. */
+-	struct MsgPort *        dbufSafePort;
+-	struct MsgPort *        dbufDispPort;
+-	GLboolean               dbufSafeToWrite;
+-	GLboolean               dbufSafeToChange;
+-
+-	/* MGLV3D_DOUBLE_BUFFER_VPBITMAP only -- raw graphics.library double
+-	 * buffering (AllocDBufInfo/ChangeVPBitMap), bypassing Intuition's
+-	 * AllocScreenBuffer/ChangeScreenBuffer/struct ScreenBuffer entirely --
+-	 * a genuine pointer-swap (ChangeVPBitMap reassigns the ViewPort's
+-	 * bitmap pointer directly), not a blit/copy. dbufBitMaps[0] is the
+-	 * screen's own already-allocated bitmap (freed when the screen
+-	 * closes, not by us); dbufBitMaps[1] is a plain AllocBitMap'd extra
+-	 * buffer we own. dbufInfo is ONE shared DBufInfo for both (per the
+-	 * graphics.library/AllocDBufInfo autodoc's own reference example --
+-	 * a single persistent DBufInfo tracks current-vs-previous across
+-	 * calls; MGLV3D_DOUBLE_BUFFER_SAFEMSG's bug was giving each buffer
+-	 * its own separate DBufInfo instead, via Intuition's per-ScreenBuffer
+-	 * sb_DBufInfo). Reuses dbufSafePort/dbufDispPort/dbufSafeToWrite/
+-	 * dbufSafeToChange above -- same message protocol, different (lower-
+-	 * level) buffer-swap primitive underneath it. */
+-	struct BitMap *         dbufBitMaps[2];
+-	struct DBufInfo *       dbufInfo;
+-
+-	GLboolean               v3dLocked;
++	W3D_Scissor             scissor;
++	GLboolean               w3dLocked;
+ 
+ #ifdef AUTOMATIC_LOCKING_ENABLE
+ 	GLenum                  LockMode;
+ 	LockTimeHandle          LockTime;
+ #endif
+ 	GLboolean               DoSync;
++	ULONG                   w3dChipID;
++	ULONG                   w3dFormat;
++	ULONG                   w3dAlphaFormat;
++	GLint                   w3dBytesPerTexel;
+ 
+ 	GLenum                  TexEnv[MAX_TEXUNIT];
+ 	GLenum                  CurTexEnv;
+@@ -523,6 +351,8 @@ struct GLcontext_t
+ 	GLenum                  WrapS;
+ 	GLenum                  WrapT;
+ 
++	W3D_Fog                 w3dFog;
++	ULONG                   w3dFogMode;
+ 	GLfloat                 FogRange;
+ 	GLfloat                 FogMult;
+ 	GLenum                  ShadeModel;
+@@ -547,13 +377,12 @@ struct GLcontext_t
+ 	GLboolean       WOne_Hint;
+ 	GLboolean       FixpointTrans_Hint; //Surgeon
+ 
+-	/* ZOffset doubles as GLPolygonOffset's "units" parameter -- MGLSetZOffset
+-	 * (the Amiga-only entry point ioq3 actually calls) is equivalent to
+-	 * GLPolygonOffset(factor=0, units=offset), so both share this same pair
+-	 * of fields instead of tracking two independent offset states. See
+-	 * draw.c's own comment on where these actually get consumed. */
+ 	GLfloat         ZOffset;
+-	GLfloat         PolygonOffsetFactor;
++	
++	GLfloat 		PolygonOffsetFactor;
++	GLfloat			PolygonOffsetUnits;
++	GLboolean		PolygonOffsetFill_State;
++	GLfloat			DepthBufferUnit;
+ 
+ 	void           *PaletteData;
+ 	GLenum          PaletteFormat;
+@@ -590,30 +419,26 @@ struct GLcontext_t
+ 
+ 	GLbitfield      ClientState;        /* Current client state mask */
+ 
+-	/* FIX (2026-08-18, ioq3 black-screen root cause): GLEnd previously
+-	 * checked the PERSISTENT ClientState&GLCS_VERTEX bit to decide
+-	 * whether a glBegin/End sequence used glArrayElement -- wrong for
+-	 * any client that leaves GL_VERTEX_ARRAY permanently enabled for
+-	 * ITS OWN array-based rendering (standard, portable OpenGL usage)
+-	 * while ALSO, separately, issuing plain glVertex-based immediate-mode
+-	 * sequences elsewhere (ioq3's cinematic/debug-image draws, real
+-	 * ioquake3-side code, not this project's own). Real OpenGL semantics
+-	 * distinguish "is GL_VERTEX_ARRAY enabled" from "did THIS SPECIFIC
+-	 * sequence call glArrayElement" -- these are independent. Reset to
+-	 * GL_FALSE by GLBegin (vertexbuffer_min.c), set GL_TRUE by
+-	 * GLArrayElement (same file) -- GLEnd now checks this instead of
+-	 * ClientState, matching real GL semantics for every consumer
+-	 * (glquake/Quake2/ioq3 alike). ClientState/GLCS_VERTEX itself is
+-	 * untouched -- GLDrawArrays/GLDrawElements's own, legitimate use of
+-	 * it (vertexarray.c) is unrelated to this fix. */
+-	GLboolean	UsedArrayElement;
++#if 0
++
++	GLarray         ColorArray;         /* Current arrays */
++	GLarray         TexCoordArray;
++	GLarray         VertexArray;
++#endif
+ 
+ 	MGLAPointer	ArrayPointer;
+ 	GLboolean	VertexArrayPipeline;
+ 
++#if 0
++	DrawElementsFn  DrawElementsHook;   /* Function pointers. These will depend on the state */
++	DrawArraysFn    DrawArraysHook;
++#endif
++
+ 	GLfloat         MinTriArea;         /* Minimal area of triangles to be drawn (smaller ones will be rejected)*/
+ 
+ 	GLfloat         CurrentPointSize;   /* diameter */
++	
++	GLfloat		LineWidth; // Cowcat
+ 
+ 	GLubyte*        GeneratedTextures;  /* Array to keep track of generated textures */
+ 
+diff --git a/include/mgl/gl.h b/include/mgl/gl.h
+index 46ffdf6..830c1b6 100644
+--- a/include/mgl/gl.h
++++ b/include/mgl/gl.h
+@@ -289,31 +289,11 @@ enum
+ 	GL_T,
+ 	GL_S,
+ 	GL_FILL,
+-	/* Quake2/MiniGLV3D multitexture wire-up (2026-08-15): these 4 used to
+-	 * be plain auto-numbered enum members (small sequential integers,
+-	 * whatever position they happened to land at), NOT the real OpenGL
+-	 * spec hex values (0x84C0-0x84C3). Harmless for any MiniGLV3D-internal
+-	 * consumer (mtex.c etc.) that only ever references them by NAME, since
+-	 * GLActiveTextureARB/GLMultiTexCoord2fARB (texture.c/vertexbuffer_min.c)
+-	 * only ever use them via relative subtraction (`unit - GL_TEXTURE0_ARB`)
+-	 * -- but fatal for any REAL external GL client (Quake2's qgl_amiga.c
+-	 * shim) that passes the genuine spec value across the API boundary:
+-	 * `unit - GL_TEXTURE0_ARB` then subtracts this enum's small native
+-	 * value from Quake2's real ~33984 value, producing a wildly out-of-
+-	 * range context->ActiveTexture used to index Texture2D_State[]/
+-	 * TexEnv[]/textureObjects[] -- corrupting arbitrary nearby memory on
+-	 * every multitexture call, confirmed as the cause of Quake2's map-
+-	 * load-time corruption and exit-time crash once real multitexture
+-	 * was wired up. Fixed at the source: real spec values here so ANY
+-	 * real GL client (not just this specific shim) gets correct behavior.
+-	 * GL_MAX_TEXTURE_UNITS_ARB explicitly re-anchored to GL_FILL+1 so
+-	 * MGL_LOCK_AUTOMATIC/_MANUAL/_SMART (and anything else auto-numbered
+-	 * after it) keep their ORIGINAL values, unaffected by this fix. */
+-	GL_TEXTURE0_ARB = 0x84C0,
++	GL_TEXTURE0_ARB,
+ 	GL_TEXTURE1_ARB,
+ 	GL_TEXTURE2_ARB,
+ 	GL_TEXTURE3_ARB,
+-	GL_MAX_TEXTURE_UNITS_ARB = GL_FILL + 1,
++	GL_MAX_TEXTURE_UNITS_ARB,
+ 	MGL_LOCK_AUTOMATIC,
+ 	MGL_LOCK_MANUAL,
+ 	MGL_LOCK_SMART,
+@@ -399,20 +379,8 @@ extern GLcontext mini_CurrentContext;
+ void        GLActiveTextureARB(GLcontext context, GLenum unit);
+ void        GLMultiTexCoord2fARB(GLcontext context, GLenum unit, GLfloat s, GLfloat t);
+ void        GLMultiTexCoord2fvARB(GLcontext context, GLenum unit, GLfloat *v);
+-void        GLClientActiveTextureARB(GLcontext context, GLenum unit);
+ 
+-void MGLDrawMultitexBuffer (GLcontext context, GLenum BSrc, GLenum BDst, GLenum TexEnv);
+-
+-/*
+- * Phase L (glquake full build/link): mglq3-specific extensions, not in
+- * the original base MiniGL -- glquake calls the bare mglSetPointer()/
+- * mglClearPointer() macros directly (gl_vidamiga.c, menu.c). See
+- * context.c's own MGLSetPointer/MGLClearPointer comment for the
+- * implementation (thin wrappers around vid_Pointer/vid_DeletePointer,
+- * already existed internally).
+- */
+-void MGLSetPointer(GLcontext context);
+-void MGLClearPointer(GLcontext context);
++void        MGLDrawMultitexBuffer (GLcontext context, GLenum BSrc, GLenum BDst, GLenum TexEnv);
+ 
+ 
+ 
+@@ -422,7 +390,6 @@ void        GLArrayElement(GLcontext context, GLint i);
+ void        GLBegin(GLcontext context, GLenum mode);
+ void        GLBindTexture(GLcontext context, GLenum target, GLuint texture);
+ void        GLBlendFunc(GLcontext context, GLenum sfactor, GLenum dfactor);
+-void        GLColorMask(GLcontext context, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
+ void        GLClear(GLcontext context, GLbitfield mask);
+ void        GLClearColor(GLcontext context, GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+ void        GLClearDepth(GLcontext context, GLclampd depth);
+@@ -434,6 +401,9 @@ void        GLColor4ub(GLcontext context, GLubyte red, GLubyte green, GLubyte bl
+ void        GLColor4ubv(GLcontext context, GLubyte *v);
+ //void        GLColorPointer(GLcontext context, GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
+ void        GLColorTable(GLcontext context, GLenum target, GLenum internalformat, GLint width, GLenum format, GLenum type, GLvoid *data);
++
++void	    GLColorMask(GLcontext context, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha); // Cowcat
++
+ void        GLCullFace(GLcontext context, GLenum mode);
+ void        GLDeleteTextures(GLcontext context, GLsizei n, const GLuint *textures);
+ void        GLDepthFunc(GLcontext context, GLenum func);
+@@ -548,11 +518,10 @@ void        mglChooseMtexBufferSize(int size);
+ void        mglChooseWindowMode(GLboolean flag);
+ void *      MGLCreateContext(int offx, int offy, int w, int h);
+ void        MGLDeleteContext(GLcontext context);
+-void        MGLEmergencyCloseScreen(GLcontext context);
+ void        MGLEnableSync(GLcontext context, GLboolean enable);
+ void        MGLExit(GLcontext context);
+ void *      MGLGetWindowHandle(GLcontext context);
+-void *      MGLGetInputWindowHandle(GLcontext context);
++void        MGLEmergencyCloseScreen(GLcontext context);
+ void        MGLIdleFunc(GLcontext context, IdleFn i);
+ void        MGLKeyFunc(GLcontext context, KeyHandlerFn k);
+ GLboolean   MGLLockDisplay(GLcontext context);
+@@ -569,8 +538,14 @@ void        MGLSwitchBuffer(GLcontext context, int bufnr);
+ void        MGLSwitchDisplay(GLcontext context);
+ void        MGLTexMemStat(GLcontext context, GLint *Current, GLint *Peak);
+ void        MGLUnlockDisplay(GLcontext context);
++
++//Cowcat
++void        MGLSetPointer(GLcontext context);
++void        MGLClearPointer(GLcontext context);
++//
++
+ void        MGLWriteShotPPM(GLcontext context, char *filename);
+-GLboolean        MGLInit(void);
++GLboolean   MGLInit(void);
+ void        MGLTerm(void);
+ 
+ #ifdef AUTOMATIC_LOCKING_ENABLE
+@@ -589,10 +564,6 @@ GLint       mglGetSupportedScreenModes(MGLScreenModeCallback CallbackFn);
+ void *      MGLCreateContextFromID(GLint ID, GLint *w, GLint *h);
+ GLboolean   MGLLockBack(GLcontext context, MGLLockInfo *info);
+ 
+-/* ioq3 Q3DM0 mirror-confinement fix (2026-08-31) -- see context.c's
+- * MGLForceNewRenderPass and v3d_context.h's force_new_pass comment. */
+-void        MGLForceNewRenderPass(GLcontext context);
+-
+ void        GLEnableClientState(GLcontext context, GLenum state);
+ void        GLDisableClientState(GLcontext context, GLenum state);
+ 
+@@ -602,7 +573,6 @@ void        GLVertexPointer(GLcontext context, GLint size, GLenum type, GLsizei
+ 
+ void        GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, const GLvoid *indices);
+ void        GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count);
+-void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first, const GLsizei *count, GLsizei primcount);
+ 
+ /*
+ ** These macros define the OpenGL compatibility macros. If you don't want them,
+@@ -617,21 +587,14 @@ void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first
+ 
+ #define glActiveTextureARB(unit)                GLActiveTextureARB(mini_CurrentContext, unit)
+ 
+-#define glClientActiveTextureARB(unit)           GLClientActiveTextureARB(mini_CurrentContext, unit)
+-
+ #define glMultiTexCoord2fARB(a, u, v)           GLMultiTexCoord2fARB(mini_CurrentContext, a, u, v)
+ 
+ #define glMultiTexCoord2fvARB(a, v)             GLMultiTexCoord2fvARB(mini_CurrentContext, a,  v)
+ 
+ #define mglDrawMultitexBuffer(bsrc, bdst, env) MGLDrawMultitexBuffer(mini_CurrentContext, bsrc, bdst, env)
+ 
+-#define mglSetPointer() MGLSetPointer(mini_CurrentContext)
+-#define mglClearPointer() MGLClearPointer(mini_CurrentContext)
+-
+ #define glAlphaFunc(func, ref) GLAlphaFunc(mini_CurrentContext, func, ref)
+ 
+-#define glColorMask(r, g, b, a) GLColorMask(mini_CurrentContext, r, g, b, a)
+-
+ #define glAreTexturesResident(n, textures, residences) GLAreTexturesResident(mini_CurrentContext, n, textures, residences)
+ 
+ #define glArrayElement(i) GLArrayElement(mini_CurrentContext, i)
+@@ -649,9 +612,6 @@ void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first
+ 
+ #define glClear(mask) GLClear(mini_CurrentContext, mask)
+ 
+-/* ioq3 Q3DM0 mirror-confinement fix -- see MGLForceNewRenderPass's own comment above. */
+-#define glMGLForceNewRenderPass() MGLForceNewRenderPass(mini_CurrentContext)
+-
+ #define glClearColor(red, green, blue, alpha) GLClearColor(mini_CurrentContext, red, green, blue, alpha)
+ 
+ #define glClearDepth(depth) GLClearDepth(mini_CurrentContext, depth)
+@@ -662,6 +622,8 @@ void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first
+ 
+ #define glColorTable(target, internalformat, width, format, type, data) GLColorTable(mini_CurrentContext, target, internalformat, width, format, type, data)
+ 
++#define glColorMask(red, green, blue, alpha) GLColorMask(mini_CurrentContext, red, green, blue, alpha) // Cowcat
++
+ #define glCullFace(mode) GLCullFace(mini_CurrentContext, mode)
+ 
+ #define glDeleteTextures(n, textures) GLDeleteTextures(mini_CurrentContext, n, textures)
+@@ -787,9 +749,9 @@ void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first
+ 
+ #define glRotatefEXTs(sin_an, cos_an, xyz) GLRotatefEXTs(mini_CurrentContext, sin_an, cos_an, xyz)
+ 
+-#define glScaled(x, y, z) GLScaled(mini_CurrentContext, x, y, z)
++#define glScalef(x, y, z) GLScalef(mini_CurrentContext, x, y, z) // Cowcat
+ 
+-#define glScalef(x, y, z) GLScaled(mini_CurrentContext, (GLdouble)(x), (GLdouble)(y), (GLdouble)(z))
++#define glScaled(x, y, z) GLScaled(mini_CurrentContext, (GLdouble)(x), (GLdouble)(y), (GLdouble)(z)) // Cowcat
+ 
+ #define glScissor(x, y, w, h) GLScissor(mini_CurrentContext, x, y, w, h)
+ 
+@@ -849,13 +811,15 @@ void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first
+ #define mglResizeContext(width, height) MGLResizeContext(mini_CurrentContext, width, height)
+ #define mglSwitchBuffer(bufnr) MGLSwitchBuffer(mini_CurrentContext, bufnr)
+ #define mglDeleteContext() MGLDeleteContext(mini_CurrentContext)
+-#define mglEmergencyCloseScreen() MGLEmergencyCloseScreen(mini_CurrentContext)
+ #define mglGetWindowHandle() MGLGetWindowHandle(mini_CurrentContext)
+-#define mglGetInputWindowHandle() MGLGetInputWindowHandle(mini_CurrentContext)
++#define mglEmergencyCloseScreen() MGLEmergencyCloseScreen(mini_CurrentContext)
+ #define mglSwitchDisplay() MGLSwitchDisplay(mini_CurrentContext)
+ #define mglLockDisplay() MGLLockDisplay(mini_CurrentContext)
+ #define mglUnlockDisplay() MGLUnlockDisplay(mini_CurrentContext)
+ 
++//Cowcat
++#define mglSetPointer() MGLSetPointer(mini_CurrentContext)
++#define mglClearPointer() MGLClearPointer(mini_CurrentContext)
+ 
+ #define glColor4f(red, green, blue, alpha)  GLColor4f(mini_CurrentContext, red, green, blue, alpha)
+ 
+@@ -949,4 +913,4 @@ void        GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *first
+ #endif
+ 
+ 
+-#endif
++#endif
+\ No newline at end of file
+diff --git a/include/mgl/matrix.h b/include/mgl/matrix.h
+index 59c7d07..2eae842 100644
+--- a/include/mgl/matrix.h
++++ b/include/mgl/matrix.h
+@@ -15,12 +15,22 @@
+ #ifndef _MATRIX_H
+ #define _MATRIX_H
+ 
++#if defined(__GNUC__)
++#define ALIGNED16 __attribute__((aligned(16))) // Cowcat
++#else
++#define ALIGNED16
++#endif
++
+ typedef struct Matrix_t
+ {
+-	float v[16];
++	float ALIGNED16 v[16];
+ 	int flags;                  // Matrix flags
+ 	struct Matrix_t *Inverse;   // optional inverse
++
++	#ifdef __VBCC__
+ 	int _pad_[2]; //16 byte align
++	#endif
++
+ } Matrix;
+ 
+ #define OF_11 0
+diff --git a/include/mgl/mglmacros.h b/include/mgl/mglmacros.h
+index 937c55a..7a45230 100644
+--- a/include/mgl/mglmacros.h
++++ b/include/mgl/mglmacros.h
+@@ -1,44 +1,398 @@
+-/*
+-MiniGLV3D port note (Phase L): original MiniGL/mglq3 shipped this header as
+-an opt-in performance shortcut -- included after gl.h, it #undef's and
+-redefines glBegin, glEnd, the glColor family, the glVertex family, the
+-glTexCoord family, glMultiTexCoordARB, glEnableClientState,
+-glDisableClientState, glArrayElement and glPointSize as macros that poke
+-MGLVertex / W3D_Vertex struct fields (mglvert->v.u, ->bx, ->v.color.r, etc.)
+-directly, skipping the real GL call entirely to save call overhead in hot
+-per-vertex code (glquake's gl_rsurf.c, gl_mirror.c, gl_warp.c and 6 more
+-files include it for exactly this).
+-
+-Reimplementing that same direct-struct-poke trick against V3DVertex's own
+-field layout (v.u0/v0, v.u1/v1, top-level .color) would just reintroduce
+-the exact bug Phase L1's miniglext.c fix removed (mglTV23fv & co. did
+-precisely this, by hand, against the OLD W3D_Vertex shape). It's also
+-unnecessary: MiniGLV3D's own gl.h (Phase G-J) already defines every one of
+-these as a macro forwarding to the real GL function (glBegin -> GLBegin,
+-glVertex3fv -> GLVertex3fv, glColor4f -> GLColor4f, etc.) -- the "call the
+-real public API instead of poking fields" approach this project settled on
+-for miniglext.c is already what gl.h's own macros do, unconditionally, for
+-every symbol this header used to redefine.
+-
+-So this header's only real job here is to exist (files that include it
+-after gl.h must not fail with "file not found", and multiple includes must
+-stay idempotent via the MGL_MACROS_H guard below) and to NOT redefine
+-anything -- gl.h's own definitions, already correct and already in scope by
+-the time any of these 9 glquake files includes this header, are left to
+-win untouched. Confirmed via grep against gl.h that literally every symbol
+-the original redefined already has a real forwarding macro there:
+-glActiveTextureARB, glArrayElement, glBegin, glEnd, glEnableClientState,
+-glDisableClientState, glPointSize, glVertex2i, the glColor family (ub/ubv
+-variants included), the glVertex family (f/fv variants), the glTexCoord
+-family (f/fv variants), glMultiTexCoordARB and its pointer variant.
+-
+-Do NOT add #undef / #define pairs here to "restore" the original's
+-performance-macro behavior bypassing the real GL calls -- see the header
+-comment above and STATUS.md's Phase L1 section for why that reintroduces a
+-real, already-fixed bug class.
+-*/
+-
+ #ifndef MGL_MACROS_H
+ #define MGL_MACROS_H
+ 
++#ifndef NO_MGLMACROS
++
++/*********************************************************
++
++Marcos for in-application vertexbuffer construction.
++
++- Should be included after gl.h.
++
++Limitations: (for the sake of performance)
++- Normals not supported
++- glBegin/glEnd construct can not be spred across objects
++- Texture units are not validated with multitexturing
++- No color-clamping:
++  floats should always be in the range 0.0 - 1.0
++
++Note: The Triangle Drawfn is decided in glEnd after checking how many verts entered the pipeline.
++
++**********************************************************/
++
++#ifdef __cplusplus
++extern "C"
++{
+ #endif
++
++extern void d_DrawPoints		(GLcontext context);
++extern void d_DrawLines		(GLcontext context);
++extern void d_DrawLineStrip		(GLcontext context);
++extern void d_DrawTriangleFan		(GLcontext context);
++extern void d_DrawTriangleStrip	(GLcontext context);
++extern void d_DrawQuads		(GLcontext context);
++extern void d_DrawNormalPoly		(GLcontext context);
++extern void d_DrawSmoothPoly		(GLcontext context);
++extern void d_DrawMtexPoly		(GLcontext context);
++extern void d_DrawQuadStrip		(GLcontext context);
++extern void d_DrawFlat		(GLcontext context);
++
++extern GLcontext mini_CurrentContext;
++
++#define CC mini_CurrentContext
++
++static MGLVertex *mglvert = NULL;
++#define MGL_UBTOF (1.f/255.f)
++
++
++#undef glBegin
++#undef glTexCoord4f
++#undef glTexCoord2f
++#undef glTexCoord4fv
++#undef glTexCoord2fv
++#undef glVertex4f
++#undef glVertex3f
++#undef glVertex2f
++#undef glVertex2i
++#undef glVertex4fv
++#undef glVertex3fv
++#undef glVertex2fv
++#undef glColor4f
++#undef glColor3f
++#undef glColor4ub
++#undef glColor3ub
++#undef glColor4fv
++#undef glColor3fv
++#undef glColor4ubv
++#undef glColor3ubv
++#undef glActiveTextureARB
++#undef glMultiTexCoord2fARB
++#undef glMultiTexCoord2fvARB
++#undef glEnableClientState
++#undef glDisableClientState
++#undef glArrayElement
++#undef glPointSize
++
++
++// The macros:
++
++// Texture unit selection
++
++#define glActiveTextureARB(unit) {\
++CC->ActiveTexture = (GLenum)(unit) - (GLenum)GL_TEXTURE0_ARB;}
++
++#define glBegin(mode)\
++{\
++CC->CurrentTexQValid = GL_FALSE;\
++\
++switch((int)(mode)){\
++	case GL_POINTS:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawPoints;\
++	break;\
++	case GL_LINES:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawLines;\
++	break;\
++	case GL_LINE_STRIP:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawLineStrip;\
++	break;\
++	case GL_LINE_LOOP:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawLineStrip;\
++	break;\
++	case GL_TRIANGLES:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		break;\
++	case GL_TRIANGLE_STRIP:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawTriangleStrip;\
++	break;\
++	case GL_TRIANGLE_FAN:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawTriangleFan;\
++	break;\
++	case GL_QUADS:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawQuads;\
++	break;\
++	case GL_QUAD_STRIP:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawQuadStrip;\
++	break;\
++	case GL_POLYGON:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		\
++		if (CC->Texture2D_State[1] == GL_TRUE)\
++		CC->CurrentDraw = (DrawFn)d_DrawMtexPoly;\
++		else if (CC->ShadeModel == GL_SMOOTH)\
++		CC->CurrentDraw = (DrawFn)d_DrawSmoothPoly;\
++		else\
++		CC->CurrentDraw = (DrawFn)d_DrawNormalPoly;\
++	break;\
++	case MGL_FLATFAN:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawFlat;\
++	break;\
++	case MGL_FLATSTRIP:\
++		CC->CurrentPrimitive = (GLenum)(mode);\
++		CC->CurrentDraw = (DrawFn)d_DrawFlat;\
++	break;\
++	default:\
++		GLFlagError (CC, 1, GL_INVALID_OPERATION);\
++	break;}\
++\
++CC->VertexBufferPointer = 0;\
++mglvert = &(CC->VertexBuffer[0]);\
++}
++
++
++//Colors
++
++#define glColor3f(red,green,blue) {\
++CC->CurrentColor.r = (W3D_Float)(red);\
++CC->CurrentColor.g = (W3D_Float)(green);\
++CC->CurrentColor.b = (W3D_Float)(blue);\
++CC->CurrentColor.a = 1.f;\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++#define glColor4f(red,green,blue,alpha) {\
++CC->CurrentColor.r = (W3D_Float)(red);\
++CC->CurrentColor.g = (W3D_Float)(green);\
++CC->CurrentColor.b = (W3D_Float)(blue);\
++CC->CurrentColor.a = (W3D_Float)(alpha);\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++#define glColor3ub(red,green,blue) {\
++CC->CurrentColor.r = (W3D_Float)(red)*MGL_UBTOF;\
++CC->CurrentColor.g = (W3D_Float)(green)*MGL_UBTOF;\
++CC->CurrentColor.b = (W3D_Float)(blue)*MGL_UBTOF;\
++CC->CurrentColor.a = 1.f;\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++#define glColor4ub(red,green,blue,alpha) {\
++CC->CurrentColor.r = (W3D_Float)(red)*MGL_UBTOF;\
++CC->CurrentColor.g = (W3D_Float)(green)*MGL_UBTOF;\
++CC->CurrentColor.b = (W3D_Float)(blue)*MGL_UBTOF;\
++CC->CurrentColor.a = (W3D_Float)(alpha)*MGL_UBTOF;\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++//pointer versions
++
++#define glColor3fv(color) {\
++CC->CurrentColor.r = ((GLfloat*)(color))[0];\
++CC->CurrentColor.g = ((GLfloat*)(color))[1];\
++CC->CurrentColor.b = ((GLfloat*)(color))[2];\
++CC->CurrentColor.a = 1.f;\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++#define glColor4fv(color) {\
++CC->CurrentColor.r = ((GLfloat*)(color))[0];\
++CC->CurrentColor.g = ((GLfloat*)(color))[1];\
++CC->CurrentColor.b = ((GLfloat*)(color))[2];\
++CC->CurrentColor.a = ((GLfloat*)(color))[3];\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++#define glColor3ubv(color) {\
++CC->CurrentColor.r = (W3D_Float)((GLubyte*)(color))[0]*MGL_UBTOF;\
++CC->CurrentColor.g = (W3D_Float)((GLubyte*)(color))[1]*MGL_UBTOF;\
++CC->CurrentColor.b = (W3D_Float)((GLubyte*)(color))[2]*MGL_UBTOF;\
++CC->CurrentColor.a = 1.f;\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++#define glColor4ubv(color) {\
++CC->CurrentColor.r = (W3D_Float)((GLubyte*)(color))[0]*MGL_UBTOF;\
++CC->CurrentColor.g = (W3D_Float)((GLubyte*)(color))[1]*MGL_UBTOF;\
++CC->CurrentColor.b = (W3D_Float)((GLubyte*)(color))[2]*MGL_UBTOF;\
++CC->CurrentColor.a = (W3D_Float)((GLubyte*)(color))[3]*MGL_UBTOF;\
++CC->UpdateCurrentColor = GL_TRUE;}
++
++
++//Texcoords
++
++#define glTexCoord4f(s,t,r,q) {\
++mglvert->v.u = (W3D_Float)((GLfloat)(s)/(GLfloat)(q));\
++mglvert->v.v = (W3D_Float)((GLfloat)(t)/(GLfloat)(q));\
++mglvert->q = (GLfloat)(q);CC->CurrentTexQValid = GL_TRUE;}
++
++#define glTexCoord2f(s,t) {\
++mglvert->v.u = (W3D_Float)(s);\
++mglvert->v.v = (W3D_Float)(t);}
++
++#define glMultiTexCoord2fARB(unit,s,t) {\
++if((GLenum)(unit) - (GLenum)GL_TEXTURE0_ARB){\
++mglvert->tcoord.s = (W3D_Float)(s);\
++mglvert->tcoord.t = (W3D_Float)(t);\
++}else{\
++mglvert->v.u = (W3D_Float)(s);\
++mglvert->v.v = (W3D_Float)(t);}\
++}
++
++//pointer versions
++
++#define glTexCoord4fv(coord) {\
++mglvert->v.u = ((GLfloat*)(coord))[0]/((GLfloat*)(coord))[3]);\
++mglvert->v.v = ((GLfloat*)(coord))[1]/((GLfloat*)(coord))[3]);\
++mglvert->q = ((GLfloat*)(coord))[3];CC->CurrentTexQValid = GL_TRUE;}
++
++#define glTexCoord2fv(coord) {\
++mglvert->v.u = ((GLfloat*)(coord))[0];\
++mglvert->v.v = ((GLfloat*)(coord))[1];}
++
++#define glMultiTexCoord2fvARB(unit, coord) {\
++if((GLenum)(unit) - (GLenum)GL_TEXTURE0_ARB){\
++mglvert->tcoord.s = ((GLfloat*)(coord))[0];\
++mglvert->tcoord.t = ((GLfloat*)(coord))[1];\
++}else{\
++mglvert->v.u = ((GLfloat*)(coord))[0];\
++mglvert->v.v = ((GLfloat*)(coord))[1];}\
++}
++
++
++//Verts
++
++#define glVertex4f(x,y,z,w) {\
++if(CC->ShadeModel == GL_SMOOTH)\
++{\
++mglvert->v.color.r = CC->CurrentColor.r;\
++mglvert->v.color.g = CC->CurrentColor.g;\
++mglvert->v.color.b = CC->CurrentColor.b;\
++mglvert->v.color.a = CC->CurrentColor.a;\
++}\
++mglvert->bx=(GLfloat)(x);\
++mglvert->by=(GLfloat)(y);\
++mglvert->bz=(GLfloat)(z);\
++mglvert->bw=(GLfloat)(w);\
++CC->VertexBufferPointer++;\
++mglvert++;\
++}\
++
++#define glVertex3f(x,y,z) {\
++if(CC->ShadeModel == GL_SMOOTH)\
++{\
++mglvert->v.color.r = CC->CurrentColor.r;\
++mglvert->v.color.g = CC->CurrentColor.g;\
++mglvert->v.color.b = CC->CurrentColor.b;\
++mglvert->v.color.a = CC->CurrentColor.a;\
++}\
++mglvert->bx=(GLfloat)(x);\
++mglvert->by=(GLfloat)(y);\
++mglvert->bz=(GLfloat)(z);\
++mglvert->bw=(GLfloat)1.f;\
++CC->VertexBufferPointer++;\
++mglvert++;\
++}\
++
++#define glVertex2f(x,y) {\
++if(CC->ShadeModel == GL_SMOOTH)\
++{\
++mglvert->v.color.r = CC->CurrentColor.r;\
++mglvert->v.color.g = CC->CurrentColor.g;\
++mglvert->v.color.b = CC->CurrentColor.b;\
++mglvert->v.color.a = CC->CurrentColor.a;\
++}\
++mglvert->bx=(GLfloat)(x);\
++mglvert->by=(GLfloat)(y);\
++mglvert->bz=(GLfloat)0.f;\
++mglvert->bw=(GLfloat)1.f;\
++CC->VertexBufferPointer++;\
++mglvert++;\
++}\
++
++//pointer versions
++
++#define glVertex4fv(vtx) {\
++if(CC->ShadeModel == GL_SMOOTH)\
++{\
++mglvert->v.color.r = CC->CurrentColor.r;\
++mglvert->v.color.g = CC->CurrentColor.g;\
++mglvert->v.color.b = CC->CurrentColor.b;\
++mglvert->v.color.a = CC->CurrentColor.a;\
++}\
++mglvert->bx = ((GLfloat*)(vtx))[0];\
++mglvert->by = ((GLfloat*)(vtx))[1];\
++mglvert->bz = ((GLfloat*)(vtx))[2];\
++mglvert->bw = ((GLfloat*)(vtx))[3];\
++CC->VertexBufferPointer++;\
++mglvert++;\
++}\
++
++#define glVertex3fv(vtx) {\
++if(CC->ShadeModel == GL_SMOOTH)\
++{\
++mglvert->v.color.r = CC->CurrentColor.r;\
++mglvert->v.color.g = CC->CurrentColor.g;\
++mglvert->v.color.b = CC->CurrentColor.b;\
++mglvert->v.color.a = CC->CurrentColor.a;\
++}\
++mglvert->bx = ((GLfloat*)(vtx))[0];\
++mglvert->by = ((GLfloat*)(vtx))[1];\
++mglvert->bz = ((GLfloat*)(vtx))[2];\
++mglvert->bw = (GLfloat)1.f;\
++CC->VertexBufferPointer++;\
++mglvert++;\
++}\
++
++#define glVertex2fv(vtx) {\
++if(CC->ShadeModel == GL_SMOOTH)\
++{\
++mglvert->v.color.r = CC->CurrentColor.r;\
++mglvert->v.color.g = CC->CurrentColor.g;\
++mglvert->v.color.b = CC->CurrentColor.b;\
++mglvert->v.color.a = CC->CurrentColor.a;\
++}\
++mglvert->bx = ((GLfloat*)(vtx))[0];\
++mglvert->by = ((GLfloat*)(vtx))[1];\
++mglvert->bz = (GLfloat)0.f;\
++mglvert->bw = (GLfloat)1.f;\
++CC->VertexBufferPointer++;\
++mglvert++;\
++}\
++
++#define glVertex2i(ax,ay) {mglVertex2f((GLfloat)(ax),(GLfloat)(ay))}
++
++
++//Client states
++
++#ifdef VA_SANITY_CHECK
++
++	extern void Swap_TextureCoordPointers(GLcontext context, GLboolean enable);
++
++#else 
++
++	#define Swap_TextureCoordPointers(c,e) {}
++
++#endif
++
++
++#define glEnableClientState(state) {\
++switch((GLenum)(state)) {\
++case GL_TEXTURE_COORD_ARRAY:CC->ClientState |= GLCS_TEXTURE;Swap_TextureCoordPointers(CC, GL_TRUE);break;\
++case GL_COLOR_ARRAY:CC->ClientState |= GLCS_COLOR;break;\
++case GL_VERTEX_ARRAY:CC->ClientState |= GLCS_VERTEX;break;\
++default:GLFlagError(context, 1, GL_INVALID_ENUM);break;} }
++
++#define glDisableClientState(state) {\
++switch((GLenum)(state)) {\
++case GL_TEXTURE_COORD_ARRAY:CC->ClientState &= ~GLCS_TEXTURE;Swap_TextureCoordPointers(CC, GL_FALSE);break;\
++case GL_COLOR_ARRAY:CC->ClientState &= ~GLCS_COLOR;break;\
++case GL_VERTEX_ARRAY:CC->ClientState &= ~GLCS_VERTEX;break;\
++default:GLFlagError(context, 1, GL_INVALID_ENUM);break;} }
++
++
++//index generation in glBegin/glEnd construct:
++
++#define glArrayElement(element) {\
++CC->ElementIndex[CC->VertexBufferPointer++] = (UWORD)(element);}
++
++#define glPointSize(size) {\
++CC->CurrentPointSize = (GLfloat)(size);}
++
++#endif
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+\ No newline at end of file
+diff --git a/include/mgl/minigl.h b/include/mgl/minigl.h
+index 469a311..1006f34 100644
+--- a/include/mgl/minigl.h
++++ b/include/mgl/minigl.h
+@@ -104,10 +104,10 @@ MGLAPI void glColor3f(GLfloat red, GLfloat green, GLfloat blue)
+ 	else if (blue>1.f)	blue = 1.f;
+ #endif
+ 
+-	CC->CurrentColor.r = (GLfloat)red;
+-	CC->CurrentColor.g = (GLfloat)green;
+-	CC->CurrentColor.b = (GLfloat)blue;
+-	CC->CurrentColor.a = (GLfloat)1.f;
++	CC->CurrentColor.r = (W3D_Float)red;
++	CC->CurrentColor.g = (W3D_Float)green;
++	CC->CurrentColor.b = (W3D_Float)blue;
++	CC->CurrentColor.a = (W3D_Float)1.f;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+@@ -127,30 +127,30 @@ MGLAPI void glColor3fv(GLfloat *v)
+ 	if (blue<0.f)		blue = 0.f;
+ 	else if (blue>1.f)	blue = 1.f;
+ #endif
+-	CC->CurrentColor.r = (GLfloat)red;
+-	CC->CurrentColor.g = (GLfloat)green;
+-	CC->CurrentColor.b = (GLfloat)blue;
+-	CC->CurrentColor.a = (GLfloat)1.f;
++	CC->CurrentColor.r = (W3D_Float)red;
++	CC->CurrentColor.g = (W3D_Float)green;
++	CC->CurrentColor.b = (W3D_Float)blue;
++	CC->CurrentColor.a = (W3D_Float)1.f;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+ MGLAPI void glColor3ubv(GLubyte *v)
+ {
+-	const GLfloat f = 1.f/255.f;
+-	CC->CurrentColor.r = (GLfloat)v[0]*f;
+-	CC->CurrentColor.g = (GLfloat)v[1]*f;
+-	CC->CurrentColor.b = (GLfloat)v[2]*f;
+-	CC->CurrentColor.a = (GLfloat)1.f;
++	const W3D_Float f = 1.f/255.f;
++	CC->CurrentColor.r = (W3D_Float)v[0]*f;
++	CC->CurrentColor.g = (W3D_Float)v[1]*f;
++	CC->CurrentColor.b = (W3D_Float)v[2]*f;
++	CC->CurrentColor.a = (W3D_Float)1.f;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+ MGLAPI void glColor3ub(GLubyte red, GLubyte green, GLubyte blue)
+ {
+-	const GLfloat f = 1.f/255.f;
+-	CC->CurrentColor.r = (GLfloat)red*f;
+-	CC->CurrentColor.g = (GLfloat)green*f;
+-	CC->CurrentColor.b = (GLfloat)blue*f;
+-	CC->CurrentColor.a = (GLfloat)1.f;
++	const W3D_Float f = 1.f/255.f;
++	CC->CurrentColor.r = (W3D_Float)red*f;
++	CC->CurrentColor.g = (W3D_Float)green*f;
++	CC->CurrentColor.b = (W3D_Float)blue*f;
++	CC->CurrentColor.a = (W3D_Float)1.f;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+@@ -167,10 +167,10 @@ MGLAPI void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
+ 	else if (alpha>1.f)	alpha = 1.f;
+ #endif
+ 
+-	CC->CurrentColor.r = (GLfloat)red;
+-	CC->CurrentColor.g = (GLfloat)green;
+-	CC->CurrentColor.b = (GLfloat)blue;
+-	CC->CurrentColor.a = (GLfloat)alpha;
++	CC->CurrentColor.r = (W3D_Float)red;
++	CC->CurrentColor.g = (W3D_Float)green;
++	CC->CurrentColor.b = (W3D_Float)blue;
++	CC->CurrentColor.a = (W3D_Float)alpha;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+@@ -193,30 +193,30 @@ MGLAPI void glColor4fv(GLfloat *v)
+ 	if (alpha<0.f)		alpha = 0.f;
+ 	else if (alpha>1.f)	alpha = 1.f;
+ #endif
+-	CC->CurrentColor.r = (GLfloat)red;
+-	CC->CurrentColor.g = (GLfloat)green;
+-	CC->CurrentColor.b = (GLfloat)blue;
+-	CC->CurrentColor.a = (GLfloat)alpha;
++	CC->CurrentColor.r = (W3D_Float)red;
++	CC->CurrentColor.g = (W3D_Float)green;
++	CC->CurrentColor.b = (W3D_Float)blue;
++	CC->CurrentColor.a = (W3D_Float)alpha;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+ MGLAPI void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha)
+ {
+-	const GLfloat f = 1.f/255.f;
+-	CC->CurrentColor.r = (GLfloat)red*f;
+-	CC->CurrentColor.g = (GLfloat)green*f;
+-	CC->CurrentColor.b = (GLfloat)blue*f;
+-	CC->CurrentColor.a = (GLfloat)alpha*f;
++	const W3D_Float f = 1.f/255.f;
++	CC->CurrentColor.r = (W3D_Float)red*f;
++	CC->CurrentColor.g = (W3D_Float)green*f;
++	CC->CurrentColor.b = (W3D_Float)blue*f;
++	CC->CurrentColor.a = (W3D_Float)alpha*f;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+ MGLAPI void glColor4ubv(GLubyte *v)
+ {
+-	const GLfloat f = 1.f/255.f;
+-	CC->CurrentColor.r = (GLfloat)v[0]*f;
+-	CC->CurrentColor.g = (GLfloat)v[1]*f;
+-	CC->CurrentColor.b = (GLfloat)v[2]*f;
+-	CC->CurrentColor.a = (GLfloat)v[3]*f;
++	const W3D_Float f = 1.f/255.f;
++	CC->CurrentColor.r = (W3D_Float)v[0]*f;
++	CC->CurrentColor.g = (W3D_Float)v[1]*f;
++	CC->CurrentColor.b = (W3D_Float)v[2]*f;
++	CC->CurrentColor.a = (W3D_Float)v[3]*f;
+ 	CC->UpdateCurrentColor = GL_TRUE;
+ }
+ 
+@@ -437,8 +437,8 @@ MGLAPI void glTexCoord2f(GLfloat s, GLfloat t)
+ {
+ 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
+ 
+-	thisvertex.v.u0 = (GLfloat)s;
+-	thisvertex.v.v0 = (GLfloat)t;
++	thisvertex.v.u = (W3D_Float)s;
++	thisvertex.v.v = (W3D_Float)t;
+ 
+ 	#undef thisvertex
+ }
+@@ -447,8 +447,8 @@ MGLAPI void glTexCoord2fv(GLfloat *v)
+ {
+ 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
+ 
+-	thisvertex.v.u0 = (GLfloat)v[0];
+-	thisvertex.v.v0 = (GLfloat)v[1];
++	thisvertex.v.u = (W3D_Float)v[0];
++	thisvertex.v.v = (W3D_Float)v[1];
+ 
+ 	#undef thisvertex
+ }
+@@ -457,8 +457,8 @@ MGLAPI void glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q)
+ {
+ 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
+ 
+-	thisvertex.v.u0 = (GLfloat)(s/q);
+-	thisvertex.v.v0 = (GLfloat)(t/q);
++	thisvertex.v.u = (W3D_Float)(s/q);
++	thisvertex.v.v = (W3D_Float)(t/q);
+ 	thisvertex.q = q;
+ 
+ 	CC->CurrentTexQValid = GL_TRUE;
+@@ -470,8 +470,8 @@ MGLAPI void glTexCoord4fv(GLfloat *v)
+ {
+ 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
+ 
+-	thisvertex.v.u0 = (GLfloat)(v[0]/v[3]);
+-	thisvertex.v.v0 = (GLfloat)(v[1]/v[3]);
++	thisvertex.v.u = (W3D_Float)(v[0]/v[3]);
++	thisvertex.v.v = (W3D_Float)(v[1]/v[3]);
+ 	thisvertex.q = v[3];
+ 
+ 	CC->CurrentTexQValid = GL_TRUE;
+@@ -537,10 +537,10 @@ MGLAPI void glVertex2f(GLfloat x, GLfloat y)
+ 
+ 	if(CC->ShadeModel == GL_SMOOTH)
+ 	{
+-	thisvertex.color.r = CC->CurrentColor.r;
+-	thisvertex.color.g = CC->CurrentColor.g;
+-	thisvertex.color.b = CC->CurrentColor.b;
+-	thisvertex.color.a = CC->CurrentColor.a;
++	thisvertex.v.color.r = CC->CurrentColor.r;
++	thisvertex.v.color.g = CC->CurrentColor.g;
++	thisvertex.v.color.b = CC->CurrentColor.b;
++	thisvertex.v.color.a = CC->CurrentColor.a;
+ 	}
+ 
+ 	CC->VertexBufferPointer++;
+@@ -561,10 +561,10 @@ MGLAPI void glVertex2fv(GLfloat *v)
+ 
+ 	if(CC->ShadeModel == GL_SMOOTH)
+ 	{
+-	thisvertex.color.r = CC->CurrentColor.r;
+-	thisvertex.color.g = CC->CurrentColor.g;
+-	thisvertex.color.b = CC->CurrentColor.b;
+-	thisvertex.color.a = CC->CurrentColor.a;
++	thisvertex.v.color.r = CC->CurrentColor.r;
++	thisvertex.v.color.g = CC->CurrentColor.g;
++	thisvertex.v.color.b = CC->CurrentColor.b;
++	thisvertex.v.color.a = CC->CurrentColor.a;
+ 	}
+ 
+ 	CC->VertexBufferPointer++;
+@@ -585,10 +585,10 @@ MGLAPI void glVertex3f(GLfloat x, GLfloat y, GLfloat z)
+ 
+ 	if(CC->ShadeModel == GL_SMOOTH)
+ 	{
+-	thisvertex.color.r = CC->CurrentColor.r;
+-	thisvertex.color.g = CC->CurrentColor.g;
+-	thisvertex.color.b = CC->CurrentColor.b;
+-	thisvertex.color.a = CC->CurrentColor.a;
++	thisvertex.v.color.r = CC->CurrentColor.r;
++	thisvertex.v.color.g = CC->CurrentColor.g;
++	thisvertex.v.color.b = CC->CurrentColor.b;
++	thisvertex.v.color.a = CC->CurrentColor.a;
+ 	}
+ 
+ 	CC->VertexBufferPointer++;
+@@ -609,10 +609,10 @@ MGLAPI void glVertex3fv(GLfloat *v)
+ 
+ 	if(CC->ShadeModel == GL_SMOOTH)
+ 	{
+-	thisvertex.color.r = CC->CurrentColor.r;
+-	thisvertex.color.g = CC->CurrentColor.g;
+-	thisvertex.color.b = CC->CurrentColor.b;
+-	thisvertex.color.a = CC->CurrentColor.a;
++	thisvertex.v.color.r = CC->CurrentColor.r;
++	thisvertex.v.color.g = CC->CurrentColor.g;
++	thisvertex.v.color.b = CC->CurrentColor.b;
++	thisvertex.v.color.a = CC->CurrentColor.a;
+ 	}
+ 
+ 	CC->VertexBufferPointer++;
+@@ -633,10 +633,10 @@ MGLAPI void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+ 
+ 	if(CC->ShadeModel == GL_SMOOTH)
+ 	{
+-	thisvertex.color.r = CC->CurrentColor.r;
+-	thisvertex.color.g = CC->CurrentColor.g;
+-	thisvertex.color.b = CC->CurrentColor.b;
+-	thisvertex.color.a = CC->CurrentColor.a;
++	thisvertex.v.color.r = CC->CurrentColor.r;
++	thisvertex.v.color.g = CC->CurrentColor.g;
++	thisvertex.v.color.b = CC->CurrentColor.b;
++	thisvertex.v.color.a = CC->CurrentColor.a;
+ 	}
+ 
+ 	CC->VertexBufferPointer++;
+@@ -657,10 +657,10 @@ MGLAPI void glVertex4fv(GLfloat *v)
+ 
+ 	if(CC->ShadeModel == GL_SMOOTH)
+ 	{
+-	thisvertex.color.r = CC->CurrentColor.r;
+-	thisvertex.color.g = CC->CurrentColor.g;
+-	thisvertex.color.b = CC->CurrentColor.b;
+-	thisvertex.color.a = CC->CurrentColor.a;
++	thisvertex.v.color.r = CC->CurrentColor.r;
++	thisvertex.v.color.g = CC->CurrentColor.g;
++	thisvertex.v.color.b = CC->CurrentColor.b;
++	thisvertex.v.color.a = CC->CurrentColor.a;
+ 	}
+ 
+ 	CC->VertexBufferPointer++;
+@@ -686,7 +686,6 @@ MGLAPI void * mglCreateContextFromID(GLint id, GLint *w, GLint *h)
+ }
+ 
+ 
+-
+ MGLAPI void mglDeleteContext(void)
+ {
+ 	MGLDeleteContext(CC);
+@@ -799,6 +798,10 @@ MGLAPI void glColorTableEXT(GLenum target, GLenum internalformat, GLint width, G
+ 	GLColorTable(CC, target, internalformat, width, format, type, data);
+ }
+ 
++MGLAPI void glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) // Cowcat
++{
++	GLColorMask(CC, red, green, blue, alpha);
++}
+ 
+ /*
+ ** These function have no hidden context parameter, but are handled the same in case we want to make
+@@ -940,13 +943,13 @@ MGLAPI void glMultiTexCoord2fARB(GLenum unit, GLfloat s, GLfloat t)
+ 
+ 	if(u)
+ 	{
+-		thisvertex.v.u1 = (GLfloat)s;
+-		thisvertex.v.v1 = (GLfloat)t;
++		thisvertex.tcoord.s = (W3D_Float)s;
++		thisvertex.tcoord.t = (W3D_Float)t;
+ 	}
+ 	else //unit 0
+ 	{
+-		thisvertex.v.u0 = (GLfloat)s;
+-		thisvertex.v.v0 = (GLfloat)t;
++		thisvertex.v.u = (W3D_Float)s;
++		thisvertex.v.v = (W3D_Float)t;
+ 	}
+ 
+ #undef thisvertex
+@@ -963,13 +966,13 @@ MGLAPI void glMultiTexCoord2fvARB(GLenum unit, GLfloat *v)
+ 
+ 	if(u)
+ 	{
+-		thisvertex.v.u1 = (GLfloat)v[0];
+-		thisvertex.v.v1 = (GLfloat)v[1];
++		thisvertex.tcoord.s = (W3D_Float)v[0];
++		thisvertex.tcoord.t = (W3D_Float)v[1];
+ 	}
+ 	else //unit 0
+ 	{
+-		thisvertex.v.u0 = (GLfloat)v[0];
+-		thisvertex.v.v0 = (GLfloat)v[1];
++		thisvertex.v.u = (W3D_Float)v[0];
++		thisvertex.v.v = (W3D_Float)v[1];
+ 	}
+ 
+ #undef thisvertex
+@@ -980,4 +983,16 @@ MGLAPI void mglDrawMultitexBuffer(GLenum s, GLenum d, GLenum env)
+ 	MGLDrawMultitexBuffer (CC, s, d, env);
+ }
+ 
++// Cowcat
++MGLAPI void mglSetPointer(void)
++{
++	MGLSetPointer(CC);
++}
++
++MGLAPI void mglClearPointer(void)
++{
++	MGLClearPointer(CC);
++}
++//
++
+ #endif
+diff --git a/include/mgl/modes.h b/include/mgl/modes.h
+index 88e87b1..c3d56cc 100644
+--- a/include/mgl/modes.h
++++ b/include/mgl/modes.h
+@@ -15,9 +15,9 @@
+ #ifndef __MGL_MODES_H
+ #define __MGL_MODES_H
+ 
+-/* Warp3D/Warp3D.h dropped -- nothing in this file actually references a
+- * W3D_* type, confirmed by grep against MiniGL's original (only this now-
+- * removed #include line matched). */
++#pragma pack(push,2)
++#include <Warp3D/Warp3D.h>
++#pragma pack(pop)
+ 
+ #define MGL_MAX_MODE 80
+ 
+diff --git a/include/mgl/vertexbuffer.h b/include/mgl/vertexbuffer.h
+index 9c0a1db..2022e97 100644
+--- a/include/mgl/vertexbuffer.h
++++ b/include/mgl/vertexbuffer.h
+@@ -1,69 +1,35 @@
+ /*
+- * MiniGLV3D fork of MiniGL/include/mgl/vertexbuffer.h -- Phase G.
++ * $Id: vertexbuffer.h,v 1.1.1.1 2000/04/07 19:44:51 tfrieden Exp $
+  *
+- * MGLVertex_t redefined around V3DVertex (backend/include/v3d_vertex.h,
+- * already designed in Phase A) instead of W3D_Vertex. Per v3d_vertex.h's
+- * own header comment, V3DVertex deliberately holds ONLY the data an
+- * attribute record will point at -- CPU-only working state (clip
+- * outcode, integer raster coords, pre-clip backup coords, texture Q,
+- * normal-buffer index) stays out of it and becomes MGLVertex_t's own
+- * fields again here, same role they had around the old W3D_Vertex.
++ * $Date: 2000/04/07 19:44:51 $
++ * $Revision: 1.1.1.1 $
++ *
++ * (C) 1999 by Hyperion
++ * All rights reserved
++ *
++ * This file is part of the MiniGL library project
++ * See the file Licence.txt for more details
+  *
+- * Field mapping from the original:
+- *  - W3D_Vertex v (x,y,z,w position; u,v,tex3d texcoord; W3D_Color color;
+- *    W3D_ColorRGB spec; l lambda) -> V3DVertex v (x,y,z,w position;
+- *    packed UBYTE r,g,b,a color; u0,v0/u1,v1 for BOTH texture units --
+- *    see below). tex3d (3D texture coordinate, Warp3D-private/rarely
+- *    used per v3d_vertex.h's own comment) and spec/lambda (specular
+- *    color, mipmap LOD bias -- no consumer anywhere in this codebase,
+- *    no shader variant built so far reads either) are dropped; nothing
+- *    referenced them outside W3D_Vertex's own definition.
+- *  - struct TCoord_t tcoord (texture unit 1's s/t, bolted on separately
+- *    because W3D_Vertex only had ONE built-in texcoord pair for unit 0)
+- *    -> DROPPED. V3DVertex already has two clean, symmetric texcoord
+- *    pairs (u0/v0, u1/v1) matching V3D_MAX_TEXUNIT==MAX_TEXUNIT==2 --
+- *    unit 0 was v.u/v.v, unit 1 was tcoord.s/tcoord.t in the original;
+- *    both are now v.u0/v.v0 and v.u1/v.v1. Confirmed real usage of both
+- *    (not vestigial) by reading minigl.h's glMultiTexCoord2fARB/
+- *    glMultiTexCoord2fvARB, which write unit 0 to v.u/v.v and unit>0 to
+- *    tcoord.s/tcoord.t -- those call sites are ported to the new
+- *    v.u0/v0/u1/v1 fields as part of this same phase.
+- *  - GLubyte color[4] "for vertexarrays" -> DROPPED. V3DVertex.r/g/b/a
+- *    is already exactly this (packed UBYTE, normalized) -- having both
+- *    the old float-based color (via W3D_Color) AND a separate packed
+- *    UBYTE copy was the original's own accommodation for two different
+- *    Warp3D vertex-array paths; V3DVertex picks the one canonical
+- *    hardware-facing representation instead (v3d_vertex.h's own
+- *    reasoning).
+- *  - GLuint cbuf_pos -- the original's own comment already says
+- *    "unused (16 byte align)" -- dropped outright, not carried forward
+- *    as dead padding.
+- *  - outcode, xi/yi/zi, bx/by/bz/bw, q, normal -- all genuinely CPU-only
+- *    working state with no hardware-attribute role, kept unchanged.
+- *  - color, ADDED (not in the original's field list at all): hclip.c's
+- *    clip routines LERP-interpolate the old W3D_Color's r/g/b/a as
+- *    floats at every clip plane (found by reading hclip.c directly, not
+- *    assumed) -- V3DVertex.r/g/b/a is deliberately packed UBYTE per its
+- *    own header comment ("CPU-side lighting/blending still computes
+- *    color in float internally... packs to UBYTE when writing into a
+- *    V3DVertex, not a separate secondary-buffer conversion step"), so
+- *    that interpolation math needs a float CPU-working copy same as
+- *    bx/by/bz/bw is a CPU-working copy of clip-space position. Packing
+- *    this into v.r/g/b/a is a later phase's job (draw.c finalizing a
+- *    vertex for the hardware attribute buffer), not done here.
+  */
+ 
+ #ifndef __VERTEXBUFFER_H
+ #define __VERTEXBUFFER_H
+ 
+-#include "../../../backend/include/v3d_vertex.h"
++#pragma pack(push,2)
++#include <Warp3D/Warp3D.h>
++#pragma pack(pop)
+ 
+-struct MGLVertex_t {
++struct TCoord_t
++{
++    W3D_Float	s,t;
+ 
+-	V3DVertex	v; /* hardware-facing: x,y,z,w position; r,g,b,a packed color; u0,v0/u1,v1 texcoords */
++};
++
++struct MGLVertex_t {
+ 
+-	MGLColor	color; /* CPU-working float color -- see header comment on why this exists alongside v.r/g/b/a */
++	W3D_Vertex	v; //currently 64 bytes
+ 
++	struct TCoord_t	tcoord; //virtual unit
+ 	ULONG		outcode;
+ 
+ 	int		xi,yi,zi;
+@@ -72,6 +38,9 @@ struct MGLVertex_t {
+ 	GLfloat		q;
+ 
+ 	GLuint		normal;   //NormalBuffer-index
++
++	GLuint		cbuf_pos; //unused (16 byte align)
++	GLubyte		color[4]; //for vertexarrays
+ };
+ 
+ typedef struct MGLVertex_t MGLVertex;
+diff --git a/mglQ3/Makefile.wos.gcc b/mglQ3/Makefile.wos.gcc
+index 4fa468b..7a7c6f4 100644
+--- a/mglQ3/Makefile.wos.gcc
++++ b/mglQ3/Makefile.wos.gcc
+@@ -1,16 +1,26 @@
+ # Build the bundled mglQ3 core for WarpOS/PPC with GCC.
+-CC      := ppc-amigaos-gcc
+-AR      := ppc-amigaos-ar
+-RANLIB  := ppc-amigaos-ranlib
++# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
++# ppc-morphos-wos-toolchain). Flags follow the hardware-proven V10 backend
++# build (Makefile.backend.gcc there): -O3, no fast-math (clip/W math), no
++# unwind tables, -DINLINE=__inline. The image's os-includeppc already carries
++# Warp3D/, powerpc/ and the proto/ headers sysinc.h needs; the bundled
++# mglQ3/include (mgl/, pragmas/, clib/, inline/) is searched first.
++CC      := ppc-morphos-gcc
++AR      := ppc-morphos-ar
++RANLIB  := ppc-morphos-ranlib
+ 
+ CPU     ?= 604e
+ OBJDIR  ?= obj_wos_gcc
+ LIBDIR  ?= lib
+ LIBNAME ?= $(LIBDIR)/libmgl-wos.a
+ 
+-CFLAGS = -std=c99 -warpup -mcpu=$(CPU) -O2 -ffast-math -mmultiple \
+-         -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow \
+-         -DNDEBUG -D__PPC__ -Iinclude -Wall -Wextra
++CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
++         -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-fast-math \
++         -fno-strict-aliasing -DINLINE=__inline -I../include -Isrc
++# -I../include (the package's public headers, = these mgl/ headers) rather
++# than -Iinclude: mglQ3/include also carries 68k-style proto/, inline/,
++# clib/, pragmas/ and Warp3D/ copies that would shadow the toolchain's PPC
++# cross-call headers (Warp3D, cybergraphics) with #pragma libcall stubs.
+ 
+ SOURCES = src/context.c src/init.c src/fog.c src/texture.c src/others.c \
+           src/matrix.c src/vertexbuffer.c src/hclip.c src/draw.c src/aclip.c \
+diff --git a/mglQ3/src/aclip.c b/mglQ3/src/aclip.c
+index 329c036..3d95e3c 100644
+--- a/mglQ3/src/aclip.c
++++ b/mglQ3/src/aclip.c
+@@ -661,7 +661,14 @@ int AE_ClipTriangle(GLcontext context, PolyBuffer *in, PolyBuffer *out, int *cli
+ 	{
+ 		DOCLIP_F(MGL_CLIP_NEGW, ClipWZero);
+ 
+-		if((or_codes & MGL_CLIP_NEGW) && (or_codes != MGL_CLIP_NEGW))
++		/* The W-zero clip creates vertices at w=CLIP_EPS whose outcodes
++		 * (near/left/right) MUST be folded back into or_codes even when the
++		 * triangle's only clip bit was NEGW: a large polygon with one
++		 * behind-camera vertex and on-screen ones otherwise (a floor) has
++		 * or_codes == NEGW exactly, and skipping the recompute sent 1/w=1e7
++		 * vertices to the Voodoo (whole-triangle texture corruption,
++		 * hardware-confirmed 2026-09-01). Same fix as the V10 tree. */
++		if(or_codes & MGL_CLIP_NEGW)
+ 		{
+ 		   	or_codes = context->VertexBuffer[a->verts[0]].outcode | context->VertexBuffer[a->verts[1]].outcode;
+ 
+@@ -686,7 +693,14 @@ int AE_ClipTriangle(GLcontext context, PolyBuffer *in, PolyBuffer *out, int *cli
+ 	{
+ 		DOCLIP(MGL_CLIP_NEGW, ClipWZero);
+ 
+-		if((or_codes & MGL_CLIP_NEGW) && (or_codes != MGL_CLIP_NEGW))
++		/* The W-zero clip creates vertices at w=CLIP_EPS whose outcodes
++		 * (near/left/right) MUST be folded back into or_codes even when the
++		 * triangle's only clip bit was NEGW: a large polygon with one
++		 * behind-camera vertex and on-screen ones otherwise (a floor) has
++		 * or_codes == NEGW exactly, and skipping the recompute sent 1/w=1e7
++		 * vertices to the Voodoo (whole-triangle texture corruption,
++		 * hardware-confirmed 2026-09-01). Same fix as the V10 tree. */
++		if(or_codes & MGL_CLIP_NEGW)
+ 		{
+ 		   	or_codes = context->VertexBuffer[a->verts[0]].outcode | context->VertexBuffer[a->verts[1]].outcode;
+ 
+diff --git a/mglQ3/src/context.c b/mglQ3/src/context.c
+index 3b23e30..0b12058 100644
+--- a/mglQ3/src/context.c
++++ b/mglQ3/src/context.c
+@@ -68,10 +68,50 @@ static GLboolean newGuardBand = GL_FALSE;	// Default: guardband clipping is off
+ 
+ static struct TagItem tags[7];
+ 
++extern struct Library *UtilityBase; /* defined in init.c */
++
+ static GLboolean sys_MaybeOpenVidLibs(void)
+ {
+ 	#ifdef __PPC__
+ 
++	/* WarpOS direct dispatch (MiniGLOpen() -> dllLoadLibrary() ->
++	 * MGLGetDispatchTable()) never runs MGLInit() (init.c), which is the only
++	 * place stock MiniGL opens intuition/graphics/utility. Without these the
++	 * screen/window calls below go through NULL library bases (hardware-
++	 * confirmed crash on the A4000T, 2026-08-20). Same fix as the V10 tree. */
++	if (!IntuitionBase)
++	{
++		IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 0L);
++
++		if (!IntuitionBase)
++		{
++			printf("Error opening intuition.library\n");
++			return GL_FALSE;
++		}
++	}
++
++	if (!GfxBase)
++	{
++		GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0L);
++
++		if (!GfxBase)
++		{
++			printf("Error opening graphics.library\n");
++			return GL_FALSE;
++		}
++	}
++
++	if (!UtilityBase)
++	{
++		UtilityBase = OpenLibrary("utility.library", 0L);
++
++		if (!UtilityBase)
++		{
++			printf("Error opening utility.library\n");
++			return GL_FALSE;
++		}
++	}
++
+ 	if (!Warp3DPPCBase)
+ 	{
+ 		Warp3DPPCBase = OpenLibrary("Warp3DPPC.library", 2L);
+@@ -707,7 +747,7 @@ static GLboolean vid_OpenDisplay(GLcontext context, int pw, int ph, ULONG id)
+ 
+ 	//FIXME:Really do it. This is lame
+ 	context->w3dFormat = W3D_R5G6B5;
+-	context->w3dAlphaFormat = W3D_A4R4G4B4;
++	context->w3dAlphaFormat = W3D_A1R5G5B5;  /* V10 carry-over: texture.c ARGBFORM packs 1555 and tags textures with this (GLRedneck) */
+ 	context->w3dBytesPerTexel = 2;
+ 
+ 	vid_Pointer(context->w3dWindow);
+@@ -842,7 +882,10 @@ static GLboolean vid_OpenWindow(GLcontext context, int w, int h)
+ 	context->NumBuffers = 0;		// Indicates we're using a window
+ 	context->DoSync	    = GL_TRUE;		// Enable sync'ing
+ 
+-	context->w3dBitMap  = AllocBitMap(w, h, 8, BMF_MINPLANES|BMF_DISPLAYABLE, context->w3dWindow->RPort->BitMap);
++	/* Depth must follow the window's real bitmap (a hardcoded 8 gave slowly
++	 * cycling garbage colours on a 16-bit Voodoo3 screen, hardware-confirmed
++	 * 2026-08-20). Same fix as the V10 tree. */
++	context->w3dBitMap  = AllocBitMap(w, h, GetBitMapAttr(context->w3dWindow->RPort->BitMap, BMA_DEPTH), BMF_MINPLANES|BMF_DISPLAYABLE, context->w3dWindow->RPort->BitMap);
+ 
+ 	if (!context->w3dBitMap)
+ 		goto Duh;
+@@ -952,7 +995,7 @@ static GLboolean vid_OpenWindow(GLcontext context, int w, int h)
+ 
+ 	//FIXME:Really do it. This is lame
+ 	context->w3dFormat = W3D_R5G6B5;
+-	context->w3dAlphaFormat = W3D_A4R4G4B4;
++	context->w3dAlphaFormat = W3D_A1R5G5B5;  /* V10 carry-over: texture.c ARGBFORM packs 1555 and tags textures with this (GLRedneck) */
+ 	context->w3dBytesPerTexel = 2;
+ 
+ 	//vid_Pointer(context->w3dWindow); // maybe - Cowcat 
+diff --git a/mglQ3/src/matrix.c b/mglQ3/src/matrix.c
+index 654ceca..a172b1f 100644
+--- a/mglQ3/src/matrix.c
++++ b/mglQ3/src/matrix.c
+@@ -16,6 +16,7 @@
+ #include <math.h>
+ 
+ #include <stdlib.h>
++#include <stdio.h> /* printf in the MGLPrintMatrix* diagnostics (was only included under __VBCC__) */
+ 
+ #ifdef __VBCC__
+ #include <stdio.h>
+diff --git a/mglQ3/src/texture.c b/mglQ3/src/texture.c
+index 37a36d4..036f775 100644
+--- a/mglQ3/src/texture.c
++++ b/mglQ3/src/texture.c
+@@ -36,6 +36,10 @@ void tex_SetWrap(GLcontext context, GLenum wrap_s, GLenum wrap_t);
+ ** Funnily A8 and L8 are supported in hardware by Voodoo3 but these formats seem to have some Warp3D related problems. */
+ 
+ //NOTE: warp3D has problem with one byte/pixel formats
++/* OoT-WOS 2026-08-29: EIGHTBIT_TEXTURES (real W3D_A8 / W3D_L8 for GL_ALPHA /
++ * GL_LUMINANCE uploads) was tried on the Voodoo3 for 8-bit glow alpha: broken
++ * rendering plus a PPC exception. W3D_L8A8 likewise rendered garbage. Both
++ * stay OFF; soft alpha on this driver is A4R4G4B4 (dithered). */
+ //#define EIGHTBIT_TEXTURES 1
+ 
+ //Formats directly supported by Warp3D:
+@@ -61,7 +65,7 @@ static void SHORT4444_565(GLcontext context, GLubyte *input, UWORD *output, int
+ static void A8_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void L8_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void RGBA_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+-static void RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
++static ULONG RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void RGB_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void RGB_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ //void RGBA4_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+@@ -229,10 +233,10 @@ ULONG tex_GLFilter2W3D(GLenum filter)
+ 	{
+ 		case GL_NEAREST:		return W3D_NEAREST;
+ 		case GL_LINEAR:			return W3D_LINEAR;
+-		case GL_NEAREST_MIPMAP_NEAREST: return W3D_NEAREST; //W3D_NEAREST_MIP_NEAREST;
+-		case GL_LINEAR_MIPMAP_NEAREST:	return W3D_LINEAR; //W3D_LINEAR_MIP_NEAREST;
+-		case GL_NEAREST_MIPMAP_LINEAR:	return W3D_NEAREST; //W3D_NEAREST_MIP_LINEAR;
+-		case GL_LINEAR_MIPMAP_LINEAR:	return W3D_LINEAR; //W3D_LINEAR_MIP_LINEAR;
++		case GL_NEAREST_MIPMAP_NEAREST: return W3D_NEAREST_MIP_NEAREST;
++		case GL_LINEAR_MIPMAP_NEAREST:	return W3D_LINEAR_MIP_NEAREST;
++		case GL_NEAREST_MIPMAP_LINEAR:	return W3D_NEAREST_MIP_LINEAR;
++		case GL_LINEAR_MIPMAP_LINEAR:	return W3D_LINEAR_MIP_LINEAR;
+ 	}
+ 
+ 	return 0;
+@@ -255,6 +259,13 @@ void tex_SetFilter(GLcontext context, GLenum min, GLenum mag)
+ 	minf = tex_GLFilter2W3D(min);
+ 	magf = tex_GLFilter2W3D(mag);
+ 
++	if (context->NoMipMapping)
++	{
++		/* textures have no chains: never ask the driver for mip sampling */
++		if (minf == W3D_NEAREST_MIP_NEAREST || minf == W3D_NEAREST_MIP_LINEAR) minf = W3D_NEAREST;
++		else if (minf == W3D_LINEAR_MIP_NEAREST || minf == W3D_LINEAR_MIP_LINEAR) minf = W3D_LINEAR;
++	}
++
+ 	W3D_SetFilter(context->w3dContext, tex, minf, magf);
+ }
+ 
+@@ -308,6 +319,10 @@ void GLTexParameteri(GLcontext context, GLenum target, GLenum pname, GLint param
+ 
+ 	switch(pname)
+ 	{
++		case 0x20003: /* GTA3-WOS: enable real mipmapping for this context */
++			context->NoMipMapping = param ? GL_FALSE : GL_TRUE;
++			return;
++
+ 		case GL_TEXTURE_MIN_FILTER:
+ 			mag = context->MagFilter;
+ 			//tex_SetFilter(context, mag, (GLenum)param);
+@@ -481,11 +496,50 @@ void GLBindTexture(GLcontext context, GLenum target, GLuint texture)
+ 	input = oldInput + realWidth;
+ 
+ 
++/* GLRedneck 2026-08-22: pack the alpha texture format as A1R5G5B5 (1-bit
++ * alpha + 5-bit R/G/B) instead of A4R4G4B4. Build-engine games (Redneck
++ * Rampage, Duke, SW) have only ON/OFF texture transparency (palette index
++ * 255), so 1 alpha bit is exactly enough, and 5-bit colour halves the
++ * banding that made the HUD/sprites look "grainy" on real Voodoo3 hardware.
++ * MUST match context->w3dAlphaFormat = W3D_A1R5G5B5 (context.c). */
+ #define ARGBFORM(a,r,g,b) \
+-	( (UWORD)(((( a & 0xf0 ) << 8)	\
+-	|(( r & 0xf0 ) << 4)  \
+-	|(( g & 0xf0 )	   )  \
+-	|(( b & 0xf0 ) >> 4))) )
++	( (UWORD)( (( a & 0x80 ) << 8) \
++	| (( r & 0xf8 ) << 7)  \
++	| (( g & 0xf8 ) << 2)  \
++	| (( b & 0xf8 ) >> 3)) )
++
++/* OoT-WOS 2026-08-29: A4R4G4B4 packing for textures whose alpha channel is
++ * NOT just on/off (soft edges, fades, translucent panels). With only the
++ * 1 alpha bit above, every texel below alpha 128 vanished: OoT's file-select
++ * window (alpha ramps 252 -> 0 across its width) lost its right half. The
++ * RGBA upload path picks the format per texture, so on/off-alpha textures
++ * keep the 5-bit colour of A1R5G5B5. */
++#define ARGBFORM4444(a,r,g,b) \
++	( (UWORD)( (( a & 0xf0 ) << 8) \
++	| (( r & 0xf0 ) << 4)  \
++	|  ( g & 0xf0 )        \
++	| (( b & 0xf0 ) >> 4)) )
++
++/* 8-bit -> 4-bit with a 4x4 ordered (Bayer) dither: 16 levels show as hard
++ * bands in any gradient (OoT's file-select window fade); spreading each
++ * step as a fine pattern hides them, and bilinear sampling smooths the
++ * pattern further. t is the Bayer threshold 0..15 for the texel's (x,y).
++ * v4 = floor(v8/17 + (t+0.5)/16) computed in integers: 255 -> 15 for every
++ * t, 0 -> 0 for every t, in between the value alternates between the two
++ * nearest levels in proportion to the remainder. */
++static const UBYTE sBayer4[4][4] = {
++	{  0,  8,  2, 10 },
++	{ 12,  4, 14,  6 },
++	{  3, 11,  1,  9 },
++	{ 15,  7, 13,  5 }
++};
++#define DITH4(v8,t) ( (UBYTE)( ( ( (ULONG)(v8) * 32u + ((2u * (t) + 1u) * 17u) ) / 544u ) << 4 ) )
++/* alpha: never dither UP from transparent -- a texel with alpha < 8 stays at
++ * level 0. Otherwise the faint border texels of soft sprites (and every
++ * clamp-replicated margin of them) turn into a sparse checker of level-1
++ * pixels: straight faint bands along each quad edge (Navi's wings/glow). */
++#define DITH4A(v8,t) ( ((v8) < 8) ? 0 : DITH4(v8,t) )
++#define ARGBFORM4444D(a,r,g,b,t) ARGBFORM4444(DITH4A(a,t), DITH4(r,t), DITH4(g,t), DITH4(b,t))
+ 
+ /*
+ #define RGBFORM(r,g,b) \
+@@ -578,7 +632,8 @@ void tex_ConvertTexture(GLcontext context)
+ 	if (!oldtex)
+ 		return;
+ 
+-	if (oldtex->texfmtsrc == context->w3dAlphaFormat)
++	if (oldtex->texfmtsrc == context->w3dAlphaFormat || oldtex->texfmtsrc == W3D_A4R4G4B4 ||
++	    oldtex->texfmtsrc == W3D_L8A8 || oldtex->texfmtsrc == W3D_A8)
+ 		return;
+ 
+ 	tex_AddAlpha(output, oldtex->texwidth, oldtex->texheight);
+@@ -759,10 +814,48 @@ static void RGBA_RGB(GLcontext context, GLubyte *input, UWORD *output, int width
+ 	}
+ }
+ 
+-static void RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height)
++static ULONG RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height)
+ {
+ 	int	i, j;
+ 	UBYTE	r, g, b, a;
++	int	soft = 0;
++
++	/* does any texel carry an intermediate alpha? (on/off within +-7 is
++	 * treated as binary so filtered edges don't force the 4-bit colour) */
++	{
++		const GLubyte *ap = input + 3;
++		long n = (long)width * height;
++		while (n-- > 0)
++		{
++			if (*ap > 7 && *ap < 248)
++			{
++				soft = 1;
++				break;
++			}
++			ap += 4;
++		}
++	}
++
++	if (soft)
++	{
++		for (i=0; i < height; i++)
++		{
++			const UBYTE *brow = sBayer4[i & 3];
++			for (j=0; j < width; j++)
++			{
++				UBYTE t = brow[j & 3];
++				r = *input++;
++				g = *input++;
++				b = *input++;
++				a = *input++;
++				*output++ = ARGBFORM4444D(a,r,g,b,t);
++			}
++
++			CORRECT_ALIGN
++		}
++
++		return W3D_A4R4G4B4;
++	}
+ 
+ 	for (i=0; i < height; i++)
+ 	{
+@@ -777,6 +870,8 @@ static void RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int widt
+ 
+ 		CORRECT_ALIGN
+ 	}
++
++	return context->w3dAlphaFormat;
+ }
+ 
+ static void RGB_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height)
+@@ -915,9 +1010,10 @@ void INDEX_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int
+ 			for (j=0; j<width; j++)
+ 			{
+ 				ind = *input++;
+-				r = *RGB_GET(ind);
+-				g = *(ARGB_GET(ind)+1);
+-				b = *(ARGB_GET(ind)+2);
++				/* SilentHill-WOS 2026-08-23: A,R,G,B palette (see INDEX_ARGB) */
++				r = *(ARGB_GET(ind)+1);
++				g = *(ARGB_GET(ind)+2);
++				b = *(ARGB_GET(ind)+3);
+ 				*output++ = RGBFORM(r,g,b);
+ 			}
+ 
+@@ -956,11 +1052,15 @@ void INDEX_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int
+ 		{
+ 			for (j=0; j < width; j++)
+ 			{
++				/* SilentHill-WOS 2026-08-23: GLColorTable() stores GL_RGBA palettes as
++				 * A,R,G,B (4 bytes/entry); this read used the 3-byte RGB stride for r
++				 * and a one-off channel order -> rotated colours, alpha taken from
++				 * blue. Read what GLColorTable wrote. */
+ 				ind = *input++;
+-				r = *RGB_GET(ind);
+-				g = *(ARGB_GET(ind)+1);
+-				b = *(ARGB_GET(ind)+2);
+-				a = *(ARGB_GET(ind)+3);
++				a = *(ARGB_GET(ind)+0);
++				r = *(ARGB_GET(ind)+1);
++				g = *(ARGB_GET(ind)+2);
++				b = *(ARGB_GET(ind)+3);
+ 				*output++ = ARGBFORM(a,r,g,b);
+ 			}
+ 
+@@ -1071,8 +1171,7 @@ ULONG MGLConvert(GLcontext context, const GLvoid *inputp, UWORD *output, int wid
+ 					return context->w3dAlphaFormat;
+ 
+ 				case GL_RGBA:
+-					RGBA_ARGB(context, (GLubyte *)input, output, width, height);
+-					return context->w3dAlphaFormat;
++					return RGBA_ARGB(context, (GLubyte *)input, output, width, height);
+ 
+ 				case GL_COLOR_INDEX:
+ 					INDEX_ARGB(context, (GLubyte *)input, output, width, height);
+@@ -1100,6 +1199,17 @@ ULONG MGLConvert(GLcontext context, const GLvoid *inputp, UWORD *output, int wid
+ 
+ 			break;
+ 
++		case 0x8056: /* GL_RGBA4: GTA3-WOS 2026-08-30, packed 4444 data -> real 4-bit alpha texture */
++
++			switch(format)
++			{
++				case MGL_UNSIGNED_SHORT_4_4_4_4:
++					SHORT4444_4444(context, (GLubyte *)input, output, width, height);
++					return W3D_A4R4G4B4;
++			}
++
++			break;
++
+ 		case MGL_UNSIGNED_SHORT_4_4_4_4:
+ 
+ 			switch(format)
+@@ -1130,8 +1240,50 @@ void UpdateTexImage(W3D_Context *context, W3D_Texture *texture, void *image, int
+ #endif
+ 
+ 
++static void GLTexImage2DLevelN(GLcontext context, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLenum format, const GLvoid *pixels)
++{
++	int current;
++	W3D_Texture *tex;
++	UBYTE *target;
++	ULONG iw, ih, BytesPerTexel;
++	int i;
++
++	if (context->ActiveTexture)
++		current = context->VirtualBinding;
++	else
++		current = context->CurrentBinding;
++
++	tex = context->w3dTexBuffer[current];
++	if (tex == NULL || context->w3dTexMemory[current] == NULL)
++		return;
++
++	BytesPerTexel = context->w3dBytesPerTexel;
++	target = context->w3dTexMemory[current];
++	iw = tex->texwidth;
++	ih = tex->texheight;
++	for (i = 0; i < level; i++)
++	{
++		target += iw * ih * BytesPerTexel;
++		if (iw > 1) iw /= 2;
++		if (ih > 1) ih /= 2;
++	}
++	if ((ULONG)width != iw || (ULONG)height != ih)
++		return;
++
++	MGLConvert(context, pixels, (UWORD *)target, width, height, internalformat, format);
++	W3D_UpdateTexImage(context->w3dContext, tex, target, level, NULL);
++}
++
+ void GLTexImage2D(GLcontext context, GLenum gltarget, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels)
+ {
++	if (level != 0 && context->NoMipMapping == GL_FALSE)
++	{
++		if (type == MGL_UNSIGNED_SHORT_5_6_5 || type == MGL_UNSIGNED_SHORT_4_4_4_4)
++			format = type;
++		GLTexImage2DLevelN(context, level, internalformat, width, height, format, pixels);
++		return;
++	}
++
+ 	GLTexImage2DNoMIP(context, gltarget, level, internalformat, width, height, border, format, type, pixels);
+ 	return;
+ 
+@@ -1253,6 +1405,13 @@ void GLTexImage2D(GLcontext context, GLenum gltarget, GLint level, GLint interna
+ 
+ 	useFormat = MGLConvert(context, pixels, (UWORD *)target, width, height, internalformat, format);
+ 
++	/* format changed on re-upload (per-texture 1555/4444): recreate, see GLTexImage2DNoMIP */
++	if (context->w3dTexBuffer[current] && context->w3dTexBuffer[current]->texfmtsrc != useFormat)
++	{
++		W3D_FreeTexObj(context->w3dContext, context->w3dTexBuffer[current]);
++		context->w3dTexBuffer[current] = NULL;
++	}
++
+ 	/*
+ 	** Create a new W3D_Texture if none was present, using the converted
+ 	** data.
+@@ -1365,7 +1524,7 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 		internalformat = GL_RGBA;
+ 	}
+ 
+-	//LOG(3, glTexImage2DNoMIP, "target = %d level=%d, size=%d×%d", gltarget, level, width, height);
++	//LOG(3, glTexImage2DNoMIP, "target = %d level=%d, size=%dï¿½%d", gltarget, level, width, height);
+ 	GLFlagError(context, type != GL_UNSIGNED_BYTE && type != MGL_UNSIGNED_SHORT_5_6_5 && type != MGL_UNSIGNED_SHORT_4_4_4_4, GL_INVALID_OPERATION);
+ 	GLFlagError(context, gltarget != GL_TEXTURE_2D, GL_INVALID_ENUM);
+ 
+@@ -1373,7 +1532,7 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 	{
+ 		format = type;
+ 
+-		// kprintf("Texture of MGL_UNSIGNED_SHORT_5_6_5, target = %d, level = %d, size %d×%d\n", gltarget, level, width, height);
++		// kprintf("Texture of MGL_UNSIGNED_SHORT_5_6_5, target = %d, level = %d, size %dï¿½%d\n", gltarget, level, width, height);
+ 	}
+ 
+ 	if (level != 0)
+@@ -1397,6 +1556,8 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 		*/
+ 
+ 		targetsize = (w * h * BytesPerTexel);
++		if (!context->NoMipMapping)
++			targetsize *= 2; /* level 0 + the whole chain (sum < 4/3) with slack */
+ 
+ 		if (context->w3dTexMemory[current])
+ 			tex_Free(context->w3dTexMemory[current]);
+@@ -1414,7 +1575,17 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 	*/
+ 
+ 	useFormat = MGLConvert(context, pixels, (UWORD *)target, width, height, internalformat, format);
+-	
++
++	/* the converted data may now be in a different texel format than the
++	 * existing texture object (per-texture 1555/4444 choice above): a
++	 * W3D_UpdateTexImage into the old format would show garbage, so
++	 * recreate the object the same way a size change does */
++	if (context->w3dTexBuffer[current] && context->w3dTexBuffer[current]->texfmtsrc != useFormat)
++	{
++		W3D_FreeTexObj(context->w3dContext, context->w3dTexBuffer[current]);
++		context->w3dTexBuffer[current] = NULL;
++	}
++
+ 	/*
+ 	** Create a new W3D_Texture if none was present, using the converted
+ 	** data.
+@@ -1424,6 +1595,8 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 	if (context->w3dTexBuffer[current] == NULL)
+ 	{
+ 		W3D_Texture *tex;
++		void *miparray[20];
++		int nTags;
+ 
+ 		AllocTags[0].ti_Tag  = W3D_ATO_IMAGE;
+ 		AllocTags[0].ti_Data = (ULONG)context->w3dTexMemory[current];
+@@ -1437,13 +1610,53 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 		AllocTags[3].ti_Tag  = W3D_ATO_HEIGHT;
+ 		AllocTags[3].ti_Data = h;
+ 
+-		AllocTags[4].ti_Tag  = TAG_DONE;
+-		AllocTags[4].ti_Data = 0;
++		/* GTA3-WOS mipmaps: the chain lives right after level 0 in
++		 * w3dTexMemory (see targetsize above); mask 0 = all levels
++		 * user-supplied (StormMesa does the same on this hardware) */
++		nTags = 4;
++		if (!context->NoMipMapping)
++		{
++			int mi = 0;
++			ULONG iw = w, ih = h;
++			UBYTE *mp = context->w3dTexMemory[current];
++			while (!(iw == 1 && ih == 1) && mi < 18)
++			{
++				mp += iw * ih * BytesPerTexel;
++				if (iw > 1) iw /= 2;
++				if (ih > 1) ih /= 2;
++				miparray[mi++] = mp;
++			}
++			miparray[mi] = NULL;
++			if (mi > 0)
++			{
++				AllocTags[4].ti_Tag  = W3D_ATO_MIPMAP;
++				AllocTags[4].ti_Data = 0;
++				AllocTags[5].ti_Tag  = W3D_ATO_MIPMAPPTRS;
++				AllocTags[5].ti_Data = (ULONG)miparray;
++				nTags = 6;
++			}
++		}
++		AllocTags[nTags].ti_Tag  = TAG_DONE;
++		AllocTags[nTags].ti_Data = 0;
+ 
+ 		tex = W3D_AllocTexObj(context->w3dContext, &error, AllocTags);
+ 
+ 		if (tex == NULL || error != W3D_SUCCESS)
++		{
++			/* SilentHill-WOS 2026-08-24 diag: this leaves w3dTexBuffer[current]
++			 * NULL, so any later glBindTexture(current-mapped-id) silently
++			 * texture-less (Set_W3D_Texture(...,NULL) equivalent) -> renders
++			 * white. Surface it â€” likely VRAM exhaustion under a large
++			 * concurrent texture cache. */
++			static int warned = 0;
++			if (warned < 20)
++			{
++				warned++;
++				fprintf(stderr, "[MiniGL] W3D_AllocTexObj FAILED (#%d): tex=%p error=%lu fmt=%lu %ldx%ld\n",
++					warned, (void*)tex, (unsigned long)error, (unsigned long)useFormat, (long)w, (long)h);
++			}
+ 			return;
++		}
+ 
+ 		context->w3dTexBuffer[current] = tex;
+ 
+@@ -1779,9 +1992,9 @@ void GLTexSubImage2DNoMIP (GLcontext context, GLenum target, GLint level, GLint
+ 	UpdateTexImage(context->w3dContext, context->w3dTexBuffer[current], context->w3dTexMemory[current], 0, NULL);
+ 
+ 	#else
+-
++	/* MC2-WOS 2026-08-30: W3D_UpdateTexSubImage (partial upload) was tried here and suspected in a
++	 * PPC exception on the Voodoo3 driver; back to the full update until proven safe. */
+ 	W3D_UpdateTexImage(context->w3dContext, context->w3dTexBuffer[current], context->w3dTexMemory[current], 0, NULL);
+-
+ 	#endif
+ /*
+ 	}
+diff --git a/mglQ3/src/vertexarray.h b/mglQ3/src/vertexarray.h
+index 83a4069..8b5f0e5 100644
+--- a/mglQ3/src/vertexarray.h
++++ b/mglQ3/src/vertexarray.h
+@@ -33,9 +33,15 @@ static INLINE void Set_W3D_ColorPointer (W3D_Context *w3dctx, void *pointer, int
+ 
+ static INLINE void Set_W3D_TexCoordPointer (W3D_Context *w3dctx, void *pointer, int stride, int u, int v_off, int w_off, ULONG flags)
+ {
++	/* SilentHill-WOS 2026-08-23: TPVOffs and TPFlags were silently dropped â€”
++	 * without W3D_TEXCOORD_NORMALIZED the driver reads 0..1 texcoords as raw
++	 * texel coordinates and every array-drawn triangle samples one texel
++	 * (the "white world" of the W3D_DrawArray/Elements path). */
+ 	w3dctx->TexCoordPointer[u] = pointer;
+ 	w3dctx->TPStride[u] = stride;
++	w3dctx->TPVOffs[u] = v_off;
+ 	w3dctx->TPWOffs[u] = w_off;
++	w3dctx->TPFlags[u] = flags;
+ }
+ 
+ static INLINE void Set_W3D_VertexPointer (W3D_Context *w3dctx, void *pointer, int stride, ULONG mode, ULONG flags)
+@@ -78,7 +84,9 @@ static INLINE void Reset_W3D_ArrayPointers (GLcontext glctx, GLbitfield cls)
+ 	{
+ 		glctx->w3dContext->TexCoordPointer[0] = (void *)glctx->ArrayPointer.texcoords;
+ 		glctx->w3dContext->TPStride[0] = (int)glctx->ArrayPointer.texcoordstride;
++		glctx->w3dContext->TPVOffs[0] = (int)sizeof(GLfloat);   /* SilentHill-WOS: see Set_W3D_TexCoordPointer */
+ 		glctx->w3dContext->TPWOffs[0] = (int)glctx->ArrayPointer.w_off;
++		glctx->w3dContext->TPFlags[0] = W3D_TEXCOORD_NORMALIZED;
+ 	}
+ }
+ 
+@@ -102,7 +110,9 @@ static INLINE void Reset_W3D_ArrayPointers (GLcontext glctx, GLbitfield cls)
+ { \
+ 	w3dctx->TexCoordPointer[(int)u] = (void *)pointer;	\
+ 	w3dctx->TPStride[(int)u] = (int)stride;		\
++	w3dctx->TPVOffs[(int)u] = (int)v_off;		\
+ 	w3dctx->TPWOffs[(int)u] = (int)w_off;		\
++	w3dctx->TPFlags[(int)u] = (ULONG)flags;		\
+ }
+ 
+ #define Set_W3D_VertexPointer(w3dctx, pointer, stride, mode, flags) \
+@@ -141,7 +151,9 @@ static INLINE void Reset_W3D_ArrayPointers (GLcontext glctx, GLbitfield cls)
+ 	{ \
+ 		glctx->w3dContext->TexCoordPointer[0] = (void *)glctx->ArrayPointer.texcoords; \
+ 		glctx->w3dContext->TPStride[0] = (int)glctx->ArrayPointer.texcoordstride; \
++		glctx->w3dContext->TPVOffs[0] = (int)sizeof(GLfloat); \
+ 		glctx->w3dContext->TPWOffs[0] = (int)glctx->ArrayPointer.w_off; \
++		glctx->w3dContext->TPFlags[0] = W3D_TEXCOORD_NORMALIZED; \
+ 	} \
+ }
+ 
+diff --git a/probe_dll_symbols.sh b/probe_dll_symbols.sh
+new file mode 100644
+index 0000000..52fa819
+--- /dev/null
++++ b/probe_dll_symbols.sh
+@@ -0,0 +1,10 @@
++#!/bin/bash
++# Sanity check of the built V19 artifacts: exported bootstrap symbols, the V19
++# dispatch tail, and no unexpected undefined symbols in the DLL.
++docker run --rm -v /mnt/c/Users/mvick/ClaudeCode/MiniGL_WOS:/work -w /work ppc-morphos-wos-toolchain:latest bash -c '
++NM=/opt/ppc-morphos/bin/ppc-morphos-nm
++echo "=== DLL: bootstrap + tail ==="; $NM bin/minigl_ppc.dll | grep -E " [TtDd] (MGLGetDispatchTable|dllFindResource|dllLoadResource|dllFreeResource|PPC_GLMultiDrawArrays|PPC_MGLGetInputWindowHandle|GLInterleavedArrays|MGLEmergencyCloseScreen|MGLCreateContext|GLBegin)$"
++echo "=== DLL: undefined ==="; $NM bin/minigl_ppc.dll | grep " U " | head
++echo "=== import lib exports ==="; $NM lib/libminigl_dispatch_ppc.a | grep -E " [TDB] (MiniGLOpen|MiniGLClose|MiniGLDispatch|MiniGLBase)$"
++echo "=== core lib: a few ==="; $NM mglQ3/lib/libmgl-wos.a | grep -E " T (GLTexImage2D|GLDrawElements|GLLockArrays|MGLSetPointer|MGLMainLoop)$"
++'

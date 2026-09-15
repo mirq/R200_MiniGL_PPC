@@ -1,0 +1,510 @@
+diff --git a/mglQ3/src/context.c b/mglQ3/src/context.c
+index bf92bfe..0b12058 100644
+--- a/mglQ3/src/context.c
++++ b/mglQ3/src/context.c
+@@ -747,7 +747,7 @@ static GLboolean vid_OpenDisplay(GLcontext context, int pw, int ph, ULONG id)
+ 
+ 	//FIXME:Really do it. This is lame
+ 	context->w3dFormat = W3D_R5G6B5;
+-	context->w3dAlphaFormat = W3D_A4R4G4B4;
++	context->w3dAlphaFormat = W3D_A1R5G5B5;  /* V10 carry-over: texture.c ARGBFORM packs 1555 and tags textures with this (GLRedneck) */
+ 	context->w3dBytesPerTexel = 2;
+ 
+ 	vid_Pointer(context->w3dWindow);
+@@ -995,7 +995,7 @@ static GLboolean vid_OpenWindow(GLcontext context, int w, int h)
+ 
+ 	//FIXME:Really do it. This is lame
+ 	context->w3dFormat = W3D_R5G6B5;
+-	context->w3dAlphaFormat = W3D_A4R4G4B4;
++	context->w3dAlphaFormat = W3D_A1R5G5B5;  /* V10 carry-over: texture.c ARGBFORM packs 1555 and tags textures with this (GLRedneck) */
+ 	context->w3dBytesPerTexel = 2;
+ 
+ 	//vid_Pointer(context->w3dWindow); // maybe - Cowcat 
+diff --git a/mglQ3/src/texture.c b/mglQ3/src/texture.c
+index 37a36d4..036f775 100644
+--- a/mglQ3/src/texture.c
++++ b/mglQ3/src/texture.c
+@@ -36,6 +36,10 @@ void tex_SetWrap(GLcontext context, GLenum wrap_s, GLenum wrap_t);
+ ** Funnily A8 and L8 are supported in hardware by Voodoo3 but these formats seem to have some Warp3D related problems. */
+ 
+ //NOTE: warp3D has problem with one byte/pixel formats
++/* OoT-WOS 2026-08-29: EIGHTBIT_TEXTURES (real W3D_A8 / W3D_L8 for GL_ALPHA /
++ * GL_LUMINANCE uploads) was tried on the Voodoo3 for 8-bit glow alpha: broken
++ * rendering plus a PPC exception. W3D_L8A8 likewise rendered garbage. Both
++ * stay OFF; soft alpha on this driver is A4R4G4B4 (dithered). */
+ //#define EIGHTBIT_TEXTURES 1
+ 
+ //Formats directly supported by Warp3D:
+@@ -61,7 +65,7 @@ static void SHORT4444_565(GLcontext context, GLubyte *input, UWORD *output, int
+ static void A8_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void L8_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void RGBA_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+-static void RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
++static ULONG RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void RGB_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ static void RGB_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+ //void RGBA4_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height);
+@@ -229,10 +233,10 @@ ULONG tex_GLFilter2W3D(GLenum filter)
+ 	{
+ 		case GL_NEAREST:		return W3D_NEAREST;
+ 		case GL_LINEAR:			return W3D_LINEAR;
+-		case GL_NEAREST_MIPMAP_NEAREST: return W3D_NEAREST; //W3D_NEAREST_MIP_NEAREST;
+-		case GL_LINEAR_MIPMAP_NEAREST:	return W3D_LINEAR; //W3D_LINEAR_MIP_NEAREST;
+-		case GL_NEAREST_MIPMAP_LINEAR:	return W3D_NEAREST; //W3D_NEAREST_MIP_LINEAR;
+-		case GL_LINEAR_MIPMAP_LINEAR:	return W3D_LINEAR; //W3D_LINEAR_MIP_LINEAR;
++		case GL_NEAREST_MIPMAP_NEAREST: return W3D_NEAREST_MIP_NEAREST;
++		case GL_LINEAR_MIPMAP_NEAREST:	return W3D_LINEAR_MIP_NEAREST;
++		case GL_NEAREST_MIPMAP_LINEAR:	return W3D_NEAREST_MIP_LINEAR;
++		case GL_LINEAR_MIPMAP_LINEAR:	return W3D_LINEAR_MIP_LINEAR;
+ 	}
+ 
+ 	return 0;
+@@ -255,6 +259,13 @@ void tex_SetFilter(GLcontext context, GLenum min, GLenum mag)
+ 	minf = tex_GLFilter2W3D(min);
+ 	magf = tex_GLFilter2W3D(mag);
+ 
++	if (context->NoMipMapping)
++	{
++		/* textures have no chains: never ask the driver for mip sampling */
++		if (minf == W3D_NEAREST_MIP_NEAREST || minf == W3D_NEAREST_MIP_LINEAR) minf = W3D_NEAREST;
++		else if (minf == W3D_LINEAR_MIP_NEAREST || minf == W3D_LINEAR_MIP_LINEAR) minf = W3D_LINEAR;
++	}
++
+ 	W3D_SetFilter(context->w3dContext, tex, minf, magf);
+ }
+ 
+@@ -308,6 +319,10 @@ void GLTexParameteri(GLcontext context, GLenum target, GLenum pname, GLint param
+ 
+ 	switch(pname)
+ 	{
++		case 0x20003: /* GTA3-WOS: enable real mipmapping for this context */
++			context->NoMipMapping = param ? GL_FALSE : GL_TRUE;
++			return;
++
+ 		case GL_TEXTURE_MIN_FILTER:
+ 			mag = context->MagFilter;
+ 			//tex_SetFilter(context, mag, (GLenum)param);
+@@ -481,11 +496,50 @@ void GLBindTexture(GLcontext context, GLenum target, GLuint texture)
+ 	input = oldInput + realWidth;
+ 
+ 
++/* GLRedneck 2026-08-22: pack the alpha texture format as A1R5G5B5 (1-bit
++ * alpha + 5-bit R/G/B) instead of A4R4G4B4. Build-engine games (Redneck
++ * Rampage, Duke, SW) have only ON/OFF texture transparency (palette index
++ * 255), so 1 alpha bit is exactly enough, and 5-bit colour halves the
++ * banding that made the HUD/sprites look "grainy" on real Voodoo3 hardware.
++ * MUST match context->w3dAlphaFormat = W3D_A1R5G5B5 (context.c). */
+ #define ARGBFORM(a,r,g,b) \
+-	( (UWORD)(((( a & 0xf0 ) << 8)	\
+-	|(( r & 0xf0 ) << 4)  \
+-	|(( g & 0xf0 )	   )  \
+-	|(( b & 0xf0 ) >> 4))) )
++	( (UWORD)( (( a & 0x80 ) << 8) \
++	| (( r & 0xf8 ) << 7)  \
++	| (( g & 0xf8 ) << 2)  \
++	| (( b & 0xf8 ) >> 3)) )
++
++/* OoT-WOS 2026-08-29: A4R4G4B4 packing for textures whose alpha channel is
++ * NOT just on/off (soft edges, fades, translucent panels). With only the
++ * 1 alpha bit above, every texel below alpha 128 vanished: OoT's file-select
++ * window (alpha ramps 252 -> 0 across its width) lost its right half. The
++ * RGBA upload path picks the format per texture, so on/off-alpha textures
++ * keep the 5-bit colour of A1R5G5B5. */
++#define ARGBFORM4444(a,r,g,b) \
++	( (UWORD)( (( a & 0xf0 ) << 8) \
++	| (( r & 0xf0 ) << 4)  \
++	|  ( g & 0xf0 )        \
++	| (( b & 0xf0 ) >> 4)) )
++
++/* 8-bit -> 4-bit with a 4x4 ordered (Bayer) dither: 16 levels show as hard
++ * bands in any gradient (OoT's file-select window fade); spreading each
++ * step as a fine pattern hides them, and bilinear sampling smooths the
++ * pattern further. t is the Bayer threshold 0..15 for the texel's (x,y).
++ * v4 = floor(v8/17 + (t+0.5)/16) computed in integers: 255 -> 15 for every
++ * t, 0 -> 0 for every t, in between the value alternates between the two
++ * nearest levels in proportion to the remainder. */
++static const UBYTE sBayer4[4][4] = {
++	{  0,  8,  2, 10 },
++	{ 12,  4, 14,  6 },
++	{  3, 11,  1,  9 },
++	{ 15,  7, 13,  5 }
++};
++#define DITH4(v8,t) ( (UBYTE)( ( ( (ULONG)(v8) * 32u + ((2u * (t) + 1u) * 17u) ) / 544u ) << 4 ) )
++/* alpha: never dither UP from transparent -- a texel with alpha < 8 stays at
++ * level 0. Otherwise the faint border texels of soft sprites (and every
++ * clamp-replicated margin of them) turn into a sparse checker of level-1
++ * pixels: straight faint bands along each quad edge (Navi's wings/glow). */
++#define DITH4A(v8,t) ( ((v8) < 8) ? 0 : DITH4(v8,t) )
++#define ARGBFORM4444D(a,r,g,b,t) ARGBFORM4444(DITH4A(a,t), DITH4(r,t), DITH4(g,t), DITH4(b,t))
+ 
+ /*
+ #define RGBFORM(r,g,b) \
+@@ -578,7 +632,8 @@ void tex_ConvertTexture(GLcontext context)
+ 	if (!oldtex)
+ 		return;
+ 
+-	if (oldtex->texfmtsrc == context->w3dAlphaFormat)
++	if (oldtex->texfmtsrc == context->w3dAlphaFormat || oldtex->texfmtsrc == W3D_A4R4G4B4 ||
++	    oldtex->texfmtsrc == W3D_L8A8 || oldtex->texfmtsrc == W3D_A8)
+ 		return;
+ 
+ 	tex_AddAlpha(output, oldtex->texwidth, oldtex->texheight);
+@@ -759,10 +814,48 @@ static void RGBA_RGB(GLcontext context, GLubyte *input, UWORD *output, int width
+ 	}
+ }
+ 
+-static void RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height)
++static ULONG RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height)
+ {
+ 	int	i, j;
+ 	UBYTE	r, g, b, a;
++	int	soft = 0;
++
++	/* does any texel carry an intermediate alpha? (on/off within +-7 is
++	 * treated as binary so filtered edges don't force the 4-bit colour) */
++	{
++		const GLubyte *ap = input + 3;
++		long n = (long)width * height;
++		while (n-- > 0)
++		{
++			if (*ap > 7 && *ap < 248)
++			{
++				soft = 1;
++				break;
++			}
++			ap += 4;
++		}
++	}
++
++	if (soft)
++	{
++		for (i=0; i < height; i++)
++		{
++			const UBYTE *brow = sBayer4[i & 3];
++			for (j=0; j < width; j++)
++			{
++				UBYTE t = brow[j & 3];
++				r = *input++;
++				g = *input++;
++				b = *input++;
++				a = *input++;
++				*output++ = ARGBFORM4444D(a,r,g,b,t);
++			}
++
++			CORRECT_ALIGN
++		}
++
++		return W3D_A4R4G4B4;
++	}
+ 
+ 	for (i=0; i < height; i++)
+ 	{
+@@ -777,6 +870,8 @@ static void RGBA_ARGB(GLcontext context, GLubyte *input, UWORD *output, int widt
+ 
+ 		CORRECT_ALIGN
+ 	}
++
++	return context->w3dAlphaFormat;
+ }
+ 
+ static void RGB_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int height)
+@@ -915,9 +1010,10 @@ void INDEX_RGB(GLcontext context, GLubyte *input, UWORD *output, int width, int
+ 			for (j=0; j<width; j++)
+ 			{
+ 				ind = *input++;
+-				r = *RGB_GET(ind);
+-				g = *(ARGB_GET(ind)+1);
+-				b = *(ARGB_GET(ind)+2);
++				/* SilentHill-WOS 2026-08-23: A,R,G,B palette (see INDEX_ARGB) */
++				r = *(ARGB_GET(ind)+1);
++				g = *(ARGB_GET(ind)+2);
++				b = *(ARGB_GET(ind)+3);
+ 				*output++ = RGBFORM(r,g,b);
+ 			}
+ 
+@@ -956,11 +1052,15 @@ void INDEX_ARGB(GLcontext context, GLubyte *input, UWORD *output, int width, int
+ 		{
+ 			for (j=0; j < width; j++)
+ 			{
++				/* SilentHill-WOS 2026-08-23: GLColorTable() stores GL_RGBA palettes as
++				 * A,R,G,B (4 bytes/entry); this read used the 3-byte RGB stride for r
++				 * and a one-off channel order -> rotated colours, alpha taken from
++				 * blue. Read what GLColorTable wrote. */
+ 				ind = *input++;
+-				r = *RGB_GET(ind);
+-				g = *(ARGB_GET(ind)+1);
+-				b = *(ARGB_GET(ind)+2);
+-				a = *(ARGB_GET(ind)+3);
++				a = *(ARGB_GET(ind)+0);
++				r = *(ARGB_GET(ind)+1);
++				g = *(ARGB_GET(ind)+2);
++				b = *(ARGB_GET(ind)+3);
+ 				*output++ = ARGBFORM(a,r,g,b);
+ 			}
+ 
+@@ -1071,8 +1171,7 @@ ULONG MGLConvert(GLcontext context, const GLvoid *inputp, UWORD *output, int wid
+ 					return context->w3dAlphaFormat;
+ 
+ 				case GL_RGBA:
+-					RGBA_ARGB(context, (GLubyte *)input, output, width, height);
+-					return context->w3dAlphaFormat;
++					return RGBA_ARGB(context, (GLubyte *)input, output, width, height);
+ 
+ 				case GL_COLOR_INDEX:
+ 					INDEX_ARGB(context, (GLubyte *)input, output, width, height);
+@@ -1100,6 +1199,17 @@ ULONG MGLConvert(GLcontext context, const GLvoid *inputp, UWORD *output, int wid
+ 
+ 			break;
+ 
++		case 0x8056: /* GL_RGBA4: GTA3-WOS 2026-08-30, packed 4444 data -> real 4-bit alpha texture */
++
++			switch(format)
++			{
++				case MGL_UNSIGNED_SHORT_4_4_4_4:
++					SHORT4444_4444(context, (GLubyte *)input, output, width, height);
++					return W3D_A4R4G4B4;
++			}
++
++			break;
++
+ 		case MGL_UNSIGNED_SHORT_4_4_4_4:
+ 
+ 			switch(format)
+@@ -1130,8 +1240,50 @@ void UpdateTexImage(W3D_Context *context, W3D_Texture *texture, void *image, int
+ #endif
+ 
+ 
++static void GLTexImage2DLevelN(GLcontext context, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLenum format, const GLvoid *pixels)
++{
++	int current;
++	W3D_Texture *tex;
++	UBYTE *target;
++	ULONG iw, ih, BytesPerTexel;
++	int i;
++
++	if (context->ActiveTexture)
++		current = context->VirtualBinding;
++	else
++		current = context->CurrentBinding;
++
++	tex = context->w3dTexBuffer[current];
++	if (tex == NULL || context->w3dTexMemory[current] == NULL)
++		return;
++
++	BytesPerTexel = context->w3dBytesPerTexel;
++	target = context->w3dTexMemory[current];
++	iw = tex->texwidth;
++	ih = tex->texheight;
++	for (i = 0; i < level; i++)
++	{
++		target += iw * ih * BytesPerTexel;
++		if (iw > 1) iw /= 2;
++		if (ih > 1) ih /= 2;
++	}
++	if ((ULONG)width != iw || (ULONG)height != ih)
++		return;
++
++	MGLConvert(context, pixels, (UWORD *)target, width, height, internalformat, format);
++	W3D_UpdateTexImage(context->w3dContext, tex, target, level, NULL);
++}
++
+ void GLTexImage2D(GLcontext context, GLenum gltarget, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels)
+ {
++	if (level != 0 && context->NoMipMapping == GL_FALSE)
++	{
++		if (type == MGL_UNSIGNED_SHORT_5_6_5 || type == MGL_UNSIGNED_SHORT_4_4_4_4)
++			format = type;
++		GLTexImage2DLevelN(context, level, internalformat, width, height, format, pixels);
++		return;
++	}
++
+ 	GLTexImage2DNoMIP(context, gltarget, level, internalformat, width, height, border, format, type, pixels);
+ 	return;
+ 
+@@ -1253,6 +1405,13 @@ void GLTexImage2D(GLcontext context, GLenum gltarget, GLint level, GLint interna
+ 
+ 	useFormat = MGLConvert(context, pixels, (UWORD *)target, width, height, internalformat, format);
+ 
++	/* format changed on re-upload (per-texture 1555/4444): recreate, see GLTexImage2DNoMIP */
++	if (context->w3dTexBuffer[current] && context->w3dTexBuffer[current]->texfmtsrc != useFormat)
++	{
++		W3D_FreeTexObj(context->w3dContext, context->w3dTexBuffer[current]);
++		context->w3dTexBuffer[current] = NULL;
++	}
++
+ 	/*
+ 	** Create a new W3D_Texture if none was present, using the converted
+ 	** data.
+@@ -1365,7 +1524,7 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 		internalformat = GL_RGBA;
+ 	}
+ 
+-	//LOG(3, glTexImage2DNoMIP, "target = %d level=%d, size=%d×%d", gltarget, level, width, height);
++	//LOG(3, glTexImage2DNoMIP, "target = %d level=%d, size=%dï¿½%d", gltarget, level, width, height);
+ 	GLFlagError(context, type != GL_UNSIGNED_BYTE && type != MGL_UNSIGNED_SHORT_5_6_5 && type != MGL_UNSIGNED_SHORT_4_4_4_4, GL_INVALID_OPERATION);
+ 	GLFlagError(context, gltarget != GL_TEXTURE_2D, GL_INVALID_ENUM);
+ 
+@@ -1373,7 +1532,7 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 	{
+ 		format = type;
+ 
+-		// kprintf("Texture of MGL_UNSIGNED_SHORT_5_6_5, target = %d, level = %d, size %d×%d\n", gltarget, level, width, height);
++		// kprintf("Texture of MGL_UNSIGNED_SHORT_5_6_5, target = %d, level = %d, size %dï¿½%d\n", gltarget, level, width, height);
+ 	}
+ 
+ 	if (level != 0)
+@@ -1397,6 +1556,8 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 		*/
+ 
+ 		targetsize = (w * h * BytesPerTexel);
++		if (!context->NoMipMapping)
++			targetsize *= 2; /* level 0 + the whole chain (sum < 4/3) with slack */
+ 
+ 		if (context->w3dTexMemory[current])
+ 			tex_Free(context->w3dTexMemory[current]);
+@@ -1414,7 +1575,17 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 	*/
+ 
+ 	useFormat = MGLConvert(context, pixels, (UWORD *)target, width, height, internalformat, format);
+-	
++
++	/* the converted data may now be in a different texel format than the
++	 * existing texture object (per-texture 1555/4444 choice above): a
++	 * W3D_UpdateTexImage into the old format would show garbage, so
++	 * recreate the object the same way a size change does */
++	if (context->w3dTexBuffer[current] && context->w3dTexBuffer[current]->texfmtsrc != useFormat)
++	{
++		W3D_FreeTexObj(context->w3dContext, context->w3dTexBuffer[current]);
++		context->w3dTexBuffer[current] = NULL;
++	}
++
+ 	/*
+ 	** Create a new W3D_Texture if none was present, using the converted
+ 	** data.
+@@ -1424,6 +1595,8 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 	if (context->w3dTexBuffer[current] == NULL)
+ 	{
+ 		W3D_Texture *tex;
++		void *miparray[20];
++		int nTags;
+ 
+ 		AllocTags[0].ti_Tag  = W3D_ATO_IMAGE;
+ 		AllocTags[0].ti_Data = (ULONG)context->w3dTexMemory[current];
+@@ -1437,13 +1610,53 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
+ 		AllocTags[3].ti_Tag  = W3D_ATO_HEIGHT;
+ 		AllocTags[3].ti_Data = h;
+ 
+-		AllocTags[4].ti_Tag  = TAG_DONE;
+-		AllocTags[4].ti_Data = 0;
++		/* GTA3-WOS mipmaps: the chain lives right after level 0 in
++		 * w3dTexMemory (see targetsize above); mask 0 = all levels
++		 * user-supplied (StormMesa does the same on this hardware) */
++		nTags = 4;
++		if (!context->NoMipMapping)
++		{
++			int mi = 0;
++			ULONG iw = w, ih = h;
++			UBYTE *mp = context->w3dTexMemory[current];
++			while (!(iw == 1 && ih == 1) && mi < 18)
++			{
++				mp += iw * ih * BytesPerTexel;
++				if (iw > 1) iw /= 2;
++				if (ih > 1) ih /= 2;
++				miparray[mi++] = mp;
++			}
++			miparray[mi] = NULL;
++			if (mi > 0)
++			{
++				AllocTags[4].ti_Tag  = W3D_ATO_MIPMAP;
++				AllocTags[4].ti_Data = 0;
++				AllocTags[5].ti_Tag  = W3D_ATO_MIPMAPPTRS;
++				AllocTags[5].ti_Data = (ULONG)miparray;
++				nTags = 6;
++			}
++		}
++		AllocTags[nTags].ti_Tag  = TAG_DONE;
++		AllocTags[nTags].ti_Data = 0;
+ 
+ 		tex = W3D_AllocTexObj(context->w3dContext, &error, AllocTags);
+ 
+ 		if (tex == NULL || error != W3D_SUCCESS)
++		{
++			/* SilentHill-WOS 2026-08-24 diag: this leaves w3dTexBuffer[current]
++			 * NULL, so any later glBindTexture(current-mapped-id) silently
++			 * texture-less (Set_W3D_Texture(...,NULL) equivalent) -> renders
++			 * white. Surface it â€” likely VRAM exhaustion under a large
++			 * concurrent texture cache. */
++			static int warned = 0;
++			if (warned < 20)
++			{
++				warned++;
++				fprintf(stderr, "[MiniGL] W3D_AllocTexObj FAILED (#%d): tex=%p error=%lu fmt=%lu %ldx%ld\n",
++					warned, (void*)tex, (unsigned long)error, (unsigned long)useFormat, (long)w, (long)h);
++			}
+ 			return;
++		}
+ 
+ 		context->w3dTexBuffer[current] = tex;
+ 
+@@ -1779,9 +1992,9 @@ void GLTexSubImage2DNoMIP (GLcontext context, GLenum target, GLint level, GLint
+ 	UpdateTexImage(context->w3dContext, context->w3dTexBuffer[current], context->w3dTexMemory[current], 0, NULL);
+ 
+ 	#else
+-
++	/* MC2-WOS 2026-08-30: W3D_UpdateTexSubImage (partial upload) was tried here and suspected in a
++	 * PPC exception on the Voodoo3 driver; back to the full update until proven safe. */
+ 	W3D_UpdateTexImage(context->w3dContext, context->w3dTexBuffer[current], context->w3dTexMemory[current], 0, NULL);
+-
+ 	#endif
+ /*
+ 	}
+diff --git a/mglQ3/src/vertexarray.h b/mglQ3/src/vertexarray.h
+index 83a4069..8b5f0e5 100644
+--- a/mglQ3/src/vertexarray.h
++++ b/mglQ3/src/vertexarray.h
+@@ -33,9 +33,15 @@ static INLINE void Set_W3D_ColorPointer (W3D_Context *w3dctx, void *pointer, int
+ 
+ static INLINE void Set_W3D_TexCoordPointer (W3D_Context *w3dctx, void *pointer, int stride, int u, int v_off, int w_off, ULONG flags)
+ {
++	/* SilentHill-WOS 2026-08-23: TPVOffs and TPFlags were silently dropped â€”
++	 * without W3D_TEXCOORD_NORMALIZED the driver reads 0..1 texcoords as raw
++	 * texel coordinates and every array-drawn triangle samples one texel
++	 * (the "white world" of the W3D_DrawArray/Elements path). */
+ 	w3dctx->TexCoordPointer[u] = pointer;
+ 	w3dctx->TPStride[u] = stride;
++	w3dctx->TPVOffs[u] = v_off;
+ 	w3dctx->TPWOffs[u] = w_off;
++	w3dctx->TPFlags[u] = flags;
+ }
+ 
+ static INLINE void Set_W3D_VertexPointer (W3D_Context *w3dctx, void *pointer, int stride, ULONG mode, ULONG flags)
+@@ -78,7 +84,9 @@ static INLINE void Reset_W3D_ArrayPointers (GLcontext glctx, GLbitfield cls)
+ 	{
+ 		glctx->w3dContext->TexCoordPointer[0] = (void *)glctx->ArrayPointer.texcoords;
+ 		glctx->w3dContext->TPStride[0] = (int)glctx->ArrayPointer.texcoordstride;
++		glctx->w3dContext->TPVOffs[0] = (int)sizeof(GLfloat);   /* SilentHill-WOS: see Set_W3D_TexCoordPointer */
+ 		glctx->w3dContext->TPWOffs[0] = (int)glctx->ArrayPointer.w_off;
++		glctx->w3dContext->TPFlags[0] = W3D_TEXCOORD_NORMALIZED;
+ 	}
+ }
+ 
+@@ -102,7 +110,9 @@ static INLINE void Reset_W3D_ArrayPointers (GLcontext glctx, GLbitfield cls)
+ { \
+ 	w3dctx->TexCoordPointer[(int)u] = (void *)pointer;	\
+ 	w3dctx->TPStride[(int)u] = (int)stride;		\
++	w3dctx->TPVOffs[(int)u] = (int)v_off;		\
+ 	w3dctx->TPWOffs[(int)u] = (int)w_off;		\
++	w3dctx->TPFlags[(int)u] = (ULONG)flags;		\
+ }
+ 
+ #define Set_W3D_VertexPointer(w3dctx, pointer, stride, mode, flags) \
+@@ -141,7 +151,9 @@ static INLINE void Reset_W3D_ArrayPointers (GLcontext glctx, GLbitfield cls)
+ 	{ \
+ 		glctx->w3dContext->TexCoordPointer[0] = (void *)glctx->ArrayPointer.texcoords; \
+ 		glctx->w3dContext->TPStride[0] = (int)glctx->ArrayPointer.texcoordstride; \
++		glctx->w3dContext->TPVOffs[0] = (int)sizeof(GLfloat); \
+ 		glctx->w3dContext->TPWOffs[0] = (int)glctx->ArrayPointer.w_off; \
++		glctx->w3dContext->TPFlags[0] = W3D_TEXCOORD_NORMALIZED; \
+ 	} \
+ }
+ 

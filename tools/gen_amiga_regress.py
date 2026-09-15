@@ -32,6 +32,9 @@ TESTS = [
     ("quake.world-room-walk", "Walk the real Quake e1m1 entrance hall out and back: world geometry plus doors in texture-chained batches, depth-tested, no effects."),
     ("quake.fog-linear", "Render near, middle, and far surfaces with Quake-style linear vertex fog."),
     ("quake.pickup-flash", "Pulse Quake's textured device-coordinate MGL_FLATFAN blend: a green burst fading over 0.75 s every 3 s, plain scene between pulses."),
+    ("quake.console-init", "Replay the game's boot upload sequence (GL_Init, particle texture, charset, conback) with the GL error drained after each phase."),
+    ("quake.console", "Replay the console's exact calls with the real PAK0 assets: RGB5_A1 conback alpha blend plus per-glyph RGB5_A1 charset fans in device space, LINEAR, MODULATE."),
+    ("quake.console-full", "Same console fully open with the real assets: opaque conback blit plus charset glyphs."),
     ("present.stability", "Draw and present one identical frame repeatedly and check the result never drifts."),
 ]
 

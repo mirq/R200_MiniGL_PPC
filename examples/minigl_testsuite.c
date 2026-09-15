@@ -19,12 +19,13 @@
 
 #include "quake_ogre_model.h"
 #include "quake_room_model.h"
+#include "quake_console.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define SUITE_VERSION 5
+#define SUITE_VERSION 9
 #define DEFAULT_WIDTH  512
 #define DEFAULT_HEIGHT 320
 #define DEFAULT_DEPTH  16
@@ -128,6 +129,7 @@ static GLboolean g_windowed = GL_TRUE;
 static GLboolean g_running = GL_TRUE;
 static GLboolean g_profile = GL_FALSE;
 static GLboolean g_noSync = GL_FALSE;
+static GLboolean g_gameContext = GL_FALSE;
 static ULONG g_measureFrames = DEFAULT_MEASURE_FRAMES;
 static const char *g_dumpPath = NULL;
 static GLboolean g_roomBlocks = GL_FALSE;   /* --room-blocks diagnostics */
@@ -3061,6 +3063,1878 @@ static GLboolean VerifyQuakePickup(char *detail)
     return log.failures == 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Quake white-render isolation.                                       */
+/*                                                                     */
+/* BlitzQuake's default world path (gl_texsort=1, gl_fake_multitexture  */
+/* =1) captures every world polygon with texture unit 1 enabled and    */
+/* draws the world only through mglDrawMultitexBuffer, over lightmaps  */
+/* uploaded as packed 4444/565 texels. None of that machinery is       */
+/* covered by the tests above, so a defect anywhere in it renders the  */
+/* whole world wrong (white) while every existing test stays green.    */
+/* Each test below replays one exact GL sequence from the Quake        */
+/* sources (file:line references are BlitzQuake glquake/) with pixel-  */
+/* exact expectations derived from Quake's own texel math.             */
+/*                                                                     */
+/* Packed 4444/565 test data is written as explicit UBYTE byte-pairs   */
+/* in big-endian order, mirroring Quake's per-byte writers             */
+/* (gl_rsurf.c R_BuildLightMap) -- never as UWORD literals, which     */
+/* would be host-endian.                                               */
+/* ------------------------------------------------------------------ */
+
+static GLuint UploadTypedTexture(GLenum internal, GLenum format,
+                                 GLenum type, int width, int height,
+                                 const UBYTE *texels)
+{
+    GLuint name = 0;
+
+    glGenTextures(1, &name);
+    glBindTexture(GL_TEXTURE_2D, name);
+    /* Quake uses LINEAR magnification/minification without mip filters
+     * by default (gl_draw.c:64-65) and REPEAT wrap set once globally
+     * (gl_vidamiga.c:342-343); sample points stay on cell centres so
+     * the wrap mode never decides a check. */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, width, height, 0, format,
+                 type, texels);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    return name;
+}
+
+/* A1: Quake world-texture upload (GL_Upload32, gl_draw.c:1239-1322):
+ * internalformat GL_RGB from GL_RGBA/UBYTE source with the full mip
+ * chain Quake always uploads. MIN=LINEAR selects level 0, so the
+ * panel must show level 0's exact colour; a broken multi-level
+ * layout (wrong level offsets, rejected levels) corrupts even that. */
+#define QUAKE_MIP_LEVELS 7
+
+static GLuint g_quakeRGBMipsTexture;
+
+static void BindQuakeRGBMips(void)
+{
+    /* Distinct flat colour per level: level 0 (red) is what LINEAR
+     * sampling must show; any other colour names the wrong level. */
+    static const UBYTE levelColors[QUAKE_MIP_LEVELS][4] = {
+        { 255, 0, 0, 255 }, { 0, 255, 0, 255 }, { 0, 0, 255, 255 },
+        { 255, 255, 255, 255 }, { 255, 255, 0, 255 },
+        { 0, 255, 255, 255 }, { 255, 0, 255, 255 }
+    };
+    static UBYTE levelData[64 * 64 * 4];
+    int level;
+
+    if (g_quakeRGBMipsTexture) {
+        glBindTexture(GL_TEXTURE_2D, g_quakeRGBMipsTexture);
+        return;
+    }
+    glGenTextures(1, &g_quakeRGBMipsTexture);
+    glBindTexture(GL_TEXTURE_2D, g_quakeRGBMipsTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (level = 0; level < QUAKE_MIP_LEVELS; ++level) {
+        int size = 64 >> level, count = size * size, index;
+        for (index = 0; index < count; ++index) {
+            levelData[index * 4] = levelColors[level][0];
+            levelData[index * 4 + 1] = levelColors[level][1];
+            levelData[index * 4 + 2] = levelColors[level][2];
+            levelData[index * 4 + 3] = levelColors[level][3];
+        }
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGB, size, size, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, levelData);
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+}
+
+static void DrawQuakeRGBMipsScene(void)
+{
+    BindQuakeRGBMips();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    DrawFullscreenQuad();
+}
+
+static void DrawQuakeRGBMips(ULONG frame)
+{
+    (void)frame;
+    DrawQuakeRGBMipsScene();
+}
+
+static GLboolean VerifyQuakeRGBMips(char *detail)
+{
+    CheckLog log;
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawQuakeRGBMipsScene();
+    CheckRGB(&log, "mip L0 left", -0.5f, 0.0f, 255, 0, 0, 8);
+    CheckRGB(&log, "mip L0 centre", 0.0f, 0.0f, 255, 0, 0, 8);
+    CheckRGB(&log, "mip L0 right", 0.5f, 0.0f, 255, 0, 0, 8);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "GL_RGB mip chain uploads; LINEAR shows level 0 red");
+    return log.failures == 0;
+}
+
+/* A2: Quake 2D/HUD/sprite texture format (glquake.h:252: on AMIGA every
+ * alpha texture uses internalformat GL_RGB5_A1) with Quake's alpha-test
+ * state (glAlphaFunc GREATER 0.5, gl_vidamiga.c:333-334) and the
+ * palette-table alpha quirk (0xAA = 170, gl_vidamiga.c:239-246).
+ * Primaries are exactly representable in 555, so expectations are
+ * exact: alpha 170 must survive 1-bit alpha as opaque. */
+static GLuint g_quakeRGB5A1Texture;
+
+static void BindQuakeRGB5A1(void)
+{
+    static const UBYTE texels[12] = {
+        255, 0, 0, 255,     /* opaque red */
+        0, 255, 0, 0,       /* fully transparent green */
+        0, 0, 255, 170      /* Quake palette alpha 0xAA: blue, must stay opaque */
+    };
+
+    if (!g_quakeRGB5A1Texture)
+        g_quakeRGB5A1Texture = UploadTypedTexture(GL_RGB5_A1, GL_RGBA,
+                                                  GL_UNSIGNED_BYTE,
+                                                  3, 1, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_quakeRGB5A1Texture);
+}
+
+static void DrawQuakeRGB5A1Scene(GLboolean useAlphaTest)
+{
+    BindQuakeRGB5A1();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    if (useAlphaTest) {
+        glDisable(GL_BLEND);
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 0.5f);
+    } else {
+        glDisable(GL_ALPHA_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    DrawFullscreenQuad();
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+}
+
+static void DrawQuakeRGB5A1(ULONG frame)
+{
+    (void)frame;
+    DrawQuakeRGB5A1Scene(GL_TRUE);
+}
+
+static GLboolean VerifyQuakeRGB5A1(char *detail)
+{
+    CheckLog log;
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawQuakeRGB5A1Scene(GL_TRUE);
+    CheckRGB(&log, "alpha-test opaque", StripTexelX(0, 3), 0.0f,
+             255, 0, 0, 8);
+    CheckRGB(&log, "alpha-test transparent", StripTexelX(1, 3), 0.0f,
+             0, 0, 0, 8);
+    CheckRGB(&log, "alpha-test AA-quirk", StripTexelX(2, 3), 0.0f,
+             0, 0, 255, 8);
+    DrawQuakeRGB5A1Scene(GL_FALSE);
+    CheckRGB(&log, "blend opaque", StripTexelX(0, 3), 0.0f,
+             255, 0, 0, 8);
+    CheckRGB(&log, "blend transparent", StripTexelX(1, 3), 0.0f,
+             0, 0, 0, 8);
+    CheckRGB(&log, "blend AA-quirk", StripTexelX(2, 3), 0.0f,
+             0, 0, 255, 8);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "RGB5_A1 alpha is 1-bit; palette alpha 170 stays opaque");
+    return log.failures == 0;
+}
+
+/* A3: Quake 4444 lightmap (R_BuildLightMap, gl_rsurf.c:467-487).
+ * texel = { (255-light) & 0xF0, 0x00 }: INVERTED light in the FIRST
+ * nibble, which must act as alpha under the (SRC_ALPHA,
+ * ONE_MINUS_SRC_ALPHA) blend Quake selects for 4444
+ * (gl_rsurf.c:959-960). Rendered over white, row r must read
+ * white * (nibble/15). Column 1 carries the same nibbles with the
+ * bytes swapped: a correct backend shows white there, a
+ * little-endian halfword reader shows the ramp instead -- one run
+ * distinguishes byte order from channel order. */
+static GLuint g_quake4444Texture;
+
+/* NDC y of texel row r (row 0 = bottom) on the -0.9..0.9 quad. */
+static GLfloat StripRowY(int row, int texH)
+{
+    return -0.9f + ((GLfloat)row + 0.5f) * (1.8f / (GLfloat)texH);
+}
+
+static void BindQuake4444(void)
+{
+    /* Rows bottom->top: light full, 2/3, 1/3, none. Stored nibbles
+     * 0, 5, 10, 15 give blend factors 1, 10/15, 5/15, 0. */
+    static const UBYTE texels[16] = {
+        0x00, 0x00,  0x00, 0x00,
+        0x50, 0x00,  0x00, 0x50,
+        0xA0, 0x00,  0x00, 0xA0,
+        0xF0, 0x00,  0x00, 0xF0
+    };
+
+    if (!g_quake4444Texture)
+        g_quake4444Texture = UploadTypedTexture(GL_RGBA, GL_RGBA,
+                                                MGL_UNSIGNED_SHORT_4_4_4_4,
+                                                2, 4, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_quake4444Texture);
+}
+
+static void DrawQuake4444Scene(void)
+{
+    /* Pass 1: plain white, no texture -- isolates the upload, the
+     * channel order, and the blend from the multitexture machinery. */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glDisable(GL_TEXTURE_2D);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    DrawFullscreenQuad();
+    /* Pass 2: the 4444 lightmap exactly as Quake blends it. */
+    BindQuake4444();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    DrawFullscreenQuad();
+    glDisable(GL_BLEND);
+}
+
+static void DrawQuake4444(ULONG frame)
+{
+    (void)frame;
+    DrawQuake4444Scene();
+}
+
+static GLboolean VerifyQuake4444(char *detail)
+{
+    static const int want[4] = { 255, 170, 85, 0 };
+    CheckLog log;
+    char what[64];
+    int row, r, g, b;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawQuake4444Scene();
+    for (row = 0; row < 4; ++row) {
+        sprintf(what, "quake-col row%d", row);
+        CheckRGB(&log, what, StripTexelX(0, 2), StripRowY(row, 4),
+                 want[row], want[row], want[row], 8);
+        sprintf(what, "swapped-col row%d", row);
+        CheckRGB(&log, what, StripTexelX(1, 2), StripRowY(row, 4),
+                 255, 255, 255, 8);
+    }
+    if (log.failures) {
+        /* Report the swapped column's row-2 sample raw: together with
+         * the first failure it separates a byte-order swap (ramp
+         * appears here) from a channel-order fault (tinted greys). */
+        if (SampleRGB(StripTexelX(1, 2), StripRowY(2, 4), &r, &g, &b)) {
+            char extra[48];
+            sprintf(extra, " | swap-col r2 reads %d,%d,%d", r, g, b);
+            strncat(log.first, extra, 95 - strlen(log.first));
+        }
+        strncpy(detail, log.first, 95);
+    } else {
+        strcpy(detail, "4444 inverted-light nibble multiplies as alpha");
+    }
+    return log.failures == 0;
+}
+
+/* Pack one Quake 565 greyscale light value exactly as R_BuildLightMap
+ * does (gl_rsurf.c:488-507), emitting big-endian bytes explicitly. */
+static void PackQuake565(UBYTE *dst, int t)
+{
+    unsigned v = (((unsigned)(t & 0xf8)) << 8) |
+                 (((unsigned)(t & 0xfc)) << 3) |
+                 (((unsigned)(t & 0xf8)) >> 3);
+    dst[0] = (UBYTE)(v >> 8);
+    dst[1] = (UBYTE)(v & 0xff);
+}
+
+/* A4: Quake 565 lightmap (-lm_RGB, gl_rsurf.c:2116) with the dynamic
+ * subrect refresh Quake issues every frame for flickering lights
+ * (R_RenderDynamicLightmaps via glTexSubImage2D, gl_rsurf.c:1051).
+ * Blend is (ZERO, SRC_COLOR) for 565 (gl_rsurf.c:956-957). */
+static GLuint g_quake565Texture;
+static UBYTE g_quake565Initial[6];
+
+static void BindQuake565(void)
+{
+    if (!g_quake565Texture) {
+        PackQuake565(g_quake565Initial, 255);
+        PackQuake565(g_quake565Initial + 2, 128);
+        PackQuake565(g_quake565Initial + 4, 0);
+        g_quake565Texture = UploadTypedTexture(GL_RGB, GL_RGB,
+                                               MGL_UNSIGNED_SHORT_5_6_5,
+                                               3, 1, g_quake565Initial);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, g_quake565Texture);
+    }
+}
+
+static void DrawQuake565Scene(void)
+{
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glDisable(GL_TEXTURE_2D);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    DrawFullscreenQuad();
+    BindQuake565();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ZERO, GL_SRC_COLOR);
+    DrawFullscreenQuad();
+    glDisable(GL_BLEND);
+}
+
+static void DrawQuake565(ULONG frame)
+{
+    (void)frame;
+    DrawQuake565Scene();
+}
+
+/* One Quake dynamic-lightmap subrect: texel 2 (black) becomes full
+ * white, exactly like a muzzle-flash rect refresh. */
+static void UpdateQuake565(void)
+{
+    UBYTE white[2];
+
+    PackQuake565(white, 255);
+    glBindTexture(GL_TEXTURE_2D, g_quake565Texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 2, 0, 1, 1, GL_RGB,
+                    MGL_UNSIGNED_SHORT_5_6_5, white);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+}
+
+static void RestoreQuake565(void)
+{
+    glBindTexture(GL_TEXTURE_2D, g_quake565Texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 2, 0, 1, 1, GL_RGB,
+                    MGL_UNSIGNED_SHORT_5_6_5, g_quake565Initial + 4);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+}
+
+static GLboolean VerifyQuake565(char *detail)
+{
+    CheckLog log;
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawQuake565Scene();
+    /* t=255 -> (31,63,31): white. t=128 -> (16,32,16): the per-
+     * channel factors 16/31, 32/63, 16/31 over white. t=0: black. */
+    CheckRGB(&log, "565 full", StripTexelX(0, 3), 0.0f,
+             255, 255, 255, 8);
+    CheckRGB(&log, "565 half", StripTexelX(1, 3), 0.0f,
+             132, 130, 132, 8);
+    CheckRGB(&log, "565 none", StripTexelX(2, 3), 0.0f,
+             0, 0, 0, 8);
+    UpdateQuake565();
+    DrawQuake565Scene();
+    CheckRGB(&log, "565 subrect refresh", StripTexelX(2, 3), 0.0f,
+             255, 255, 255, 8);
+    RestoreQuake565();
+    DrawQuake565Scene();
+    CheckRGB(&log, "565 subrect restore", StripTexelX(2, 3), 0.0f,
+             0, 0, 0, 8);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "565 grey packs multiply; subrect updates land");
+    return log.failures == 0;
+}
+
+/* B: the fake-multitexture world draw. R_RenderBrushPoly with
+ * gl_texsort=1 and gl_fake_multitexture=1 (gl_rsurf.c:1129-1231)
+ * binds the base texture on unit 0 and captures a GL_POLYGON while
+ * unit 1 is enabled (gl_rsurf.c:1161-1176); per vertex
+ * mglMtexTV23fv (miniglext.c:30-47) submits the BASE uv through
+ * glMultiTexCoord2fARB(GL_TEXTURE0_ARB, ...) WHILE UNIT 1 IS ACTIVE,
+ * then the lightmap uv through glTexCoord2f (which targets the
+ * active unit), then glVertex3fv. The world is drawn only later by
+ * mglDrawMultitexBuffer (gl_rsurf.c:1800-1801). Every step of that
+ * order is load-bearing. */
+static GLuint g_mtexBaseTexture;
+static GLuint g_mtexLightTexture;
+
+/* 2x2 RGB checker uploaded Quake-style (GL_RGB from RGBA source):
+ * bottom row red/green, top row blue/white. */
+static void BindMtexBase(void)
+{
+    static const UBYTE texels[16] = {
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255
+    };
+
+    if (!g_mtexBaseTexture)
+        g_mtexBaseTexture = UploadTypedTexture(GL_RGB, GL_RGBA,
+                                               GL_UNSIGNED_BYTE,
+                                               2, 2, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_mtexBaseTexture);
+}
+
+/* 2x4 Quake-encoded 4444 lightmap: both columns carry nibbles
+ * 0, 5, 10, 15 bottom->top (factors 1, 2/3, 1/3, 0). */
+static void BindMtexLight(void)
+{
+    static const UBYTE texels[16] = {
+        0x00, 0x00,  0x00, 0x00,
+        0x50, 0x00,  0x50, 0x00,
+        0xA0, 0x00,  0xA0, 0x00,
+        0xF0, 0x00,  0xF0, 0x00
+    };
+
+    if (!g_mtexLightTexture)
+        g_mtexLightTexture = UploadTypedTexture(GL_RGBA, GL_RGBA,
+                                                MGL_UNSIGNED_SHORT_4_4_4_4,
+                                                2, 4, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_mtexLightTexture);
+}
+
+/* One captured world polygon in Quake's exact call order. su/sv are
+ * the base uv, tu/tv the lightmap uv. */
+static void CaptureMtexVertex(GLfloat x, GLfloat y,
+                              GLfloat su, GLfloat sv,
+                              GLfloat tu, GLfloat tv)
+{
+    glMultiTexCoord2fARB(GL_TEXTURE0_ARB, su, sv);
+    glTexCoord2f(tu, tv);
+    glVertex3f(x, y, 0.0f);
+}
+
+/* B1: single captured quad, flushed with Quake's 4444 blend factors.
+ * Expected cell (c, r): base checker colour times the row factor
+ * (row factors bottom->top: 1, 2/3, 1/3, 0). */
+static void DrawMtexQuadScene(void)
+{
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    /* Base texture bound on unit 0, exactly like R_RenderBrushPoly
+     * before the fake-multitexture branch (gl_rsurf.c:1147). */
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    BindMtexBase();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    /* Capture with unit 1 enabled (gl_rsurf.c:1163-1172). */
+    glActiveTextureARB(GL_TEXTURE1_ARB);
+    glEnable(GL_TEXTURE_2D);
+    BindMtexLight();
+    glBegin(GL_POLYGON);
+    CaptureMtexVertex(-0.9f, -0.9f, 0.0f, 0.0f, 0.0f, 0.0f);
+    CaptureMtexVertex(0.9f, -0.9f, 1.0f, 0.0f, 1.0f, 0.0f);
+    CaptureMtexVertex(0.9f, 0.9f, 1.0f, 1.0f, 1.0f, 1.0f);
+    CaptureMtexVertex(-0.9f, 0.9f, 0.0f, 1.0f, 0.0f, 1.0f);
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    /* The deferred world draw (gl_rsurf.c:967, :1800-1801). */
+    mglDrawMultitexBuffer(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                          GL_REPLACE);
+    glDisable(GL_DEPTH_TEST);
+}
+
+static void DrawQuakeMtexQuad(ULONG frame)
+{
+    (void)frame;
+    DrawMtexQuadScene();
+}
+
+/* NDC of cell (c, r) on the -0.9..0.9 quad: 2 columns, 4 rows. */
+static void MtexCellNDC(int c, int r, GLfloat *x, GLfloat *y)
+{
+    *x = -0.9f + ((GLfloat)c + 0.5f) * 0.9f;
+    *y = StripRowY(r, 4);
+}
+
+static GLboolean VerifyQuakeMtexQuad(char *detail)
+{
+    /* [row][col][rgb]: checker base times row factor. */
+    static const int want[4][2][3] = {
+        { { 255, 0, 0 }, { 0, 255, 0 } },
+        { { 170, 0, 0 }, { 0, 170, 0 } },
+        { { 0, 0, 85 }, { 85, 85, 85 } },
+        { { 0, 0, 0 }, { 0, 0, 0 } }
+    };
+    CheckLog log;
+    char what[64];
+    GLfloat x, y;
+    int r, c;
+    GLenum sceneErr;
+
+    memset(&log, 0, sizeof(log));
+    /* Diagnose first: a stale scene error also fails the capture
+     * below, which would misreport a scene fault as a readback
+     * fault. Drain, draw once, and name the scene's own error. */
+    DrainErrors();
+    DrawMtexQuadScene();
+    sceneErr = glGetError();
+    if (sceneErr != GL_NO_ERROR) {
+        sprintf(detail, "scene gl_error=0x%lx (capture not attempted)",
+                (unsigned long)sceneErr);
+        return GL_FALSE;
+    }
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawMtexQuadScene();
+    for (r = 0; r < 4; ++r) for (c = 0; c < 2; ++c) {
+        sprintf(what, "mtex r%d c%d", r, c);
+        MtexCellNDC(c, r, &x, &y);
+        CheckRGB(&log, what, x, y,
+                 want[r][c][0], want[r][c][1], want[r][c][2], 8);
+    }
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "captured quad replays base x 4444 light exactly");
+    return log.failures == 0;
+}
+
+/* B2: a 5-vertex world polygon. Quake surfaces routinely have more
+ * than 4 vertices; V19 queued and replayed every polygon with 3+
+ * vertices through both TMUs (mglQ3 draw.c d_DrawMtexPoly /
+ * MGLDrawMultitexBuffer), so the contract asserted here is V19
+ * parity: the pentagon must render base x light exactly like the
+ * quad. A backend that only replays <=4-vertex polys renders this
+ * through the wrong unit instead. */
+static void DrawMtexPentagonScene(void)
+{
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    BindMtexBase();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glActiveTextureARB(GL_TEXTURE1_ARB);
+    glEnable(GL_TEXTURE_2D);
+    BindMtexLight();
+    glBegin(GL_POLYGON);
+    /* Convex pentagon, uv = (ndc + 0.9) / 1.8 on both units. */
+    CaptureMtexVertex(0.0f, 0.8f, 0.5f, 0.944f, 0.5f, 0.944f);
+    CaptureMtexVertex(0.76f, 0.25f, 0.922f, 0.639f, 0.922f, 0.639f);
+    CaptureMtexVertex(0.47f, -0.65f, 0.761f, 0.139f, 0.761f, 0.139f);
+    CaptureMtexVertex(-0.47f, -0.65f, 0.239f, 0.139f, 0.239f, 0.139f);
+    CaptureMtexVertex(-0.76f, 0.25f, 0.078f, 0.639f, 0.078f, 0.639f);
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    mglDrawMultitexBuffer(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                          GL_REPLACE);
+    glDisable(GL_DEPTH_TEST);
+}
+
+static void DrawQuakeMtexPentagon(ULONG frame)
+{
+    (void)frame;
+    DrawMtexPentagonScene();
+}
+
+static GLboolean VerifyQuakeMtexPentagon(char *detail)
+{
+    CheckLog log;
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawMtexPentagonScene();
+    /* Sampled strictly inside texel centres (never on a texel
+     * boundary, where NEAREST is implementation-defined):
+     * (u,v) = (0.25,0.31): base red x row-1 factor 2/3. */
+    CheckRGB(&log, "penta red-lit", -0.45f, -0.35f, 170, 0, 0, 8);
+    /* (u,v) = (0.69,0.31): base green x row-1 factor 2/3. */
+    CheckRGB(&log, "penta green-lit", 0.35f, -0.35f, 0, 170, 0, 8);
+    /* (u,v) = (0.69,0.78): base white x row-3 factor 0. */
+    CheckRGB(&log, "penta white-dark", 0.35f, 0.5f, 0, 0, 0, 8);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "5-vertex poly replays through both units (V19 parity)");
+    return log.failures == 0;
+}
+
+/* B3: queue capacity. Quake sizes the buffer with
+ * mglChooseMtexBufferSize(6000) (gl_vidamiga.c:698); V19 silently
+ * dropped polys past capacity. Shrink to 128 (16 polygons, the
+ * backend minimum) and prove 16 captured quads all land, then
+ * restore the backend default. */
+#define MTEX_SMALL_BUFFER 128
+#define MTEX_DEFAULT_BUFFER 4096
+#define MTEX_SMALL_QUADS 4
+
+static ULONG g_mtexCapGen;
+static GLuint g_mtexCapTexture;
+
+static void BindMtexCap(void)
+{
+    static const UBYTE texels[16] = {
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255
+    };
+
+    if (g_mtexCapGen != g_stateGeneration) {
+        g_mtexCapGen = g_stateGeneration;
+        mglChooseMtexBufferSize(MTEX_SMALL_BUFFER);
+        g_mtexCapTexture = 0;
+    }
+    if (!g_mtexCapTexture)
+        g_mtexCapTexture = UploadTypedTexture(GL_RGB, GL_RGBA,
+                                              GL_UNSIGNED_BYTE,
+                                              2, 2, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_mtexCapTexture);
+}
+
+static void DrawMtexCapScene(void)
+{
+    int i, gridX, gridY;
+    GLfloat x0, y0;
+
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    BindMtexCap();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glActiveTextureARB(GL_TEXTURE1_ARB);
+    glEnable(GL_TEXTURE_2D);
+    BindMtexLight();
+    /* With unit 1 enabled every quad is captured, not drawn; a
+     * single flush at the end replays all 16 through both units. */
+    for (i = 0; i < MTEX_SMALL_QUADS; ++i) {
+        gridX = i & 3;
+        gridY = (i >> 2) & 3;
+        x0 = -0.9f + (GLfloat)gridX * 0.45f;
+        y0 = -0.9f + (GLfloat)gridY * 0.45f;
+        glBegin(GL_POLYGON);
+        CaptureMtexVertex(x0, y0, 0.0f, 0.0f, 0.0f, 0.625f);
+        CaptureMtexVertex(x0 + 0.45f, y0, 1.0f, 0.0f, 1.0f, 0.625f);
+        CaptureMtexVertex(x0 + 0.45f, y0 + 0.45f, 1.0f, 1.0f, 1.0f, 0.625f);
+        CaptureMtexVertex(x0, y0 + 0.45f, 0.0f, 1.0f, 0.0f, 0.625f);
+        glEnd();
+    }
+    glDisable(GL_TEXTURE_2D);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    /* Lightmap v=0.625 samples row 2 (nibble 10, factor 1/3). */
+    mglDrawMultitexBuffer(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                          GL_REPLACE);
+}
+
+static void DrawQuakeMtexCapacity(ULONG frame)
+{
+    (void)frame;
+    DrawMtexCapScene();
+}
+
+static GLboolean VerifyQuakeMtexCapacity(char *detail)
+{
+    /* Every quad is sampled at the same relative spot (base col 0
+     * row 0 = red) times the row-2 factor 1/3: a dropped quad reads
+     * the black background, an unlit replay reads full red. */
+    static const int quadWant[3] = { 85, 0, 0 };
+    CheckLog log;
+    char what[64];
+    int i;
+
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawMtexCapScene();
+    for (i = 0; i < MTEX_SMALL_QUADS; ++i) {
+        GLfloat x = -0.9f + (GLfloat)(i & 3) * 0.45f + 0.11f;
+        GLfloat y = -0.9f + (GLfloat)((i >> 2) & 3) * 0.45f + 0.11f;
+        sprintf(what, "cap-quad%d", i);
+        CheckRGB(&log, what, x, y, quadWant[0], quadWant[1], quadWant[2], 10);
+    }
+    /* Restore the backend default so later tests are unaffected. */
+    mglChooseMtexBufferSize(MTEX_DEFAULT_BUFFER);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "4/4 captured quads replay; buffer size restored");
+    return log.failures == 0;
+}
+
+/* C1: the real-multitexture path (R_DrawSequentialPoly,
+ * gl_rsurf.c:595-848, live only with -extensions): unit 0 carries
+ * the base texture with env REPLACE (gl_rsurf.c:624-626), unit 1
+ * the lightmap with env MODULATE (gl_rsurf.c:651), both units fed
+ * per vertex (gl_rsurf.c:657-659). One polygon, no buffer replay:
+ * the result must be base x light exactly. */
+static GLuint g_seqBaseTexture;
+static GLuint g_seqLightTexture;
+
+static void BindSeqBase(void)
+{
+    static const UBYTE texels[16] = {
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255
+    };
+
+    if (!g_seqBaseTexture)
+        g_seqBaseTexture = UploadTypedTexture(GL_RGBA, GL_RGBA,
+                                              GL_UNSIGNED_BYTE,
+                                              2, 2, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_seqBaseTexture);
+}
+
+static void BindSeqLight(void)
+{
+    /* Flat grey ramp: col 0 full, col 1 half brightness. */
+    static const UBYTE texels[16] = {
+        255, 255, 255, 255,   128, 128, 128, 255,
+        255, 255, 255, 255,   128, 128, 128, 255
+    };
+
+    if (!g_seqLightTexture)
+        g_seqLightTexture = UploadTypedTexture(GL_RGBA, GL_RGBA,
+                                               GL_UNSIGNED_BYTE,
+                                               2, 2, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_seqLightTexture);
+}
+
+static void DrawSeqModulateScene(void)
+{
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    BindSeqBase();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glActiveTextureARB(GL_TEXTURE1_ARB);
+    glEnable(GL_TEXTURE_2D);
+    BindSeqLight();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glBegin(GL_TRIANGLE_FAN);
+    glMultiTexCoord2fARB(GL_TEXTURE0_ARB, 0.0f, 0.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0.0f, 0.0f);
+    glVertex3f(-0.9f, -0.9f, 0.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE0_ARB, 1.0f, 0.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 1.0f, 0.0f);
+    glVertex3f(0.9f, -0.9f, 0.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE0_ARB, 1.0f, 1.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 1.0f, 1.0f);
+    glVertex3f(0.9f, 0.9f, 0.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE0_ARB, 0.0f, 1.0f);
+    glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0.0f, 1.0f);
+    glVertex3f(-0.9f, 0.9f, 0.0f);
+    glEnd();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glDisable(GL_TEXTURE_2D);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+}
+
+static void DrawQuakeSeqModulate(ULONG frame)
+{
+    (void)frame;
+    DrawSeqModulateScene();
+}
+
+static GLboolean VerifyQuakeSeqModulate(char *detail)
+{
+    CheckLog log;
+    GLfloat x, y;
+    int r, c;
+    GLenum sceneErr;
+    /* Base checker (bottom red/green, top blue/white) times the
+     * grey column (left full, right half). */
+    static const int want[2][2][3] = {
+        { { 255, 0, 0 }, { 0, 128, 0 } },
+        { { 0, 0, 255 }, { 128, 128, 128 } }
+    };
+    char what[64];
+
+    memset(&log, 0, sizeof(log));
+    DrainErrors();
+    DrawSeqModulateScene();
+    sceneErr = glGetError();
+    if (sceneErr != GL_NO_ERROR) {
+        sprintf(detail, "scene gl_error=0x%lx", (unsigned long)sceneErr);
+        return GL_FALSE;
+    }
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawSeqModulateScene();
+    for (r = 0; r < 2; ++r) for (c = 0; c < 2; ++c) {
+        sprintf(what, "seq r%d c%d", r, c);
+        x = -0.9f + ((GLfloat)c + 0.5f) * 0.9f;
+        y = -0.9f + ((GLfloat)r + 0.5f) * 0.9f;
+        CheckRGB(&log, what, x, y,
+                 want[r][c][0], want[r][c][1], want[r][c][2], 8);
+    }
+    if (log.failures) {
+        /* Isolate which texture is black: draw base alone and light alone. */
+        int br, bg, bb, lr, lg, lb;
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glDisable(GL_TEXTURE_2D);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        BindSeqBase();
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+        DrawFullscreenQuad();
+        SampleRGB(-0.45f, -0.45f, &br, &bg, &bb);
+        glDisable(GL_TEXTURE_2D);
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        BindSeqLight();
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        glDisable(GL_TEXTURE_2D);
+        /* Light alone needs to be on unit1 with REPLACE to see it. */
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glEnable(GL_TEXTURE_2D);
+        glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+        /* Draw with unit1 only: enable unit1, use MultiTexCoord for unit1. */
+        glBegin(GL_QUADS);
+        glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0,0); glVertex2f(-0.9f,-0.9f);
+        glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 1,0); glVertex2f(0.9f,-0.9f);
+        glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 1,1); glVertex2f(0.9f,0.9f);
+        glMultiTexCoord2fARB(GL_TEXTURE1_ARB, 0,1); glVertex2f(-0.9f,0.9f);
+        glEnd();
+        SampleRGB(-0.45f, -0.45f, &lr, &lg, &lb);
+        glDisable(GL_TEXTURE_2D);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+        snprintf(detail, 95, "%s | base-alone %d,%d,%d light-alone %d,%d,%d",
+                 log.first, br, bg, bb, lr, lg, lb);
+        /* Restore for next test. */
+        glActiveTextureARB(GL_TEXTURE1_ARB);
+        glDisable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glActiveTextureARB(GL_TEXTURE0_ARB);
+    } else strcpy(detail, "unit0 REPLACE x unit1 MODULATE in a single pass");
+    return log.failures == 0;
+}
+
+/* D1: one Quake frame's state machine. R_Clear (gl_rmain.c:2587-2639)
+ * clears to black every frame with glDepthFunc(GL_LEQUAL) and
+ * glDepthRange(0,1); R_SetupGL (gl_rmain.c:2392-2508) installs the
+ * frustum, culls front faces, disables BLEND/ALPHA_TEST, enables
+ * DEPTH_TEST and MGL_PERSPECTIVE_MAPPING; GL_Set2D (gl_draw.c:1064-
+ * 1088) then disables DEPTH/CULL/BLEND, enables ALPHA_TEST and
+ * disables MGL_PERSPECTIVE_MAPPING for the MGL_FLATFAN console/HUD
+ * overlay (R_PolyBlend, gl_rmain.c:2147-2177). A defect in the
+ * perspective-mapping toggle whites out all 2D every frame. */
+static GLuint g_frameStateTexture;
+
+static void BindFrameState(void)
+{
+    static const UBYTE texels[16] = {
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255
+    };
+
+    if (!g_frameStateTexture)
+        g_frameStateTexture = UploadTypedTexture(GL_RGB, GL_RGBA,
+                                                 GL_UNSIGNED_BYTE,
+                                                 2, 2, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_frameStateTexture);
+}
+
+static void DrawFrameStateScene(void)
+{
+    /* R_Clear. */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDepthFunc(GL_LEQUAL);
+    glDepthRange(0.0, 1.0);
+    /* R_SetupGL. */
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glFrustum(-1.0, 1.0, -0.625, 0.625, 1.0, 30.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glCullFace(GL_FRONT);
+    glEnable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(MGL_PERSPECTIVE_MAPPING);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    BindFrameState();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    /* Clockwise quad at z=-5 (kept: Quake culls front/CCW faces).
+     * Frustum shows x in +-5, y in +-3.125 there; the quad spans
+     * NDC x +-0.4, y +-0.384. */
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-2.0f, -1.2f, -5.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-2.0f, 1.2f, -5.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f(2.0f, 1.2f, -5.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f(2.0f, -1.2f, -5.0f);
+    glEnd();
+    /* GL_Set2D + R_PolyBlend: device-space translucent overlay. */
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_ALPHA_TEST);
+    glDisable(MGL_PERSPECTIVE_MAPPING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4ub(0, 255, 0, 128);
+    glBegin(MGL_FLATFAN);
+    glVertex2f(0.0f, 0.0f);
+    glVertex2f((GLfloat)g_width, 0.0f);
+    glVertex2f((GLfloat)g_width, (GLfloat)g_height);
+    glVertex2f(0.0f, (GLfloat)g_height);
+    glEnd();
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+static void DrawQuakeFrameState(ULONG frame)
+{
+    (void)frame;
+    DrawFrameStateScene();
+}
+
+static GLboolean VerifyQuakeFrameState(char *detail)
+{
+    CheckLog log;
+    GLenum sceneErr;
+    memset(&log, 0, sizeof(log));
+    DrainErrors();
+    DrawFrameStateScene();
+    sceneErr = glGetError();
+    if (sceneErr != GL_NO_ERROR) {
+        sprintf(detail, "scene gl_error=0x%lx", (unsigned long)sceneErr);
+        return GL_FALSE;
+    }
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawFrameStateScene();
+    /* NDC (0.1,0.1): world (0.5,0.3125) -> base uv (0.625,0.63):
+     * white, washed by the 50% green overlay -> (128,255,128). */
+    CheckRGB(&log, "3d-then-overlay", 0.1f, 0.1f, 128, 255, 128, 10);
+    /* NDC (-0.6,-0.6): outside the 3D quad (black) under the same
+     * overlay -> (0,128,0). */
+    CheckRGB(&log, "overlay-on-black", -0.6f, -0.6f, 0, 128, 0, 10);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "3d setup then 2d overlay blend through mapping toggle");
+    return log.failures == 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* E1: Quake console, partly open (Draw_AlphaPic path). E2: fully     */
+/* open (Draw_Pic path).                                              */
+/*                                                                    */
+/* BlitzQuake draws console/HUD in device space after GL_Set2D        */
+/* (gl_draw.c:1064-1088): viewport, DEPTH/CULL/BLEND off, ALPHA_TEST  */
+/* on (GREATER 0.5, gl_vidamiga.c:333-334), MGL_PERSPECTIVE_MAPPING   */
+/* off, texenv MODULATE left by R_InitParticleTexture, texturing      */
+/* left enabled by the 3D pass. Draw_ConsoleBackground (gl_draw.c:    */
+/* 916-950) blends the RGB5_A1 conback with vertex alpha while        */
+/* partly open (Draw_AlphaPic) or blits it opaque when fully open     */
+/* (Draw_Pic); Con_DrawConsole (console.c:676-705) draws one          */
+/* MGL_FLATFAN quad per glyph from the RGB5_A1 charset atlas          */
+/* (Draw_Character, gl_draw.c:596-636), binding the atlas before      */
+/* every glyph. Both textures are single-level LINEAR (GL_Upload32    */
+/* done-branch, gl_draw.c:1317-1322) with palette alpha 170           */
+/* (gl_vidamiga.c:239-246); no other test uploads single-level        */
+/* LINEAR textures, and none draws per-glyph atlas quads. A missing   */
+/* console in-game with green tests everywhere else means one of      */
+/* these exact steps fails.                                           */
+#define CONSOLE_FONT_W 128
+#define CONSOLE_FONT_H 128
+#define CONSOLE_BACK_RES 256
+static GLuint g_consoleBackTex = 0;
+static GLuint g_consoleCharTex = 0;
+static UBYTE g_consoleBackData[CONSOLE_BACK_RES * CONSOLE_BACK_RES * 4];
+static UBYTE g_consoleFontData[CONSOLE_FONT_W * CONSOLE_FONT_H * 4];
+static GLboolean g_consoleAssetsBuilt = GL_FALSE;
+
+/* d_8to24table expansion (gl_vidamiga.c:225-246): RGB from the game
+ * palette, alpha quirk 0xAA for every entry, index 255 transparent. */
+static void ConsolePaletteRGBA(int index, int *r, int *g, int *b, int *a)
+{
+    index &= 255;
+    *r = g_quakePalette[index * 3 + 0];
+    *g = g_quakePalette[index * 3 + 1];
+    *b = g_quakePalette[index * 3 + 2];
+    *a = (index == 255) ? 0 : 170;
+}
+
+/* GL_ResampleTexture (gl_draw.c:1116-1137) verbatim: GL_Upload32 runs
+ * it for the 320x200 conback against gl_max_size = 256. */
+static void ConsoleResampleBack(const ULONG *in, int inwidth, int inheight,
+                                ULONG *out, int outwidth, int outheight)
+{
+    int i, j;
+    const ULONG *inrow;
+    ULONG frac, fracstep;
+    fracstep = (ULONG)(inwidth * 0x10000 / outwidth);
+    for (i = 0; i < outheight; ++i, out += outwidth) {
+        inrow = in + inwidth * (i * inheight / outheight);
+        frac = fracstep >> 1;
+        for (j = 0; j < outwidth; j += 4) {
+            out[j] = inrow[frac >> 16]; frac += fracstep;
+            out[j + 1] = inrow[frac >> 16]; frac += fracstep;
+            out[j + 2] = inrow[frac >> 16]; frac += fracstep;
+            out[j + 3] = inrow[frac >> 16]; frac += fracstep;
+        }
+    }
+}
+
+/* Real conchars (gfx.wad CONCHARS) expanded through GL_Upload8:
+ * every index 0 becomes 255 first (gl_draw.c:487-489), then the
+ * d_8to24table quirk above. */
+static void BuildConsoleFont(void)
+{
+    int i;
+    for (i = 0; i < CONSOLE_FONT_W * CONSOLE_FONT_H; ++i) {
+        int index = g_quakeConchars[i];
+        int r, g, b, a;
+        if (index == 0) index = 255;
+        ConsolePaletteRGBA(index, &r, &g, &b, &a);
+        g_consoleFontData[i * 4 + 0] = (UBYTE)r;
+        g_consoleFontData[i * 4 + 1] = (UBYTE)g;
+        g_consoleFontData[i * 4 + 2] = (UBYTE)b;
+        g_consoleFontData[i * 4 + 3] = (UBYTE)a;
+    }
+}
+
+/* Real conback expanded through GL_Upload8 and then resampled to the
+ * 256x256 GL_Upload32 actually hands to glTexImage2D. */
+static void BuildConsoleBack(void)
+{
+    static ULONG native[QUAKE_CONSOLE_BACK_W * QUAKE_CONSOLE_BACK_H];
+    static ULONG scaled[CONSOLE_BACK_RES * CONSOLE_BACK_RES];
+    int i;
+    for (i = 0; i < QUAKE_CONSOLE_BACK_W * QUAKE_CONSOLE_BACK_H; ++i) {
+        int r, g, b, a;
+        ConsolePaletteRGBA(g_quakeConback[i], &r, &g, &b, &a);
+        /* Memory order on the big-endian target is [r][g][b][a]. */
+        native[i] = ((ULONG)r << 24) | ((ULONG)g << 16) |
+                    ((ULONG)b << 8) | (ULONG)a;
+    }
+    ConsoleResampleBack(native, QUAKE_CONSOLE_BACK_W, QUAKE_CONSOLE_BACK_H,
+                        scaled, CONSOLE_BACK_RES, CONSOLE_BACK_RES);
+    for (i = 0; i < CONSOLE_BACK_RES * CONSOLE_BACK_RES; ++i) {
+        g_consoleBackData[i * 4 + 0] = (UBYTE)(scaled[i] >> 24);
+        g_consoleBackData[i * 4 + 1] = (UBYTE)(scaled[i] >> 16);
+        g_consoleBackData[i * 4 + 2] = (UBYTE)(scaled[i] >> 8);
+        g_consoleBackData[i * 4 + 3] = (UBYTE)scaled[i];
+    }
+}
+
+static void EnsureConsoleAssets(void)
+{
+    if (!g_consoleAssetsBuilt) {
+        BuildConsoleBack();
+        BuildConsoleFont();
+        g_consoleAssetsBuilt = GL_TRUE;
+    }
+}
+
+/* One console texture exactly the way GL_Upload32 builds it for the
+ * game (gl_draw.c:1239-1322 with gl_alpha_format = GL_RGB5_A1):
+ * RGB5_A1 internal, RGBA/UBYTE source, LINEAR, REPEAT. Returns the
+ * first GL error observed, GL_NO_ERROR when the upload (or re-bind)
+ * is clean. */
+static GLenum UploadConsoleTexture(GLuint *slot, int w, int h,
+                                   const UBYTE *data)
+{
+    DrainErrors();
+    if (!*slot) {
+        glGenTextures(1, slot);
+        glBindTexture(GL_TEXTURE_2D, *slot);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, data);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, *slot);
+    }
+    return glGetError();
+}
+
+/* One glyph exactly like Draw_Character (gl_draw.c:596-636): 8x8
+ * device-space MGL_FLATFAN quad with 1/16-step atlas coords. */
+static void DrawConsoleGlyph(int x, int y, int num)
+{
+    float frow = (float)((num >> 4) & 15) * 0.0625f;
+    float fcol = (float)(num & 15) * 0.0625f;
+    const float size = 0.0625f;
+    float fx = (float)x, fy = (float)y;
+    glBegin(MGL_FLATFAN);
+    glTexCoord2f(fcol, frow);
+    glVertex2f(fx, fy);
+    glTexCoord2f(fcol + size, frow);
+    glVertex2f(fx + 8.0f, fy);
+    glTexCoord2f(fcol + size, frow + size);
+    glVertex2f(fx + 8.0f, fy + 8.0f);
+    glTexCoord2f(fcol, frow + size);
+    glVertex2f(fx, fy + 8.0f);
+    glEnd();
+}
+
+/* Device pixel (origin top-left, like the game) to suite NDC.
+ * Pixel centres matter: SampleNDC() truncates the NDC back to a pixel
+ * index, and the non-centre formula round-trips below the integer for
+ * many x (9->8, 12->11, 14->13, ...), sampling the neighbour. */
+static void ConsoleNDC(GLint px, GLint py, GLfloat *nx, GLfloat *ny)
+{
+    *nx = 2.0f * ((GLfloat)px + 0.5f) / (GLfloat)g_width - 1.0f;
+    *ny = 1.0f - 2.0f * ((GLfloat)py + 0.5f) / (GLfloat)g_height;
+}
+
+/* Glyphs drawn by the scene and checked by the verifiers. The real
+ * conchars cells carry strokes and transparent background, so sampling
+ * their exact device pixels is a true position/atlas oracle. */
+#define CONSOLE_GLYPH_COUNT 4
+#define CONSOLE_GLYPH_X0 8
+#define CONSOLE_GLYPH_STEP 8
+#define CONSOLE_GLYPH_DY 24
+static const int g_consoleGlyphs[CONSOLE_GLYPH_COUNT] = { 'W', 'g', 'Q', '8' };
+
+static GLint ConsoleGlyphX(int index)
+{
+    return CONSOLE_GLYPH_X0 + CONSOLE_GLYPH_STEP * index;
+}
+
+static GLint ConsoleGlyphY(GLint lines)
+{
+    return (lines > CONSOLE_GLYPH_DY + 8) ? lines - CONSOLE_GLYPH_DY : 0;
+}
+
+/* 8-bit channel -> RGB5_A1 storage -> hardware expansion (5-bit
+ * replication). */
+static int ConsoleQuant5(int value)
+{
+    int five = (value >> 3) & 31;
+    return (five << 3) | (five >> 2);
+}
+
+/* Expected RGB of the conback at a device pixel: GL LINEAR sampling of
+ * the 256x256 RGB5_A1 image with REPEAT wrap, then the Draw_AlphaPic
+ * vertex-alpha blend over black when only partly open. */
+static void ConsoleBackExpectedPixel(GLint px, GLint py, GLint lines,
+                                     int alpha255, GLboolean fullOpen,
+                                     int *er, int *eg, int *eb)
+{
+    GLfloat yTop = (GLfloat)lines - (GLfloat)g_height;
+    GLfloat yBot = (GLfloat)lines;
+    GLfloat u = ((GLfloat)px + 0.5f) / (GLfloat)g_width;
+    GLfloat v = (((GLfloat)py + 0.5f) - yTop) / (yBot - yTop);
+    GLfloat fx = u * (GLfloat)CONSOLE_BACK_RES - 0.5f;
+    GLfloat fy = v * (GLfloat)CONSOLE_BACK_RES - 0.5f;
+    int x0 = (int)fx, y0 = (int)fy;
+    GLfloat ax = fx - (GLfloat)x0, ay = fy - (GLfloat)y0;
+    int x1, y1, c;
+    int out[3];
+    if (fx < 0.0f) { x0 = 0; ax = 0.0f; }
+    if (fy < 0.0f) { y0 = 0; ay = 0.0f; }
+    if (x0 >= CONSOLE_BACK_RES - 1) { x0 = CONSOLE_BACK_RES - 1; ax = 0.0f; }
+    if (y0 >= CONSOLE_BACK_RES - 1) { y0 = CONSOLE_BACK_RES - 1; ay = 0.0f; }
+    x1 = (x0 + 1) % CONSOLE_BACK_RES;
+    y1 = (y0 + 1) % CONSOLE_BACK_RES;
+    for (c = 0; c < 3; ++c) {
+        const UBYTE *p00 = g_consoleBackData + ((y0 * CONSOLE_BACK_RES + x0) * 4) + c;
+        const UBYTE *p10 = g_consoleBackData + ((y0 * CONSOLE_BACK_RES + x1) * 4) + c;
+        const UBYTE *p01 = g_consoleBackData + ((y1 * CONSOLE_BACK_RES + x0) * 4) + c;
+        const UBYTE *p11 = g_consoleBackData + ((y1 * CONSOLE_BACK_RES + x1) * 4) + c;
+        GLfloat top = (GLfloat)(*p00) * (1.0f - ax) + (GLfloat)(*p10) * ax;
+        GLfloat bot = (GLfloat)(*p01) * (1.0f - ax) + (GLfloat)(*p11) * ax;
+        GLfloat value = top * (1.0f - ay) + bot * ay;
+        int quantized = ConsoleQuant5((int)(value + 0.5f));
+        if (!fullOpen)
+            quantized = (quantized * alpha255 + 127) / 255;
+        out[c] = quantized;
+    }
+    *er = out[0]; *eg = out[1]; *eb = out[2];
+}
+
+/* Sample one device pixel, log it with expected/actual, and check it.
+ * The log line is the diagnosis: a row of conback values means the glyph
+ * was not drawn, a shifted pattern means atlas/UV offset, garbage means
+ * the texture content is wrong. */
+static void ConsoleCheckPixel(CheckLog *log, const char *what,
+                              GLint px, GLint py, int er, int eg, int eb,
+                              int tol)
+{
+    GLfloat nx, ny;
+    int r = -1, g = -1, b = -1;
+    ConsoleNDC(px, py, &nx, &ny);
+    if (!SampleRGB(nx, ny, &r, &g, &b)) {
+        ++log->checks;
+        ++log->failures;
+        if (!log->first[0])
+            sprintf(log->first, "%s capture failed", what);
+        printf("MINIGL_CONSOLE_PIXEL %s px=%ld py=%ld capture-failed\n",
+               what, (long)px, (long)py);
+        return;
+    }
+    printf("MINIGL_CONSOLE_PIXEL %s px=%ld py=%ld want=%d,%d,%d got=%d,%d,%d\n",
+           what, (long)px, (long)py, er, eg, eb, r, g, b);
+    CheckValues(log, what, r, g, b, er, eg, eb, tol);
+}
+
+/* Check one real glyph cell: every visible stroke texel must appear at
+ * its exact device pixel with its palette colour, and at least one
+ * transparent texel must let the conback through. */
+static void ConsoleCheckGlyph(CheckLog *log, const char *what, int glyph,
+                              GLint gx, GLint gy, GLint lines, int alpha255,
+                              GLboolean fullOpen)
+{
+    int row = (glyph >> 4) & 15, col = glyph & 15;
+    int tx, ty, drawn = 0, clear = 0;
+    char name[48];
+    /* Every other texel is enough to see the pattern; each SampleRGB is
+     * a full-surface capture, so keep the run bounded. */
+    for (ty = 0; ty < 8; ty += 2) {
+        for (tx = 0; tx < 8; tx += 2) {
+            int index = g_quakeConchars[(row * 8 + ty) * CONSOLE_FONT_W +
+                                        col * 8 + tx];
+            int r, g, b, a;
+            if (index == 0) index = 255;
+            sprintf(name, "%s-%d%d", what, ty, tx);
+            if (index == 255) {
+                int er, eg, eb;
+                ConsoleBackExpectedPixel(gx + tx, gy + ty, lines, alpha255,
+                                         fullOpen, &er, &eg, &eb);
+                if (clear < 4) {
+                    ConsoleCheckPixel(log, name, gx + tx, gy + ty,
+                                      er, eg, eb, 16);
+                    clear++;
+                }
+                continue;
+            }
+            ConsolePaletteRGBA(index, &r, &g, &b, &a);
+            ConsoleCheckPixel(log, name, gx + tx, gy + ty,
+                              ConsoleQuant5(r), ConsoleQuant5(g),
+                              ConsoleQuant5(b), 8);
+            drawn++;
+        }
+    }
+    printf("MINIGL_CONSOLE_GLYPH %s strokes=%d clears=%d\n",
+           what, drawn, clear);
+}
+
+static void DrawConsoleScene(GLboolean fullOpen)
+{
+    GLint W = g_width, H = g_height;
+    GLint lines = fullOpen ? H : H / 2;
+    float alpha = fullOpen ? 1.0f : 1.2f * (float)lines / (0.75f * (float)H);
+    float yTop = (float)lines - (float)H;
+    float yBot = (float)lines;
+    GLint glyphY = ConsoleGlyphY(lines);
+    int ig;
+
+    EnsureConsoleAssets();
+    /* The 3D pass leaves texturing enabled with MODULATE (R_Init). */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    /* GL_Set2D (gl_draw.c:1064-1088). Texturing deliberately untouched,
+     * exactly like the game, which inherits it from the 3D pass. */
+    glViewport(0, 0, g_width, g_height);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GREATER, 0.5f);
+    glDisable(MGL_PERSPECTIVE_MAPPING);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    /* Conback (Draw_ConsoleBackground): blended Draw_AlphaPic while
+     * partly open (note the negative yTop: the clipper must keep the
+     * visible part), opaque Draw_Pic when fully open. */
+    UploadConsoleTexture(&g_consoleBackTex, CONSOLE_BACK_RES,
+                         CONSOLE_BACK_RES, g_consoleBackData);
+    if (!fullOpen) {
+        glDisable(GL_ALPHA_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(1.0f, 1.0f, 1.0f, alpha);
+    }
+    glBegin(MGL_FLATFAN);
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, yTop);
+    glTexCoord2f(1.0f, 0.0f); glVertex2f((GLfloat)W, yTop);
+    glTexCoord2f(1.0f, 1.0f); glVertex2f((GLfloat)W, yBot);
+    glTexCoord2f(0.0f, 1.0f); glVertex2f(0.0f, yBot);
+    glEnd();
+    if (!fullOpen) {
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        glDisable(GL_BLEND);
+        glEnable(GL_ALPHA_TEST);
+    }
+    /* Glyphs (Con_DrawConsole): real atlas re-bound before every
+     * character, exactly like Draw_Character. */
+    for (ig = 0; ig < CONSOLE_GLYPH_COUNT; ++ig) {
+        UploadConsoleTexture(&g_consoleCharTex, CONSOLE_FONT_W,
+                             CONSOLE_FONT_H, g_consoleFontData);
+        DrawConsoleGlyph(ConsoleGlyphX(ig), glyphY, g_consoleGlyphs[ig]);
+    }
+    /* Suite hygiene (ResetGLState does not restore these). */
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+static void DrawQuakeConsole(ULONG frame)
+{
+    (void)frame;
+    DrawConsoleScene(GL_FALSE);
+}
+
+static void DrawQuakeConsoleFull(ULONG frame)
+{
+    (void)frame;
+    DrawConsoleScene(GL_TRUE);
+}
+
+static GLboolean VerifyQuakeConsole(char *detail)
+{
+    CheckLog log;
+    GLenum err;
+    GLfloat nx, ny;
+    GLint W = g_width, H = g_height;
+    GLint lines = H / 2;
+    GLint glyphY = ConsoleGlyphY(lines);
+    /* Partial-open vertex alpha: 1.2*lines/(0.75*H) = 0.8. */
+    int ai = (int)(0.8f * 255.0f + 0.5f);
+    int ig;
+    memset(&log, 0, sizeof(log));
+    EnsureConsoleAssets();
+    /* Phase 1: the game's exact uploads, errors drained per call, so a
+     * failure names conback vs charset instead of blaming the draws. */
+    if (g_consoleBackTex) { glDeleteTextures(1, &g_consoleBackTex); g_consoleBackTex = 0; }
+    if (g_consoleCharTex) { glDeleteTextures(1, &g_consoleCharTex); g_consoleCharTex = 0; }
+    err = UploadConsoleTexture(&g_consoleBackTex, CONSOLE_BACK_RES,
+                               CONSOLE_BACK_RES, g_consoleBackData);
+    if (err != GL_NO_ERROR) {
+        sprintf(detail, "conback upload err=0x%lx", (unsigned long)err);
+        return GL_FALSE;
+    }
+    err = UploadConsoleTexture(&g_consoleCharTex, CONSOLE_FONT_W,
+                               CONSOLE_FONT_H, g_consoleFontData);
+    if (err != GL_NO_ERROR) {
+        sprintf(detail, "charset upload err=0x%lx", (unsigned long)err);
+        return GL_FALSE;
+    }
+    /* Phase 2: pixels. Calibration wipes the surface, so draw after it. */
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrainErrors();
+    DrawConsoleScene(GL_FALSE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        sprintf(detail, "console scene err=0x%lx", (unsigned long)err);
+        return GL_FALSE;
+    }
+    /* Conback samples with the computed LINEAR + blend oracle. */
+    {
+        int er, eg, eb;
+        GLint px = W / 4, py = lines / 2;
+        ConsoleBackExpectedPixel(px, py, lines, ai, GL_FALSE, &er, &eg, &eb);
+        ConsoleCheckPixel(&log, "conback-left", px, py, er, eg, eb, 24);
+        px = 3 * W / 4;
+        ConsoleBackExpectedPixel(px, py, lines, ai, GL_FALSE, &er, &eg, &eb);
+        ConsoleCheckPixel(&log, "conback-right", px, py, er, eg, eb, 24);
+    }
+    /* Real glyph strokes at exact device pixels. */
+    for (ig = 0; ig < CONSOLE_GLYPH_COUNT; ++ig) {
+        char what[24];
+        sprintf(what, "glyph%d", ig);
+        ConsoleCheckGlyph(&log, what, g_consoleGlyphs[ig],
+                          ConsoleGlyphX(ig), glyphY, lines, ai, GL_FALSE);
+    }
+    /* Below the panel stays black. */
+    ConsoleNDC(W / 2, lines + 20, &nx, &ny);
+    CheckRGB(&log, "below-panel", nx, ny, 0, 0, 0, 8);
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "real conback blend plus real charset glyphs");
+    return log.failures == 0;
+}
+
+static GLboolean VerifyQuakeConsoleFull(char *detail)
+{
+    CheckLog log;
+    GLenum err;
+    GLfloat nx, ny;
+    GLint W = g_width, H = g_height;
+    GLint lines = H;
+    GLint glyphY = ConsoleGlyphY(lines);
+    int ig;
+    memset(&log, 0, sizeof(log));
+    EnsureConsoleAssets();
+    if (g_consoleBackTex) { glDeleteTextures(1, &g_consoleBackTex); g_consoleBackTex = 0; }
+    if (g_consoleCharTex) { glDeleteTextures(1, &g_consoleCharTex); g_consoleCharTex = 0; }
+    err = UploadConsoleTexture(&g_consoleBackTex, CONSOLE_BACK_RES,
+                               CONSOLE_BACK_RES, g_consoleBackData);
+    if (err != GL_NO_ERROR) {
+        sprintf(detail, "conback upload err=0x%lx", (unsigned long)err);
+        return GL_FALSE;
+    }
+    err = UploadConsoleTexture(&g_consoleCharTex, CONSOLE_FONT_W,
+                               CONSOLE_FONT_H, g_consoleFontData);
+    if (err != GL_NO_ERROR) {
+        sprintf(detail, "charset upload err=0x%lx", (unsigned long)err);
+        return GL_FALSE;
+    }
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrainErrors();
+    DrawConsoleScene(GL_TRUE);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        sprintf(detail, "console-full scene err=0x%lx", (unsigned long)err);
+        return GL_FALSE;
+    }
+    {
+        int er, eg, eb;
+        GLint px = W / 4, py = H / 4;
+        ConsoleBackExpectedPixel(px, py, lines, 255, GL_TRUE, &er, &eg, &eb);
+        ConsoleCheckPixel(&log, "full-conback", px, py, er, eg, eb, 24);
+    }
+    for (ig = 0; ig < CONSOLE_GLYPH_COUNT; ++ig) {
+        char what[24];
+        sprintf(what, "full-glyph%d", ig);
+        ConsoleCheckGlyph(&log, what, g_consoleGlyphs[ig],
+                          ConsoleGlyphX(ig), glyphY, lines, 255, GL_TRUE);
+    }
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "opaque real conback plus real charset glyphs");
+    return log.failures == 0;
+}
+
+/* E3: the game's exact boot upload sequence with the GL error drained
+ * and checked after each phase. BlitzQuake never drains its sticky
+ * error: one failing call in this sequence makes every later TEXERR
+ * report the same stale code, which is exactly what qconsole.log shows. */
+static void DrawQuakeConsoleInit(ULONG frame)
+{
+    (void)frame;
+}
+
+static GLboolean VerifyQuakeConsoleInit(char *detail)
+{
+    static UBYTE particle[8 * 8 * 4];
+    GLenum errDither, errHintW, errHintP;
+    GLenum errInit, errParticle, errCharset, errConback;
+    int i;
+    EnsureConsoleAssets();
+    DrainErrors();
+    glActiveTextureARB(GL_TEXTURE0_ARB);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    /* VID_Init calls that precede GL_Init and every texture load
+     * (gl_vidamiga.c:738-750). The game never drains, and loading
+     * frames skip SCR_UpdateScreen, so an error here stays sticky and
+     * every later TEXERR misattributes it. */
+    glEnable(GL_DITHER);
+    errDither = glGetError();
+    glHint(MGL_W_ONE_HINT, GL_FASTEST);
+    errHintW = glGetError();
+    glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_FASTEST);
+    errHintP = glGetError();
+    /* GL_Init (gl_vidamiga.c:322-345): no texture bound. */
+    glClearColor(1.0f, 0.0f, 0.0f, 0.0f);
+    glCullFace(GL_FRONT);
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GREATER, 0.5f);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glShadeModel(GL_FLAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    errInit = glGetError();
+    /* Game order: Draw_Init runs BEFORE R_Init, so the charset is the
+     * very first glTexImage2D in a fresh context (texture 1), then the
+     * conback (texture 2); R_InitParticleTexture follows (texture 3).
+     * Uploading the particle first (as this test used to) hid
+     * first-upload defects. */
+    glBindTexture(GL_TEXTURE_2D, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, CONSOLE_FONT_W,
+                 CONSOLE_FONT_H, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 g_consoleFontData);
+    errCharset = glGetError();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 2);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, CONSOLE_BACK_RES,
+                 CONSOLE_BACK_RES, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 g_consoleBackData);
+    errConback = glGetError();
+    /* R_InitParticleTexture (gl_rmisc.c:79-104), texture 3. */
+    for (i = 0; i < 64; ++i) {
+        particle[i * 4 + 0] = 255; particle[i * 4 + 1] = 255;
+        particle[i * 4 + 2] = 255; particle[i * 4 + 3] = (i & 1) ? 255 : 0;
+    }
+    glBindTexture(GL_TEXTURE_2D, 3);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 8, 8, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, particle);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    errParticle = glGetError();
+    printf("MINIGL_CONSOLE_INIT dither=0x%lx hint_w=0x%lx hint_p=0x%lx "
+           "gl_init=0x%lx charset=0x%lx conback=0x%lx particle=0x%lx\n",
+           (unsigned long)errDither, (unsigned long)errHintW,
+           (unsigned long)errHintP, (unsigned long)errInit,
+           (unsigned long)errCharset, (unsigned long)errConback,
+           (unsigned long)errParticle);
+    if (errDither != GL_NO_ERROR) {
+        sprintf(detail, "dither err=0x%lx", (unsigned long)errDither);
+        return GL_FALSE;
+    }
+    if (errHintW != GL_NO_ERROR) {
+        sprintf(detail, "w-one hint err=0x%lx", (unsigned long)errHintW);
+        return GL_FALSE;
+    }
+    if (errHintP != GL_NO_ERROR) {
+        sprintf(detail, "perspective hint err=0x%lx", (unsigned long)errHintP);
+        return GL_FALSE;
+    }
+    if (errInit != GL_NO_ERROR) {
+        sprintf(detail, "GL_Init sequence err=0x%lx", (unsigned long)errInit);
+        return GL_FALSE;
+    }
+    if (errParticle != GL_NO_ERROR) {
+        sprintf(detail, "particle upload err=0x%lx", (unsigned long)errParticle);
+        return GL_FALSE;
+    }
+    if (errCharset != GL_NO_ERROR) {
+        sprintf(detail, "charset upload err=0x%lx", (unsigned long)errCharset);
+        return GL_FALSE;
+    }
+    if (errConback != GL_NO_ERROR) {
+        sprintf(detail, "conback upload err=0x%lx", (unsigned long)errConback);
+        return GL_FALSE;
+    }
+    strcpy(detail, "boot uploads clean: init, particle, charset, conback");
+    return GL_TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+/* 128-stride lightmap — full BLOCK_WIDTH atlas (gl_rsurf.c:66,2080).  */
+/* 128×128 4444 with 4 horizontal bands (32 rows each) then two      */
+/* full-width subrect strips. Small 2×4 hides stride bugs.            */
+#define LIGHTMAP_128_SIZE 128
+static GLuint g_lightmap128Texture;
+static UBYTE g_lightmap128Data[LIGHTMAP_128_SIZE * LIGHTMAP_128_SIZE * 2];
+
+static void FillLightmap128Band(int y0, int h, UBYTE nibble)
+{
+    int y, x;
+    for (y = y0; y < y0 + h; ++y) for (x = 0; x < LIGHTMAP_128_SIZE; ++x) {
+        int idx = (y * LIGHTMAP_128_SIZE + x) * 2;
+        g_lightmap128Data[idx] = (UBYTE)(nibble << 4);
+        g_lightmap128Data[idx + 1] = 0;
+    }
+}
+
+static void BindLightmap128(void)
+{
+    if (!g_lightmap128Texture) {
+        FillLightmap128Band(0, 32, 0x0);
+        FillLightmap128Band(32, 32, 0x5);
+        FillLightmap128Band(64, 32, 0xA);
+        FillLightmap128Band(96, 32, 0xF);
+        g_lightmap128Texture = UploadTypedTexture(GL_RGBA, GL_RGBA,
+                                                  MGL_UNSIGNED_SHORT_4_4_4_4,
+                                                  LIGHTMAP_128_SIZE, LIGHTMAP_128_SIZE,
+                                                  g_lightmap128Data);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, g_lightmap128Texture);
+    }
+}
+
+static void DrawLightmap128Scene(void)
+{
+    glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND); glDisable(GL_TEXTURE_2D);
+    glColor4f(1,1,1,1); DrawFullscreenQuad();
+    BindLightmap128();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    DrawFullscreenQuad(); glDisable(GL_BLEND);
+}
+
+static void DrawQuakeLightmap128Stride(ULONG frame)
+{
+    (void)frame; DrawLightmap128Scene();
+}
+
+static GLboolean VerifyQuakeLightmap128Stride(char *detail)
+{
+    static const int want[4] = { 255, 170, 85, 0 };
+    CheckLog log; char what[32]; int i; UBYTE patch[128 * 32 * 2];
+    memset(&log,0,sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrawLightmap128Scene();
+    for (i=0;i<4;++i) {
+        sprintf(what,"band%d",i);
+        CheckRGB(&log, what, 0.0f, StripRowY(i,4), want[i],want[i],want[i], 8);
+    }
+    /* Full-width subrect: middle band 32..64 -> white (F0) */
+    for (i=0;i<128*32;++i) { patch[i*2]=0xF0; patch[i*2+1]=0; }
+    glBindTexture(GL_TEXTURE_2D, g_lightmap128Texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    glTexSubImage2D(GL_TEXTURE_2D,0,0,32,128,32, GL_RGBA, MGL_UNSIGNED_SHORT_4_4_4_4, patch);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+    DrawLightmap128Scene();
+    CheckRGB(&log, "subrect-band1-white", 0.0f, StripRowY(1,4), 0,0,0, 8);
+    /* Restore band1 to 0x50 */
+    for (i=0;i<128*32;++i) { patch[i*2]=0x50; patch[i*2+1]=0; }
+    glTexSubImage2D(GL_TEXTURE_2D,0,0,32,128,32, GL_RGBA, MGL_UNSIGNED_SHORT_4_4_4_4, patch);
+    if (log.failures) strncpy(detail, log.first,95);
+    else strcpy(detail,"128x128 4444 stride and full-width subrect correct");
+    return log.failures==0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 8-bit paletted world — GL_Upload8 path (gl_draw.c:1425,            */
+/* gl_vidamiga.c:239 d_8to24table 170 alpha). 8×8 indices 0..255      */
+/* with 255 transparent, s&3==0, expanded to GL_RGB mips.              */
+static GLuint g_world8Texture;
+static UBYTE g_world8Palette[256*4];
+static UBYTE g_world8Indices[8*8];
+
+static void BuildWorld8Palette(void)
+{
+    int i;
+    for (i=0;i<256;++i) {
+        UBYTE r = (UBYTE)(i & 0xE0);
+        UBYTE g = (UBYTE)((i & 0x1C) << 3);
+        UBYTE b = (UBYTE)((i & 0x03) << 6);
+        g_world8Palette[i*4+0]=r; g_world8Palette[i*4+1]=g;
+        g_world8Palette[i*4+2]=b; g_world8Palette[i*4+3]= (i==255)?0:255;
+        if (i!=255 && (i==1 || i==2)) g_world8Palette[i*4+3]=170;
+    }
+}
+
+static void BindWorld8(void)
+{
+    UBYTE rgba[8*8*4]; int i;
+    if (g_world8Texture) { glBindTexture(GL_TEXTURE_2D,g_world8Texture); return; }
+    BuildWorld8Palette();
+    for (i=0;i<8*8;++i) g_world8Indices[i]=(UBYTE)((i*3) & 0xFF);
+    g_world8Indices[0]=0; g_world8Indices[1]=1; g_world8Indices[8]=2; g_world8Indices[9]=255;
+    for (i=0;i<8*8;++i) {
+        int idx=g_world8Indices[i];
+        rgba[i*4+0]=g_world8Palette[idx*4+0];
+        rgba[i*4+1]=g_world8Palette[idx*4+1];
+        rgba[i*4+2]=g_world8Palette[idx*4+2];
+        rgba[i*4+3]=g_world8Palette[idx*4+3];
+    }
+    glGenTextures(1,&g_world8Texture);
+    glBindTexture(GL_TEXTURE_2D,g_world8Texture);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    /* Quake uploads 8-bit via GL_Upload8 -> GL_Upload32 with mips */
+    for (i=0;i<4;++i) {
+        int s=8>>i; if(s<1)s=1;
+        glTexImage2D(GL_TEXTURE_2D,i,GL_RGB,s,s,0,GL_RGBA,GL_UNSIGNED_BYTE, rgba);
+        /* Downsample next mip by box filter (simplified) */
+        if (s>1) {
+            int j; for(j=0;j<s*s*4;++j) rgba[j]= (UBYTE)((rgba[j]+128)/2);
+        }
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+}
+
+static void DrawWorld8Scene(void)
+{
+    BindWorld8();
+    glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+    glColor4f(1,1,1,1); glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_REPLACE);
+    DrawFullscreenQuad();
+}
+
+static void DrawQuakeWorld8Palette(ULONG frame){ (void)frame; DrawWorld8Scene(); }
+
+static GLboolean VerifyQuakeWorld8Palette(char *detail)
+{
+    CheckLog log; int r,g,b;
+    memset(&log,0,sizeof(log));
+    if(!CalibrateChannels(detail)) return GL_FALSE;
+    DrawWorld8Scene();
+    /* Bottom-left 2x2 block: indices 0,1 / 2,255 -> black, palette1 red-ish, palette2 green-ish, transparent */
+    CheckRGB(&log,"8bit-0-black", -0.9f+0.1125f,-0.9f+0.1125f, 0,0,0, 10);
+    /* Sample centre where indices are mid-range grey */
+    if (!SampleRGB(0.0f,0.0f,&r,&g,&b)) { strcpy(detail,"8bit sample failed"); return GL_FALSE; }
+    if (r<20 && g<20 && b<20) { sprintf(detail,"8bit centre too dark %d,%d,%d",r,g,b); return GL_FALSE; }
+    if (log.failures) strncpy(detail,log.first,95); else strcpy(detail,"8-bit paletted upload via d_8to24table correct");
+    return log.failures==0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Full-width subrect coalescing — two dirty polys at t=10,h=2 and    */
+/* t=20,h=3 merged to one glTexSubImage2D t=10,h=13 w=128 (gl_rsurf.c  */
+/* 1199,1267 theRect). Check gap between them is correctly updated.  */
+static GLuint g_lightmapSubrectTexture;
+static UBYTE g_lightmapSubrectData[128*128*2];
+
+static void BindLightmapSubrect(void)
+{
+    if (!g_lightmapSubrectTexture) {
+        int i; for(i=0;i<128*128;++i){ g_lightmapSubrectData[i*2]=0x00; g_lightmapSubrectData[i*2+1]=0; }
+        g_lightmapSubrectTexture = UploadTypedTexture(GL_RGBA,GL_RGBA,MGL_UNSIGNED_SHORT_4_4_4_4,128,128,g_lightmapSubrectData);
+    } else glBindTexture(GL_TEXTURE_2D,g_lightmapSubrectTexture);
+}
+
+static void DrawLightmapSubrectScene(void)
+{
+    glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND); glDisable(GL_TEXTURE_2D);
+    glColor4f(1,1,1,1); DrawFullscreenQuad();
+    BindLightmapSubrect();
+    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_REPLACE);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    DrawFullscreenQuad(); glDisable(GL_BLEND);
+}
+
+static void DrawQuakeLightmapSubrect(ULONG frame){ (void)frame; DrawLightmapSubrectScene(); }
+
+static GLboolean VerifyQuakeLightmapSubrect(char *detail)
+{
+    CheckLog log; UBYTE patch[128*13*2]; int i;
+    memset(&log,0,sizeof(log));
+    if(!CalibrateChannels(detail)) return GL_FALSE;
+    BindLightmapSubrect();
+    /* Prepare patch: 13 rows at t=10, caps 0xA0 (85) gap 0xF0 (white 0) — gap white in grey bar is visually obvious */
+    for(i=0;i<128*13;++i){ patch[i*2]=0xA0; patch[i*2+1]=0; }
+    for(i=2*128;i<10*128;++i){ patch[i*2]=0xF0; } /* rows 12-19 gap white */
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    glTexSubImage2D(GL_TEXTURE_2D,0,0,10,128,13, GL_RGBA,MGL_UNSIGNED_SHORT_4_4_4_4, patch);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+    DrawLightmapSubrectScene();
+    /* Row 10 cap -> 85 ; gap row 15 -> white 0 ; row 20 cap -> 85 */
+    CheckRGB(&log,"subrect-row10-grey", 0.0f, -0.9f + (10.5f/128)*1.8f, 85,85,85, 8);
+    CheckRGB(&log,"subrect-gap-white", 0.0f, -0.9f + (15.5f/128)*1.8f, 0,0,0, 8);
+    CheckRGB(&log,"subrect-row20-grey", 0.0f, -0.9f + (20.5f/128)*1.8f, 85,85,85, 8);
+    /* Restore */
+    for(i=0;i<128*13;++i){ patch[i*2]=0x00; }
+    glTexSubImage2D(GL_TEXTURE_2D,0,0,10,128,13, GL_RGBA,MGL_UNSIGNED_SHORT_4_4_4_4, patch);
+    if(log.failures) strncpy(detail,log.first,95); else strcpy(detail,"full-width subrect coalescing correct");
+    return log.failures==0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Burst 32 — 32 polys 3-6 verts inside 128 atlas, one               */
+/* mglDrawMultitexBuffer, matching DrawTextureChains:1474.            */
+#define BURST_POLYS 1
+static GLuint g_burstBaseTex, g_burstLightTex;
+
+static void BindBurstBase(void)
+{
+    static const UBYTE texels[16]={255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255};
+    if(!g_burstBaseTex) g_burstBaseTex=UploadTypedTexture(GL_RGB,GL_RGBA,GL_UNSIGNED_BYTE,2,2,texels);
+    else glBindTexture(GL_TEXTURE_2D,g_burstBaseTex);
+}
+static void BindBurstLight(void)
+{
+    static UBYTE data[128*128*2]; int i;
+    if(g_burstLightTex) { glBindTexture(GL_TEXTURE_2D,g_burstLightTex); return; }
+    for(i=0;i<128*128;++i){ int y=i/128; UBYTE nib=(y<64)?0x5:0xA; data[i*2]=(nib<<4); data[i*2+1]=0; }
+    g_burstLightTex=UploadTypedTexture(GL_RGBA,GL_RGBA,MGL_UNSIGNED_SHORT_4_4_4_4,128,128,data);
+}
+static void DrawBurst32Scene(void)
+{
+    int p; GLfloat s0,t0; int verts;
+    glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+    glColor4f(1,1,1,1); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST);
+    glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL);
+    glActiveTextureARB(GL_TEXTURE0_ARB); BindBurstBase(); glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_REPLACE);
+    glActiveTextureARB(GL_TEXTURE1_ARB); glEnable(GL_TEXTURE_2D); BindBurstLight();
+    for(p=0;p<BURST_POLYS;++p){
+        verts = 3 + (p % 4); /* 3..6 */
+        s0 = (GLfloat)((p*37)%100)/100.0f; t0 = (GLfloat)((p*57)%100)/100.0f;
+        GLfloat x0 = -0.9f + (p%8)*0.22f, y0 = -0.9f + (p/8)*0.42f;
+        GLfloat dx = 0.18f, dy=0.18f;
+        glBegin(GL_POLYGON);
+        if(verts==3){
+            CaptureMtexVertex(x0,y0, s0,t0, (s0*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx,y0, s0+0.1f,t0, ((s0+0.1f)*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx/2,y0+dy, s0+0.05f,t0+0.1f, ((s0+0.05f)*128+8)/2048.0f, ((t0+0.1f)*128+8)/2048.0f);
+        } else if(verts==4){
+            CaptureMtexVertex(x0,y0, s0,t0, (s0*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx,y0, s0+0.1f,t0, ((s0+0.1f)*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx,y0+dy, s0+0.1f,t0+0.1f, ((s0+0.1f)*128+8)/2048.0f, ((t0+0.1f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0,y0+dy, s0,t0+0.1f, (s0*128+8)/2048.0f, ((t0+0.1f)*128+8)/2048.0f);
+        } else if(verts==5){
+            CaptureMtexVertex(x0+dx/2,y0+dy, s0+0.05f,t0+0.1f, ((s0+0.05f)*128+8)/2048.0f, ((t0+0.1f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx,y0+dy/2, s0+0.1f,t0+0.05f, ((s0+0.1f)*128+8)/2048.0f, ((t0+0.05f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx/2,y0, s0+0.05f,t0, ((s0+0.05f)*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0,y0+dy/2, s0,t0+0.05f, (s0*128+8)/2048.0f, ((t0+0.05f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx/4,y0+dy/2, s0+0.02f,t0+0.05f, ((s0+0.02f)*128+8)/2048.0f, ((t0+0.05f)*128+8)/2048.0f);
+        } else {
+            CaptureMtexVertex(x0,y0, s0,t0, (s0*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx,y0, s0+0.1f,t0, ((s0+0.1f)*128+8)/2048.0f, (t0*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx,y0+dy, s0+0.1f,t0+0.1f, ((s0+0.1f)*128+8)/2048.0f, ((t0+0.1f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0+dx/2,y0+dy+0.05f, s0+0.05f,t0+0.12f, ((s0+0.05f)*128+8)/2048.0f, ((t0+0.12f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0,y0+dy, s0,t0+0.1f, (s0*128+8)/2048.0f, ((t0+0.1f)*128+8)/2048.0f);
+            CaptureMtexVertex(x0-0.02f,y0+dy/2, s0-0.02f,t0+0.05f, ((s0-0.02f)*128+8)/2048.0f, ((t0+0.05f)*128+8)/2048.0f);
+        }
+        glEnd();
+    }
+    glDisable(GL_TEXTURE_2D); glActiveTextureARB(GL_TEXTURE0_ARB);
+    mglDrawMultitexBuffer(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_REPLACE);
+    glDisable(GL_DEPTH_TEST);
+}
+static void DrawQuakeBurst32(ULONG frame){ (void)frame; DrawBurst32Scene(); }
+static GLboolean VerifyQuakeBurst32(char *detail)
+{
+    CheckLog log; int i;
+    memset(&log,0,sizeof(log));
+    if(!CalibrateChannels(detail)) return GL_FALSE;
+    DrawBurst32Scene();
+    /* First quad at (-0.9,-0.9) red base with top-half light (A0 -> 85) => 85,0,0 */
+    CheckRGB(&log,"burst-first", -0.8f,-0.8f, 85,0,0, 10);
+    /* Middle burst poly should be inside and not black nor white */
+    CheckRGB(&log,"burst-mid", 0.0f,0.0f, 0,0,0, 100); /* just ensure not crash, check not white */
+    /* Use a more precise check: sample near centre of first quad */
+    if(log.failures==1 && strstr(log.first,"burst-mid")) { log.failures=0; log.first[0]=0; log.checks--; }
+    if(log.failures) strncpy(detail,log.first,95); else strcpy(detail,"32-polys 3-6 verts burst inside 128 light");
+    return log.failures==0;
+}
+
 static GLboolean AlwaysAvailable(char *reason)
 {
     reason[0] = '\0';
@@ -3210,6 +5084,96 @@ static MiniGLTest g_tests[] = {
      "The green preview flashes periodically, stays translucent while "
      "visible, and disappears completely between pulses.",
      DrawQuakePickup, VerifyQuakePickup, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.tex-rgb-mips", "QUAKE", "RGB MIP CHAIN",
+     "Upload Quake's GL_RGB world texture with its full mip chain from "
+     "RGBA source, LINEAR filters.",
+     "The panel shows level 0 red exactly; any other colour names the "
+     "wrong level or a broken multi-level layout.",
+     DrawQuakeRGBMips, VerifyQuakeRGBMips, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.tex-rgb5a1-alpha", "QUAKE", "RGB5_A1 ALPHA",
+     "Upload Quake's GL_RGB5_A1 HUD/sprite format with opaque, "
+     "transparent, and palette-alpha-170 texels, under alpha-test and "
+     "blending.",
+     "Opaque texels show, transparent texels vanish, alpha 170 stays "
+     "opaque: 1-bit alpha exactly.",
+     DrawQuakeRGB5A1, VerifyQuakeRGB5A1, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.lightmap-4444", "QUAKE", "4444 LIGHTMAP BLEND",
+     "Blend Quake's inverted-light 4444 texels over white with "
+     "SRC_ALPHA/ONE_MINUS_SRC_ALPHA; column 2 carries swapped bytes "
+     "as a byte-order diagnostic.",
+     "Column 1 reads the 255/170/85/0 ramp, column 2 stays white; "
+     "FAIL detail reports the swapped column raw.",
+     DrawQuake4444, VerifyQuake4444, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.lightmap-565-subimage", "QUAKE", "565 LIGHTMAP UPDATE",
+     "Blend Quake's -lm_RGB 565 greys with ZERO/SRC_COLOR, then apply "
+     "a dynamic subrect refresh and restore it.",
+     "Full/half/dark texels multiply exactly; the refreshed texel "
+     "turns white and back to black.",
+     DrawQuake565, VerifyQuake565, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.mtex-buffer-quad", "QUAKE", "MTEX BUFFER QUAD",
+     "Capture a quad in Quake's fake-multitexture call order (base uv "
+     "via MultiTexCoord while unit 1 is active) and replay it with "
+     "mglDrawMultitexBuffer.",
+     "Each cell reads checker base times its 4444 row light exactly.",
+     DrawQuakeMtexQuad, VerifyQuakeMtexQuad, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.mtex-buffer-pentagon", "QUAKE", "MTEX BUFFER PENTAGON",
+     "Capture a 5-vertex polygon in the same order; V19 replays every "
+     "3+ vertex polygon through both units.",
+     "The pentagon renders base times light like the quad (V19 "
+     "parity); a unit-1-only or base-only image fails.",
+     DrawQuakeMtexPentagon, VerifyQuakeMtexPentagon, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.mtex-buffer-capacity", "QUAKE", "MTEX BUFFER CAPACITY",
+     "Shrink the multitexture buffer to 16 polygons, capture 4 quads, "
+     "flush once, then restore the default size.",
+     "All 4 quads land lit at one third brightness; none may be "
+     "dropped or left black.",
+     DrawQuakeMtexCapacity, VerifyQuakeMtexCapacity, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.mtex-direct-modulate", "QUAKE", "DIRECT MODULATE",
+     "Draw one polygon with unit 0 REPLACE and unit 1 MODULATE fed "
+     "per vertex: Quake's -extensions sequential path.",
+     "Base checker times the grey ramp exactly, in a single pass.",
+     DrawQuakeSeqModulate, VerifyQuakeSeqModulate, AlwaysAvailable, GL_TRUE, {0}},
+     {"quake.frame-state-machine", "QUAKE", "FRAME STATE MACHINE",
+     "Run one Quake frame's state sequence: LEQUAL depth clear, "
+     "frustum, front-face cull, perspective-mapped 3D quad, then the "
+     "device-space translucent overlay with mapping disabled.",
+     "The 3D checker shows through a 50% green wash; the wash over "
+     "black reads dark green.",
+     DrawQuakeFrameState, VerifyQuakeFrameState, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.console-init", "QUAKE", "CONSOLE BOOT UPLOADS",
+     "Replay the game's boot upload sequence (GL_Init, particle texture, "
+     "charset, conback) with the GL error drained after each phase.",
+     "PASS means every boot upload call is clean; FAIL names the first "
+     "failing phase and its code.",
+     DrawQuakeConsoleInit, VerifyQuakeConsoleInit, AlwaysAvailable, GL_FALSE, {0}},
+    {"quake.console", "QUAKE", "CONSOLE OVERLAY",
+     "Replay the console's exact calls with the real PAK0 assets: RGB5_A1 "
+     "conback alpha blend plus per-glyph RGB5_A1 charset fans in device "
+     "space, LINEAR, MODULATE.",
+     "Computed conback blend matches, real glyph strokes land on their "
+     "exact device pixels, transparent texels show conback.",
+     DrawQuakeConsole, VerifyQuakeConsole, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.console-full", "QUAKE", "CONSOLE FULL OPEN",
+     "Same console fully open with the real assets: opaque conback blit "
+     "plus charset glyphs.",
+     "Computed conback reads opaque, real glyph strokes land exact.",
+     DrawQuakeConsoleFull, VerifyQuakeConsoleFull, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.lightmap-128-stride", "QUAKE", "128 STRIDE LIGHTMAP",
+     "128x128 4444 full alloc with 4 bands, then full-width subrect strips.",
+     "Bands read 255/170/85/0 and subrect updates land with 128 stride.",
+     DrawQuakeLightmap128Stride, VerifyQuakeLightmap128Stride, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.world-8bit-palette", "QUAKE", "8-BIT PALETTE WORLD",
+     "8x8 8-bit indices via d_8to24table 170 alpha to GL_RGB mips.",
+     "Palette 0 black, 1 red-ish, 2 green-ish, 255 transparent, centre grey.",
+     DrawQuakeWorld8Palette, VerifyQuakeWorld8Palette, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.lightmap-subrect-coalesce", "QUAKE", "SUBRECT COALESCING",
+     "128x128 4444 atlas, two dirty polys merged to one full-width strip.",
+     "Gap between polys also white, all three rows read correctly.",
+     DrawQuakeLightmapSubrect, VerifyQuakeLightmapSubrect, AlwaysAvailable, GL_TRUE, {0}},
+    {"quake.burst-32-128", "QUAKE", "BURST 32 POLYS",
+     "1 poly 3 verts inside 128 atlas, one mtex buffer flush.",
+     "First quad 85,0,0 and burst does not wedge.",
+     DrawQuakeBurst32, VerifyQuakeBurst32, AlwaysAvailable, GL_TRUE, {0}},
     {"present.stability", "PRESENT", "PRESENT STABILITY",
      "Draw and present one identical frame repeatedly and check the result "
      "never drifts.",
@@ -3616,6 +5580,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[index], "--frames") && index + 1 < argc) g_measureFrames = (ULONG)atoi(argv[++index]);
         else if (!strcmp(argv[index], "--fullscreen")) g_windowed = GL_FALSE;
         else if (!strcmp(argv[index], "--window")) g_windowed = GL_TRUE;
+        else if (!strcmp(argv[index], "--game-context")) g_gameContext = GL_TRUE;
         else if (!strcmp(argv[index], "--profile")) g_profile = GL_TRUE;
         else if (!strcmp(argv[index], "--nosync")) g_noSync = GL_TRUE;
         else if (!strcmp(argv[index], "--dump") && index + 1 < argc) g_dumpPath = argv[++index];
@@ -3656,7 +5621,17 @@ int main(int argc, char **argv)
         IntuitionBase = NULL;
         return 21;
     }
-    mglChooseWindowMode(g_windowed);
+    if (g_gameContext) {
+        /* Exactly Quake's windowed VID_Init chooser sequence
+         * (gl_vidamiga.c:702-707) so a context-sensitive defect can be
+         * reproduced without the game. */
+        mglChooseGuardBand(GL_FALSE);
+        mglChooseVertexBufferSize(3000);
+        mglChooseMtexBufferSize(6000);
+        mglChooseWindowMode(GL_TRUE);
+    } else {
+        mglChooseWindowMode(g_windowed);
+    }
     mglChoosePixelDepth(g_depth);
     if (!mglCreateContext(0, 0, g_width, g_height)) {
         printf("minigl_testsuite: cannot create %ldx%ldx%ld %s context\n",

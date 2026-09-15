@@ -800,6 +800,15 @@ struct MiniGLR200Context {
     ULONG segmentPoolCount;
     ULONG segmentPoolNext;
 #endif
+    /* Bitmask of texture units fed explicitly with glMultiTexCoord2fARB
+     * during the current glBegin/glEnd (bit N = unit N). The legacy
+     * implicit glTexCoord2f does not set bits. Lib_glEnd uses bit 1 to
+     * tell Quake's real dual-unit path (explicit unit-1 feed: draw
+     * immediately) from the classic fake-multitexture feed order
+     * (implicit unit-1 feed: capture into the mtex queue). Appended at
+     * the end: no existing field offsets change (68k strict alignment:
+     * ULONG after ULONG). Big-endian safe: single-word bitmask. */
+    ULONG texCoordFeedMask;
 };
 
 /* ------------------------------------------------------------------ */

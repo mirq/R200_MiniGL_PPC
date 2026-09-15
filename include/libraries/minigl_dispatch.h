@@ -179,6 +179,43 @@ typedef struct MGLDispatchTable {
 
 extern const MGLDispatchTable *MiniGLDispatch;
 
+/* Block-argument texture uploads (POWEROPEN client ABI bridge).
+ *
+ * vbcc/WarpOS clients use the PowerOpen ABI, which places arguments 9+
+ * at different stack offsets than the SysV ABI used by the GCC-built
+ * DLL. glTexImage2D/glTexSubImage2D are the only table entries with
+ * more than eight parameters (context + 9), so PowerOpen clients
+ * marshal them through these block helpers (context + one pointer,
+ * register-only, identical in both ABIs). The DLL exports them by name
+ * (MGLTexImage2DBlock / MGLTexSubImage2DBlock); clients fetch the
+ * addresses with dllGetProcAddress() and fall back to the ordinary
+ * table entry when the DLL does not provide them. */
+typedef struct
+{
+    GLenum target;
+    GLint level;
+    GLint internalformat;
+    GLsizei width;
+    GLsizei height;
+    GLint border;
+    GLenum format;
+    GLenum type;
+    const GLvoid *pixels;
+} MGLTexImage2DArgs;
+
+typedef struct
+{
+    GLenum target;
+    GLint level;
+    GLint xoffset;
+    GLint yoffset;
+    GLsizei width;
+    GLsizei height;
+    GLenum format;
+    GLenum type;
+    const GLvoid *pixels;
+} MGLTexSubImage2DArgs;
+
 #ifndef MINIGL_LIBRARY_BUILD
 #define MGLD_CTX (*MiniGLDispatch->currentContext)
 
