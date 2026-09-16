@@ -1985,6 +1985,108 @@ static GLboolean VerifyTexUploadBench(char *detail)
     return GL_TRUE;
 }
 
+/* Silent Hill's intro logo and FMV present each 320x256 16-bit frame as
+ * two power-of-two tiles: one 256x256 and one 64x256. The asymmetic pair
+ * is what this benchmark measures; the direct texture path gives each tile
+ * its own BEGIN/COMMIT round trip. */
+static GLuint g_shIntroTex[2];
+static UBYTE g_shIntroMain[256 * 256 * 2];
+static UBYTE g_shIntroStrip[64 * 256 * 2];
+
+static void PrepareShIntro(void)
+{
+    int i;
+
+    if (g_shIntroTex[0])
+        return;
+    for (i = 0; i < 256 * 256; ++i) {
+        unsigned v = (unsigned)(i & 0x1Fu) | 0x001Fu;
+        g_shIntroMain[i * 2] = (UBYTE)(v >> 8);
+        g_shIntroMain[i * 2 + 1] = (UBYTE)(v & 0xffu);
+    }
+    for (i = 0; i < 64 * 256; ++i) {
+        unsigned v = (unsigned)(i & 0x3Fu) | 0xF800u;
+        g_shIntroStrip[i * 2] = (UBYTE)(v >> 8);
+        g_shIntroStrip[i * 2 + 1] = (UBYTE)(v & 0xffu);
+    }
+    for (i = 0; i < 2; ++i) {
+        glGenTextures(1, &g_shIntroTex[i]);
+        glBindTexture(GL_TEXTURE_2D, g_shIntroTex[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    }
+}
+
+static void DrawShIntroScene(GLboolean upload)
+{
+    PrepareShIntro();
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    if (upload) {
+        glBindTexture(GL_TEXTURE_2D, g_shIntroTex[0]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0,
+                     MGL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT,
+                     g_shIntroMain);
+        glBindTexture(GL_TEXTURE_2D, g_shIntroTex[1]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 64, 256, 0,
+                     MGL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT,
+                     g_shIntroStrip);
+    }
+    glBindTexture(GL_TEXTURE_2D, g_shIntroTex[0]);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(-0.9f, -0.9f);
+    glTexCoord2f(1, 0); glVertex2f(0.54f, -0.9f);
+    glTexCoord2f(1, 1); glVertex2f(0.54f, 0.9f);
+    glTexCoord2f(0, 1); glVertex2f(-0.9f, 0.9f);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, g_shIntroTex[1]);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(0.54f, -0.9f);
+    glTexCoord2f(1, 0); glVertex2f(0.9f, -0.9f);
+    glTexCoord2f(1, 1); glVertex2f(0.9f, 0.9f);
+    glTexCoord2f(0, 1); glVertex2f(0.54f, 0.9f);
+    glEnd();
+}
+
+static void DrawShIntroBench(ULONG frame)
+{
+    (void)frame;
+    DrawShIntroScene(GL_TRUE);
+}
+
+static GLboolean VerifyShIntroBench(char *detail)
+{
+    int r = -1, g = -1, b = -1;
+
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrainErrors();
+    DrawShIntroScene(GL_FALSE);
+    if (!SampleRGB(-0.4f, 0.0f, &r, &g, &b)) {
+        strcpy(detail, "main tile capture failed");
+        return GL_FALSE;
+    }
+    if ((r | g | b) == 0) {
+        sprintf(detail, "256x256 tile did not render (%d,%d,%d)", r, g, b);
+        return GL_FALSE;
+    }
+    if (!SampleRGB(0.7f, 0.0f, &r, &g, &b)) {
+        strcpy(detail, "strip capture failed");
+        return GL_FALSE;
+    }
+    if ((r | g | b) == 0) {
+        sprintf(detail, "64x256 strip did not render (%d,%d,%d)", r, g, b);
+        return GL_FALSE;
+    }
+    strcpy(detail, "320x256 frame as 256x256 + 64x256 uploads renders");
+    return GL_TRUE;
+}
+
 static void DrawQuakeLightmap(ULONG frame)
 {
     int index;
@@ -5065,6 +5167,13 @@ static MiniGLTest g_tests[] = {
      "Sustained FPS reports the texture-upload path; the uploaded tile "
      "must still render.",
      DrawTexUploadBench, VerifyTexUploadBench, AlwaysAvailable, GL_TRUE, {0}},
+    {"benchmark.sh-intro", "BENCHMARK", "SH INTRO UPLOAD",
+     "Silent Hill's intro logo and FMV present pattern: each 320x256 "
+     "16-bit frame re-uploaded as one 256x256 and one 64x256 tile and "
+     "drawn as textured quads every frame.",
+     "Sustained FPS reports the asymmetric two-tile upload path the logo "
+     "and FMV sequences use.",
+     DrawShIntroBench, VerifyShIntroBench, AlwaysAvailable, GL_TRUE, {0}},
     {"lighting.availability", "LIGHTING", "LIGHTING VECTORS",
      "Report whether optional ABI v4 lighting is available.",
      "PASS means lighting tests can be added; SKIP is valid when unsupported.",
