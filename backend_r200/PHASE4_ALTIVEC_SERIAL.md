@@ -116,4 +116,40 @@ checks now pass for every destination alignment.
 Correctness: kernel self-test pass, cacheable replay byte-exact, aperture
 read-back byte-exact, `gl_error=0`, and the pre-existing room-walk pixel
 signature (`want 59,44,25 got 34,29,15`) is unchanged from the baseline
-DLL.
+DLL. The deterministic room-walk `--dump` surface is **CRC `FFED5264`
+for both the vector and the scalar run of the same DLL** (byte-identical
+render).
+
+## Three-boot validation (2026-09-16/17)
+
+Quiet DLL `38F63C02` (`Work:p4/minigl_ppc.dll`, current HEAD + this
+change), host `32716DD9`, `MGLPPC_HOSTPRI=-1`, all diagnostics unset.
+Boot 1 cold; boots 2-3 warm reboots (operator instruction), `C:InitPPC`
+once per boot. Each row is one run; medians across the three runs.
+
+| Run | Boot 1 | Boot 2 | Boot 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| semantic gears vector fps | 148.514 | 149.253 | 151.515 | **149.253** |
+| semantic gears vector serialize | 23,550,277 | 23,534,802 | 23,571,285 | 23,550,277 |
+| semantic gears scalar fps | 135.135 | 135.135 | **133.928** | 135.135 |
+| semantic gears scalar serialize | 27,380,234 | 27,381,168 | 27,378,309 | 27,380,234 |
+| CP gears vector fps | 220.588 | 214.285 | 222.222 | **220.588** |
+| CP gears vector serialize | 22,869,125 | 22,876,926 | 22,886,319 | 22,876,926 |
+| CP gears scalar fps | 176.470 | 177.514 | 172.413 | 176.470 |
+| CP gears scalar serialize | 27,268,859 | 27,260,478 | 27,261,914 | 27,261,914 |
+| room-walk vector fps | 58.823 | 59.405 | 57.692 | 58.823 |
+| room-walk vector serialize | 5,479,471 | 5,491,311 | 5,532,596 | 5,491,311 |
+| room-walk scalar fps | 59.405 | 59.405 | 59.405 | 59.405 |
+| room-walk scalar serialize | 6,482,797 | 6,485,359 | 6,486,447 | 6,485,359 |
+
+Medians: semantic gears **149.253 vs 135.135 fps (+10.4%)**, serialize
+**−14.0%**; CP emit gears **220.588 vs 176.470 fps (+25.0%)**, serialize
+**−16.1%**; room-walk serialize **−15.3%** (its fps is present-bound).
+Every run `error=0` / `gl_error=0`, converter validation passes.
+
+Caveats: the room-walk pixel verification fails on the reference
+comparison both before and after this change (same signature), so it is
+not a regression gate here. Only MPC7410 hardware was exercised; the
+probe also accepts the documented `CPUB_G4/7410/7441` values, and the
+scalar kernels remain the default on any CPU the probe does not
+recognise.
