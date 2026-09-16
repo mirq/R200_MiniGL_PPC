@@ -94,3 +94,58 @@ geometry, error zero. Host priority -1; 2,031 executes and 600 presents. It is a
 single-sample reference, not a three-cold-run median. Logs are preserved under
 `/tmp/opencode/ibdraw/bench/{sample1,host1,health1}.log`; original matched
 artifacts remain in `DH2:ibsafe` and the baseline client in `DH2:ibbench`.
+
+## Phase 3: fullscreen enablement (design captured 2026-09-16)
+
+Prerequisite verified on the installed stack (quiet DLL `32216D6B`, host
+`85F1A513`, chip `CEB838A6`): windowed `precalc 300f 800x600x32 -nosync`
+ran **68.493 fps, error=0** with `CP_RUN dispatches=1016 dwords=255920
+failed=0`. The live driver supports trusted indirect dispatch; no driver
+deployment is required (an `r3dinfo` report of interface 17 is its
+negotiated request, not the chip version).
+
+Blockers for fullscreen, with exact sites:
+
+- Host rejects CP for non-windowed contexts: `minigl_ppc_host.c:905-909`
+  (`!state->contextWindowed`).
+- Windowed works only because the target is `surfaces[0]` forever.
+  Fullscreen rotates `surfaces[displayed/drawing]` per present, while:
+  - the host freezes `state->cpColorToken` at registration (`:1066`) and
+    `ExecuteCpEntry` fails terminally when the live bridge token differs
+    (`:1307-1312` -> `cpFailed`);
+  - the PPC target token comes from the CREATE_CONTEXT reply
+    (`minigl_r200_warpos_compile_probe.c:2517-2518` sets
+    `proofContext.surfaces[0].Handle`), valid for windowed only;
+  - `ResolveCpSurface` (`:1718-1749`) resolves whatever token the record
+    carries and caches 16 descriptors keyed by token; PRESENT never
+    invalidates that cache;
+  - the emitted CP stream bakes the target address/pitch/format, so a
+    stale target descriptor produces a wrong stream, not just a delay.
+
+Implementation plan:
+
+1. Publish the live color token: append `colorToken` + `colorSeq` to
+   `MGLPPCRingControlV1` (version bump 5 -> 6, update the compile-time
+   size/offset asserts in `include/libraries/minigl_ppc_protocol.h`).
+   Host writes it after `mglSwitchDisplay()` in the PRESENT path
+   (`minigl_ppc_host.c:1846-1881`) and once at registration from
+   `QueryBackendBridgeV2()`/`QueryCpSurface()`.
+2. Frontend: before building each CP batch, compare `colorSeq`; on change
+   stamp the new token into the record target field (the dword the host
+   otherwise patches via `PatchRecordTargets`) and let `ResolveCpSurface`
+   fetch the descriptor through `MGLPPC_CMD_CP_SURFACE`. Two or three
+   screen buffers cache after the first rotation cycle.
+3. Host: refresh `cpColorToken` per present; drop `!contextWindowed` from
+   `:905-909`; keep the `ExecuteCpEntry` token comparison as a
+   post-refresh sanity check, not a terminal failure.
+4. Validation order: windowed regression (68.5 fps, `failed=0`), then
+   fullscreen gears `-depth 16 -buffers 3 -nosync` against the semantic
+   **133.9 fps** reference with the envmap pixels compared, then
+   present/teardown stress (`glFinish`, context delete) and the game FMV.
+5. Only after that: N-in-flight dispatches. Replace the blocking
+   `DrainSemanticFence` in `ExecuteCpEntry` (`:1305-1307`) with a
+   per-slice fence/mask table (8 slices), advance `control->retired` over
+   the contiguous retired prefix using non-blocking
+   `Radeon3DTestFence` in `PollQueuedFence`, and join the vertex-segment
+   reuse mask against the union of in-flight masks. PRESENT and teardown
+   must drain all in-flight fences before `mglSwitchDisplay`/lease free.
