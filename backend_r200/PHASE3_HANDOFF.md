@@ -128,20 +128,16 @@ Opting in without support rejects the context (no silent fallback).
    (`DiscardSemantic` `:724-789`) must drain every in-flight fence before
    `mglSwitchDisplay` or lease release.
 
-   **BLOCKED by driver interface 18 (verified 2026-09-16 on hardware).**
-   `Radeon3DTestFence`/`Radeon3DWaitFence`
-   (`~/p96-driver/src/radeon3d_service.c:2094-2129`) both call
-   `IsSessionFence` (`:2077-2092`), which requires
-   `active->LastFence == fence`; every submission path overwrites
-   `device->LastFence` (`:1081` CommitV1, `:1265` CommitBatch, `:1624`
-   StateBatch, `:1899` Execute, `:2063` DispatchIndirect). Dispatching a
-   second CP batch therefore invalidates the first batch's fence
-   permanently: an N-in-flight host failed its first PRESENT drain with
-   `present_drain_fail fence=18977 completed=4 head=5`, and the orphaned
-   host needed a reboot. Per-slice retirement requires a driver change
-   (accept any fence in the session's live range or keep a session fence
-   table); that is a separate work item with the matched-pair install and
-   cold-boot protocol, not a host/DLL change.
+   **Implemented 2026-09-16, with a driver prerequisite.** Interface 18
+   initially rejected older fences: `IsSessionFence`
+   (`~/p96-driver/src/radeon3d_service.c:2077-2092`) required
+   `active->LastFence == fence`, which every submission overwrites
+   (`:1081`, `:1265`, `:1624`, `:1899`, `:2063`), so an N-in-flight host
+   failed its first PRESENT drain (`present_drain_fail fence=18977`). The
+   driver now accepts any fence in `(0, LastFence]` and advertises
+   `RADEON3D_CAP_MULTI_FENCE` (bit 28, driver commit `8b54b76`); the host
+   only pipelines when the cap is present and otherwise keeps the
+   validated single-fence drain, so the stack still runs on the old chip.
 
 ## 6. Validation gates (in order)
 
@@ -215,19 +211,21 @@ cold boot for grey screens or driver changes; keep diagnostics
   identical; `r200_texture_update_test` unchanged (`3495/1`, pre-existing).
   Details and the FLIP-mode limitation are in `CP_EMITTER.md`.
 - Benchmark protocol (three independent boots, diagnostics off, identical
-  dispatch counts every run):
+  dispatch counts every run). Single-fence pair first, then the
+  capability-gated pipeline host with the new chip:
 
-  | Boot | windowed 300f 800x600x32 | fullscreen 600f 640x480x16 3buf |
+  | Pair | windowed 300f 800x600x32 | fullscreen 600f 640x480x16 3buf |
   | --- | ---: | ---: |
-  | A | 68.181 fps | 172.413 fps |
-  | B | 68.493 fps | 174.418 fps |
-  | C | 68.807 fps | 179.640 fps |
-  | **median** | **68.493 fps** | **174.418 fps** |
+  | host `32716DD9` + chip `CEB838A6` (boots A/B/C) | 68.181 / 68.493 / 68.807, **median 68.493** | 172.413 / 174.418 / 179.640, **median 174.418** |
+  | host `FACF6170` + chip `F46026B4` (boots D/E/F) | 69.124 / 69.444 / 69.444, **median 69.444** | 187.500 / 182.926 / 181.818, **median 182.926** |
 
   Every run `error=0`, `CP_RUN ... failed=0` (`1016/255920` windowed,
   `2031/511620` fullscreen). The semantic reference is 133.928 fps
-  fullscreen; CP adds ~30% there. Windowed matches the old baseline
-  (68.493) within noise.
+  fullscreen: CP adds +30% single-fence, +37% pipelined. Host-side
+  `CP_PROF` showed the per-dispatch fence wait falling 1482 -> 28 ms per
+  600 frames; the frame is now bound by the present blit and CP/fence
+  latency. `r200_triangle_smoke` remained pixel-identical on both drivers
+  and the semantic path was unchanged (132.7 fps on boot D).
 - Silent Hill (fullscreen 640x480x16, 3 buffers, quiet DLL + host):
   1,422 presents, `executes=5972`, no host errors, clean client quit and
   host exit. Log breakdown over 24 intervals: median frame 205 ms with
@@ -238,17 +236,13 @@ cold boot for grey screens or driver changes; keep diagnostics
   The game DLL was swapped to the quiet v6 build (`9E44E240`); the fused
   profiled `7ADA06F4` is preserved as `Work:SilentHill WOS/dll.7ada`.
 - Deployed artifacts: quiet DLL `9E44E240` (306628 B, converted on target)
-  and host `32716DD9` (42264 B, protection `00020000`). Rollbacks:
-  `Work:ibdraw/dll.pre-p3` = `32216D6B` (old quiet DLL),
-  `DH2:ibdraw/mglhost.pre3` = `85F1A513` (old quiet host);
-  `DH2:ibdraw/mglhost.p3a` keeps the validated `32716DD9` host and
-  `DH2:u0/minigl_ppc.dll` was updated to the new DLL
-  (`DH2:u0/dll.u0old` = old). The failed step-5 experiment host
-  (`EB0B4F2D`, local only) is not deployed anywhere.
-- Re-validated after the recovery reboot (InitPPC once, archived
-  `MGLPPC_HOSTPRI=-1` restored): windowed `68.493 fps error=0`
-  (`dispatches=1016 dwords=255920 failed=0`); fullscreen `174.418 fps
-  error=0` (`dispatches=2031 dwords=511620 failed=0`); CP and semantic
-  triangle readbacks still byte-identical.
-- Remaining: step 5 is **blocked on the driver fence contract** (see
-  section 5.5); the three-cold-boot benchmark protocol is still pending.
+  and quiet pipeline host `FACF6170` (43512 B, protection `00020000`).
+  Driver pair: chip `F46026B4` (77928 B, `radeon3d` commit `8b54b76`) with
+  `Prometheus.card` `18A453D6` unchanged. Rollbacks:
+  `LIBS:Picasso96/Radeon9200.chip.previous` = `CEB838A6` and
+  `LIBS:Picasso96/Prometheus.card.previous` = `18A453D6` (RMB recovery
+  block restores both); `Work:ibdraw/dll.pre-p3` = `32216D6B`,
+  `DH2:ibdraw/mglhost.pre3` = `85F1A513`, `mglhost.p3a` = `32716DD9`
+  (validated single-fence host), `DH2:u0/dll.u0old` = old.
+- Remaining: nothing blocking; the FLIP-mode colorSeq race is documented
+  in `CP_EMITTER.md` and `phase6_acceptance` has no deployed binary.

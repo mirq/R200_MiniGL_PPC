@@ -85,6 +85,7 @@ typedef int BOOL;
 #define MGLPPC_HOST_TRACE 0
 #define MGLPPC_CLIENT_TRACE 0
 #define MGLPPC_HOST_TARGET_CACHE 1
+#define MGLPPC_INFLIGHT_SLOTS MGLPPC_RING_SLOTS
 #define R200_PPC_FRONTEND 1
 #define GL_TRUE 1
 #define GL_FALSE 0
@@ -546,7 +547,7 @@ static BOOL Radeon3DDispatchIndirect(struct Radeon3DDevice *d,
     if (host.cpEnabled) {
         assert(ib->Size == sizeof(*ib) && ib->SegmentId == host.cpSegment.Id);
         assert(ib->ByteOffset == host.ringCompleted % 8 * MGLPPC_CP_SLICE_BYTES);
-        assert(ib->DwordCount == expectedCpCount && !(ib->DwordCount & 1) && !host.semanticFence);
+        assert(ib->DwordCount == expectedCpCount && !(ib->DwordCount & 1));
         for (ULONG i = 0; i < ib->DwordCount; ++i) {
             ULONG word = i < emitResult ? mockEmitWord(i) : 0x80000000U;
             assert(cpMemory[ib->ByteOffset / 4 + i] == __builtin_bswap32(word));
@@ -617,7 +618,10 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG count,
 '''
 code += section(H, "#if MGLPPC_PROFILE\n#define HOST_START", "static BOOL DiscardSemantic")
 code += section(H, "static ULONG SemanticCRCTable[256];", "static BOOL QueryBackendBridge(")
-for name in ("static BOOL DrainSemanticFence(", "static BOOL DrainForSegment(", "static void PollQueuedFence(",
+for name in ("static void PublishRetired(", "static void AdvanceRetired(",
+             "static void RecomputeQueuedMask(", "static BOOL RecordFence(",
+             "static void PopFence(", "static void ClearFences(",
+             "static BOOL DrainSemanticFence(", "static BOOL DrainForSegment(", "static void PollQueuedFence(",
              "static BOOL DiscardSemantic(",
              "static LONG ReadUploadTraceOption(",
              "static BOOL QueryBackendIndirect(", "static BOOL QueryCpSurface(",

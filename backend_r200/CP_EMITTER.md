@@ -133,27 +133,37 @@ those headers into `slot->records` (`r200_geometry.c:436-437` state batch,
 `:543-544` plain). The v6 stamp overrides the target at CP publish time,
 which is where the emitted CP stream bakes address/pitch/format.
 
-Measured this session (quiet DLL `9E44E240` + host `32716DD9`, chip
-`CEB838A6`, no driver change; three independent boots, diagnostics off,
-identical shader/dword counts every run):
+Measured this session (quiet DLL `9E44E240` + host, three independent
+boots, diagnostics off, identical shader/dword counts every run). First on
+the old chip `CEB838A6`, then on the new chip `F46026B4` with the
+capability-gated pipeline host:
 
-- windowed `precalc -frames 300 800x600x32 -window -nosync`: 68.181 /
-  68.493 / 68.807 fps, **median 68.493 fps**, every run `error=0`,
-  `CP_RUN dispatches=1016 dwords=255920 failed=0` (old baseline 68.493).
-- fullscreen `precalc -frames 600 640x480x16 -buffers 3 -nosync -nofps`:
-  172.413 / 174.418 / 179.640 fps, **median 174.418 fps**, every run
-  `error=0`, `CP_RUN dispatches=2031 dwords=511620 failed=0`; the
-  semantic reference is 133.928 fps (**+30%**).
+| Pair | windowed 300f | fullscreen 600f |
+| --- | ---: | ---: |
+| host `32716DD9`, chip `CEB838A6` (single fence) | 68.181 / 68.493 / 68.807, **median 68.493** | 172.413 / 174.418 / 179.640, **median 174.418** |
+| host `FACF6170`, chip `F46026B4` (pipelined) | 69.124 / 69.444 / 69.444, **median 69.444** | 187.500 / 182.926 / 181.818, **median 182.926** |
+
+Every run `error=0`, `CP_RUN ... failed=0` (`1016/255920` windowed,
+`2031/511620` fullscreen). The semantic reference is 133.928 fps
+fullscreen; CP adds **+30%** single-fence and **+37%** pipelined.
+
 - `r200_triangle_smoke 16 fullscreen` with CP: pixels pass; CP and semantic
-  readbacks are byte-identical (`center=115,145,164 corner=8,12,24`).
+  readbacks are byte-identical (`center=115,145,164 corner=8,12,24`), on
+  both drivers.
 - `r200_texture_update_test` (windowed, CP): `CHECKS=3495 FAILURES=1`, the
   pre-existing `INDEXED SOURCE` expectation; `CP_RUN dispatches=24
-  dwords=3024 failed=0`.
+  dwords=3024 failed=0` on both drivers.
 - Silent Hill (fullscreen, quiet DLL + host): 1,422 presents,
   `executes=5972`, no host errors, clean quit. The game's 4-6 fps outdoor
   segments are its own CPU load (median 205 ms frame: logic 100 + raster
   19); MiniGL's share is `present` 28 ms (game software scaling) plus
   `endscene` 2.4 ms. FMV intervals ran 15-16 fps.
+
+Host-CPU attribution (`CP_PROF`, 600 fullscreen frames): the per-dispatch
+fence wait fell from **1482 ms to 28 ms** when the pipeline is active; the
+CP-entry total fell 1912 -> 623 ms. End-to-end the frame is now bound by
+the present blit and CP/fence latency (`presentwait` 1.19 s, `present`
+0.77 s over the same run), not by the host's serialization.
 
 Known limitation: with `MINIGL_PRESENT=FLIP` the native drawing buffer
 rotates on the host, and a CP batch emitted after the present but before the
@@ -162,27 +172,24 @@ host reports `cp_token_mismatch` once and keeps the session alive. BLIT
 presentation (the default with sync off and the validated path) has a stable
 drawing target and is unaffected.
 
-### Step 5 (N in-flight) blocked by the driver fence contract
+### Step 5 (N in-flight): implemented with a driver fence-range change
 
-An N-in-flight host was implemented and tested on hardware on 2026-09-16
-(fence queue, per-entry masks, retired-prefix advancement, PRESENT/teardown
-drain) and failed on the first frame:
-
-```
-MiniGLPPC host: present_drain_fail fence=18977 completed=4 head=5
-```
-
+An N-in-flight host first failed on hardware because
 `Radeon3DTestFence`/`Radeon3DWaitFence` (`radeon3d_service.c:2094-2129`)
-route through `IsSessionFence` (`:2077-2092`), which only accepts
-`active->LastFence == fence`. Every submission overwrites `LastFence`
-(`:1081` CommitV1, `:1265` CommitBatch, `:1624` StateBatch, `:1899`
-Execute, `:2063` DispatchIndirect), so once a second CP batch is submitted
-the first batch's fence can never be validated: the drain fails immediately
-and the session is lost. Per-slice retirement therefore requires a driver
-change (fence-range or session-table validation); the current host keeps the
-validated single-outstanding-fence model. The step-5 host source was
-reverted, and the experiment cost one recovery reboot (an orphaned host
-that spun on the failed fence ignores Exec break signals).
+route through `IsSessionFence` (`:2077-2092`), which only accepted
+`active->LastFence == fence`; every submission overwrites `LastFence`
+(`:1081`, `:1265`, `:1624`, `:1899`, `:2063`), so an older fence could
+never be retired (`present_drain_fail fence=18977`).
+
+The driver now accepts any fence in `(0, active->LastFence]`
+(wrap-tolerant, monotonic per session) and advertises
+`RADEON3D_CAP_MULTI_FENCE` (bit 28, driver commit `8b54b76`). The host
+(`minigl_ppc_host.c`) enables the fence queue only when the cap is present:
+one submission per ring slot in flight, non-blocking retirement of the
+contiguous prefix in `PollQueuedFence`, `control->retired` advanced only
+over completed fences, and a full drain before PRESENT/teardown. Without
+the cap (old driver) the host keeps the validated drain-before-dispatch
+model unchanged, so the DLL/host pair still runs on the old chip.
 
 ### Original design notes
 
