@@ -57,6 +57,13 @@ static ULONG IdleActiveTicks, IdleRenderTicks, IdleWakeBacklog;
 #include <libraries/minigl_perf.h>
 #endif
 
+/* Simultaneous GPU submissions tracked when the driver validates ranged
+ * fences (RADEON3D_CAP_MULTI_FENCE). One CP slice per ring slot bounds the
+ * CP path; semantic batches are bounded by the four vertex segments. Without
+ * the cap the queue never exceeds one entry and the host drains per
+ * dispatch, exactly as before. */
+#define MGLPPC_INFLIGHT_SLOTS MGLPPC_RING_SLOTS
+
 typedef struct MGLPPCHostState {
     int backendOpen;
     void *context;
@@ -87,7 +94,14 @@ typedef struct MGLPPCHostState {
     ULONG *semanticSlots[MGLPPC_SEMANTIC_SLOT_COUNT];
     ULONG semanticGeneration[MGLPPC_SEMANTIC_SLOT_COUNT];
     ULONG semanticEpoch;
+    /* In-flight GPU submissions, oldest first. Only populated beyond one
+     * entry when the driver advertises ranged fence validation. semanticFence
+     * mirrors fenceValue[0] for the poll/idle checks. */
     ULONG semanticFence;
+    ULONG fenceValue[MGLPPC_INFLIGHT_SLOTS];
+    ULONG fenceSerial[MGLPPC_INFLIGHT_SLOTS];
+    ULONG fenceMask[MGLPPC_INFLIGHT_SLOTS];
+    ULONG fenceCount;
     ULONG semanticExecutes;
     ULONG semanticBoundTexture;
     int semanticRegistered;
@@ -477,25 +491,103 @@ static void AbortBackendDirectTexture(ULONG textureName)
                   (GLint *)&bridge);
 }
 
+/* Publish `retired` monotonically; the PPC reuses CP slices on this value. */
+static void PublishRetired(MGLPPCHostState *state, ULONG retired)
+{
+    volatile MGLPPCRingControlV1 *control = state->ringControl;
+
+    if (!control || retired > state->ringCompleted)
+        return;
+    if ((LONG)(retired - control->retired) <= 0)
+        return;
+    control->retired = retired;
+    if (state->cpEnabled)
+        CacheClearE((APTR)&control->retired, sizeof(ULONG), CACRF_ClearD);
+}
+
+/* Everything before the oldest in-flight submission is retired; with none
+ * outstanding, every consumed entry is. */
+static void AdvanceRetired(MGLPPCHostState *state)
+{
+    if (!state->ringControl)
+        return;
+    if (state->fenceCount)
+        PublishRetired(state, state->fenceSerial[0]);
+    else
+        PublishRetired(state, state->ringCompleted);
+}
+
+static void RecomputeQueuedMask(MGLPPCHostState *state)
+{
+    ULONG index, mask = 0;
+
+    for (index = 0; index < state->fenceCount; ++index)
+        mask |= state->fenceMask[index];
+    state->queuedSegmentMask = mask;
+}
+
+/* Queue a submission's fence, covering every ring entry up to `serial`. With
+ * the queue full the caller must drain first. */
+static BOOL RecordFence(MGLPPCHostState *state, ULONG serial, ULONG fence,
+                        ULONG mask)
+{
+    ULONG index;
+
+    if (!fence || state->fenceCount >= MGLPPC_INFLIGHT_SLOTS)
+        return FALSE;
+    index = state->fenceCount++;
+    state->fenceValue[index] = fence;
+    state->fenceSerial[index] = serial;
+    state->fenceMask[index] = mask;
+    state->queuedSegmentMask |= mask;
+    state->semanticFence = state->fenceValue[0];
+    return TRUE;
+}
+
+static void PopFence(MGLPPCHostState *state)
+{
+    ULONG index;
+
+    if (!state->fenceCount)
+        return;
+    --state->fenceCount;
+    for (index = 0; index < state->fenceCount; ++index) {
+        state->fenceValue[index] = state->fenceValue[index + 1];
+        state->fenceSerial[index] = state->fenceSerial[index + 1];
+        state->fenceMask[index] = state->fenceMask[index + 1];
+    }
+    RecomputeQueuedMask(state);
+    state->semanticFence = state->fenceCount ? state->fenceValue[0] : 0;
+}
+
+static void ClearFences(MGLPPCHostState *state)
+{
+    state->fenceCount = 0;
+    state->queuedSegmentMask = 0;
+    state->semanticFence = 0;
+}
+
+/* Blocking drain of every in-flight submission, oldest first. PRESENT,
+ * teardown and every path that needs GPU quiescence (texture BEGIN, readback,
+ * inline semantic execute) uses this. */
 static BOOL DrainSemanticFence(MGLPPCHostState *state)
 {
     MGLR200PrivateBridgeV1 bridge;
 
-    if (!state->semanticFence) {
+    if (!state->fenceCount) {
         state->queuedSegmentMask = 0;
-        if (state->ringControl)
-            state->ringControl->retired = state->ringCompleted;
+        AdvanceRetired(state);
         return TRUE;
     }
     if (!state->context || !QueryBackendBridge(&bridge))
         return FALSE;
-    if (!Radeon3DWaitFence((struct Radeon3DDevice *)bridge.deviceToken,
-                           state->semanticFence, 1000UL))
-        return FALSE;
-    state->semanticFence = 0;
-    state->queuedSegmentMask = 0;
-    if (state->ringControl)
-        state->ringControl->retired = state->ringCompleted;
+    while (state->fenceCount) {
+        if (!Radeon3DWaitFence((struct Radeon3DDevice *)bridge.deviceToken,
+                               state->fenceValue[0], 1000UL))
+            return FALSE;
+        PopFence(state);
+    }
+    AdvanceRetired(state);
     return TRUE;
 }
 
@@ -521,31 +613,31 @@ static void PollQueuedFence(MGLPPCHostState *state)
      * this, a client parked in the segment-rotate wait deadlocks whenever
      * no further ring entry arrives to trigger DrainForSegment -- which is
      * exactly the end-of-frame condition. */
-    if (!state->semanticFence) {
-        state->ringControl->retired = state->ringCompleted;
+    if (!state->fenceCount) {
+        AdvanceRetired(state);
         return;
     }
     if (!state->cpEnabled && !(state->ringRadeonCaps & RADEON3D_CAP_ORDERED_COMMITS)) {
         /* Without ordered commits every entry executes synchronously on
          * this task, so a drained ring means all reads are done. */
-        state->semanticFence = 0;
-        state->queuedSegmentMask = 0;
-        state->ringControl->retired = state->ringCompleted;
+        ClearFences(state);
+        AdvanceRetired(state);
         return;
     }
     fullMask = (1UL << state->vertexSegmentCount) - 1UL;
     if (!state->cpEnabled && (state->queuedSegmentMask & fullMask) != fullMask &&
         !(state->queuedSegmentMask))
         return;
-    if (!Radeon3DTestFence(
-            (struct Radeon3DDevice *)state->ringDeviceToken,
-            state->semanticFence))
-        return;
-    state->semanticFence = 0;
-    state->queuedSegmentMask = 0;
-    state->ringControl->retired = state->ringCompleted;
-    if (state->cpEnabled)
-        CacheClearE((APTR)&state->ringControl->retired, sizeof(ULONG), CACRF_ClearD);
+    /* Non-blocking retirement over the contiguous prefix. Submissions are
+     * ordered, so testing the oldest is enough to advance `retired`; this
+     * only works for every queued fence when the driver validates a range
+     * (MULTI_FENCE); otherwise the queue holds at most one entry. */
+    while (state->fenceCount &&
+           Radeon3DTestFence(
+               (struct Radeon3DDevice *)state->ringDeviceToken,
+               state->fenceValue[0]))
+        PopFence(state);
+    AdvanceRetired(state);
 }
 
 /* Cheap shutdown counts are not activity latches or benchmark timings. */
@@ -585,6 +677,12 @@ static ULONG HostPollLoops;
 static ULONG HostMailboxPollTicks, HostMailboxPollCalls;
 static ULONG HostFencePollTicks, HostFencePollCalls;
 static ULONG HostEventPollTicks, HostEventPollCalls;
+/* CP dispatch attribution: per-entry drain (pending fence wait), bridge
+ * query + indirect submit, and whole-entry wall time. Profiled builds only. */
+static ULONG HostCpEntries;
+static ULONG HostCpDrainTicks;
+static ULONG HostCpDispatchTicks;
+static ULONG HostCpTotalTicks;
 /* Subimage stage attribution (MGLPPC-profile builds only). */
 static ULONG HostSubimageCount;
 static ULONG HostSubimageTicks;
@@ -797,7 +895,7 @@ static BOOL DiscardSemantic(MGLPPCHostState *state)
     memset(state->semanticGeneration, 0, sizeof(state->semanticGeneration));
     state->semanticRegistered = 0;
     /* Keep registration epochs monotonic across discard/recreate, like ringEpoch. */
-    state->semanticFence = 0;
+    ClearFences(state);
     state->semanticExecutes = 0;
     state->ringDeviceToken = 0;
     state->ringDeviceGeneration = 0;
@@ -1030,6 +1128,7 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     control->error = 0;
     control->presentSeq = 0;
     control->retired = 0;
+    ClearFences(state);
     control->eventHead = 0;
     control->eventTail = 0;
     control->syncEnabled = 0;
@@ -1285,11 +1384,11 @@ static BOOL ExecuteIndirectSmoke(MGLPPCHostState *state,
         failure = "dispatch";
         if (glGetError() != GL_NO_ERROR || !dispatch.fenceOut)
             goto failed;
-        state->semanticFence = dispatch.fenceOut;
         sprintf(line, "IBHOST submitted fence=%lu\n", (unsigned long)dispatch.fenceOut);
         MGLPPCIBTrace("DH2:ibhost.log", line);
         failure = "retirement";
-        if (!DrainSemanticFence(state))
+        if (!RecordFence(state, state->ringCompleted, dispatch.fenceOut, 0) ||
+            !DrainSemanticFence(state))
             goto failed;
         MGLPPCIBTrace("DH2:ibhost.log", "IBHOST gpu_retired=1\n");
     } else {
@@ -1310,6 +1409,9 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
     struct Radeon3DIndirect indirect;
     MGLR200PrivateBridgeV2 bridge;
     ULONG mask, fence = 0;
+#if MGLPPC_PROFILE
+    ULONG cpStage, cpEntryStart;
+#endif
     if (!state->cpEnabled || state->cpFailed || !state->cpSegmentLeased ||
         entry->flags != MGLPPC_SEMANTIC_FLAG_CP_EMIT || entry->dwords != 3UL ||
         entry->slot != state->ringCompleted % MGLPPC_RING_SLOTS)
@@ -1329,13 +1431,27 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
         indirect.DwordCount > (state->cpSegment.Bytes - indirect.ByteOffset) / 4UL ||
         (mask & ~((1UL << state->vertexSegmentCount) - 1UL)))
         return FALSE;
-    /* One outstanding fence. Retire before its token is superseded, while
-     * the PPC emits into other immutable slices. Driver owns CP transitions. */
-    if (!DrainSemanticFence(state) || !QueryBackendBridgeV2(&bridge) ||
+    HOST_START(cpEntryStart);
+    HOST_START(cpStage);
+    /* Only a driver that validates ranged fences lets several submissions
+     * stay in flight. Without the cap this drains every time, exactly the
+     * validated single-outstanding-fence model. */
+    if (state->fenceCount >= MGLPPC_INFLIGHT_SLOTS ||
+        !(state->ringRadeonCaps & RADEON3D_CAP_MULTI_FENCE)) {
+        if (!DrainSemanticFence(state)) {
+            HOST_STAGE(HostCpDrainTicks, cpStage);
+            return FALSE;
+        }
+    }
+    HOST_STAGE(HostCpDrainTicks, cpStage);
+    if (!QueryBackendBridgeV2(&bridge) ||
         bridge.deviceEpoch != state->ringDeviceEpoch ||
         bridge.deviceToken != state->ringDeviceToken ||
         !Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
                                   &indirect, &fence) || !fence)
+        return FALSE;
+    HOST_STAGE(HostCpDispatchTicks, cpStage);
+    if (!RecordFence(state, state->ringCompleted, fence, mask))
         return FALSE;
     /* Sanity only: the PPC stamped the target it observed through the v6
      * publication. A mismatch means the native drawing buffer moved between
@@ -1353,13 +1469,15 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
             fflush(stdout);
         }
     }
-    state->semanticFence = fence;
-    state->queuedSegmentMask = mask;
     state->ringLastGen[entry->slot] = entry->generation;
     ++state->semanticExecutes;
     ++state->cpDispatches;
     state->cpDwords += indirect.DwordCount;
     ++HostExecuteCount;
+#if MGLPPC_PROFILE
+    ++HostCpEntries;
+    HOST_STAGE(HostCpTotalTicks, cpEntryStart);
+#endif
     return TRUE;
 }
 
@@ -1452,8 +1570,14 @@ static BOOL FlushCommitAccumulator(MGLPPCHostState *state,
         return FALSE;
     }
     HOST_STAGE(HostSubmitTicks, stageStart);
-    state->semanticFence = fence;
-    state->queuedSegmentMask |= 1UL << RingAccSegmentIx;
+    if (!RecordFence(state,
+                     state->ringCompleted ? state->ringCompleted - 1UL : 0UL,
+                     fence, 1UL << RingAccSegmentIx)) {
+        mglUnlockDisplay();
+        state->displayLocked = 0;
+        RingAccValid = FALSE;
+        return FALSE;
+    }
     RingAccValid = FALSE;
     return TRUE;
 }
@@ -1739,8 +1863,13 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 }
             }
             HOST_STAGE(HostSubmitTicks, stageStart);
-            state->semanticFence = fence;
-            state->queuedSegmentMask |= 1UL << segmentIx;
+            if (!RecordFence(state, state->ringCompleted, fence,
+                             1UL << segmentIx)) {
+                mglUnlockDisplay();
+                state->displayLocked = 0;
+                control->error = 1;
+                break;
+            }
             state->ringLastGen[entry.slot] = entry.generation;
             state->semanticExecutes++;
             HostExecuteCount++;
@@ -1875,7 +2004,13 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
             HOST_STAGE(HostSubmitTicks, stageStart);
-            state->semanticFence = fence;
+            /* The inline path drained above, so the queue has room. */
+            if (!RecordFence(state, state->ringCompleted, fence, 0)) {
+                mglUnlockDisplay();
+                state->displayLocked = 0;
+                control->error = 1;
+                break;
+            }
             state->ringLastGen[entry.slot] = entry.generation;
             state->semanticExecutes++;
             HostExecuteCount++;
@@ -1935,10 +2070,11 @@ static ULONG RingPoll(MGLPPCHostState *state)
             control->presentSeq = state->ringCompleted;
         }
         control->completed = state->ringCompleted;
-        if (state->cpEnabled && !state->semanticFence) {
-            control->retired = state->ringCompleted;
-            CacheClearE((APTR)&control->retired, sizeof(control->retired), CACRF_ClearD);
-        }
+        /* Publish the contiguous retired prefix, not just the fence-less
+         * case: with several submissions in flight only completed fences
+         * may retire slices. */
+        if (state->cpEnabled)
+            AdvanceRetired(state);
         if (entry.flags & MGLPPC_SEMANTIC_FLAG_INDIRECT) {
             char line[128];
             control->retired = state->ringCompleted;
@@ -2051,7 +2187,12 @@ static BOOL ExecuteSemanticSlot(MGLPPCMessage *message,
         return FALSE;
     }
     HOST_STAGE(HostSubmitTicks, stageStart);
-    state->semanticFence = fence;
+    if (!RecordFence(state, state->ringCompleted, fence, 0)) {
+        mglUnlockDisplay();
+        state->displayLocked = 0;
+        message->status = MGLPPC_STATUS_GL_ERROR;
+        return FALSE;
+    }
     state->semanticGeneration[slotIndex] = generation;
     state->semanticExecutes++;
     if (message->value[3] & MGLPPC_SEMANTIC_FLAG_PRESENT) {
@@ -3788,6 +3929,21 @@ int main(int argc, char **argv)
         printf("CP_RUN dispatches=%lu dwords=%lu failed=%lu\n",
                (unsigned long)state.cpDispatches, (unsigned long)state.cpDwords,
                (unsigned long)state.cpFailed);
+#if MGLPPC_PROFILE
+    if (HostCpEntries && HostClockHz) {
+        ULONG ticksPerMs = HostClockHz / 1000UL;
+
+        if (!ticksPerMs)
+            ticksPerMs = 1;
+        printf("CP_PROF entries=%lu drain_ms=%lu dispatch_ms=%lu "
+               "total_ms=%lu\n",
+               (unsigned long)HostCpEntries,
+               (unsigned long)(HostCpDrainTicks / ticksPerMs),
+               (unsigned long)(HostCpDispatchTicks / ticksPerMs),
+               (unsigned long)(HostCpTotalTicks / ticksPerMs));
+        fflush(stdout);
+    }
+#endif
     if (state.context != NULL)
         mglDeleteContext();
     DiscardProbe(&state);
