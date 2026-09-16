@@ -128,6 +128,21 @@ Opting in without support rejects the context (no silent fallback).
    (`DiscardSemantic` `:724-789`) must drain every in-flight fence before
    `mglSwitchDisplay` or lease release.
 
+   **BLOCKED by driver interface 18 (verified 2026-09-16 on hardware).**
+   `Radeon3DTestFence`/`Radeon3DWaitFence`
+   (`~/p96-driver/src/radeon3d_service.c:2094-2129`) both call
+   `IsSessionFence` (`:2077-2092`), which requires
+   `active->LastFence == fence`; every submission path overwrites
+   `device->LastFence` (`:1081` CommitV1, `:1265` CommitBatch, `:1624`
+   StateBatch, `:1899` Execute, `:2063` DispatchIndirect). Dispatching a
+   second CP batch therefore invalidates the first batch's fence
+   permanently: an N-in-flight host failed its first PRESENT drain with
+   `present_drain_fail fence=18977 completed=4 head=5`, and the orphaned
+   host needed a reboot. Per-slice retirement requires a driver change
+   (accept any fence in the session's live range or keep a session fence
+   table); that is a separate work item with the matched-pair install and
+   cold-boot protocol, not a host/DLL change.
+
 ## 6. Validation gates (in order)
 
 1. Windowed CP regression after steps 1-3: `precalc 300f 800x600x32
@@ -202,7 +217,15 @@ cold boot for grey screens or driver changes; keep diagnostics
 - Deployed artifacts: quiet DLL `9E44E240` (306628 B, converted on target)
   and host `32716DD9` (42264 B, protection `00020000`). Rollbacks:
   `Work:ibdraw/dll.pre-p3` = `32216D6B` (old quiet DLL),
-  `DH2:ibdraw/mglhost.pre3` = `85F1A513`; `DH2:u0/minigl_ppc.dll` was
-  updated to the new DLL (`dll.u0old` = old).
-- Remaining: step 5 (N in-flight dispatches) and the three-cold-boot
-  benchmark protocol.
+  `DH2:ibdraw/mglhost.pre3` = `85F1A513` (old quiet host);
+  `DH2:ibdraw/mglhost.p3a` keeps the validated `32716DD9` host and
+  `DH2:u0/minigl_ppc.dll` was updated to the new DLL
+  (`DH2:u0/dll.u0old` = old). The failed step-5 experiment host
+  (`EB0B4F2D`, local only) is not deployed anywhere.
+- Re-validated after the recovery reboot (InitPPC once, archived
+  `MGLPPC_HOSTPRI=-1` restored): windowed `68.493 fps error=0`
+  (`dispatches=1016 dwords=255920 failed=0`); fullscreen `174.418 fps
+  error=0` (`dispatches=2031 dwords=511620 failed=0`); CP and semantic
+  triangle readbacks still byte-identical.
+- Remaining: step 5 is **blocked on the driver fence contract** (see
+  section 5.5); the three-cold-boot benchmark protocol is still pending.

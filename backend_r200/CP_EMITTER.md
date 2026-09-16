@@ -155,6 +155,28 @@ host reports `cp_token_mismatch` once and keeps the session alive. BLIT
 presentation (the default with sync off and the validated path) has a stable
 drawing target and is unaffected.
 
+### Step 5 (N in-flight) blocked by the driver fence contract
+
+An N-in-flight host was implemented and tested on hardware on 2026-09-16
+(fence queue, per-entry masks, retired-prefix advancement, PRESENT/teardown
+drain) and failed on the first frame:
+
+```
+MiniGLPPC host: present_drain_fail fence=18977 completed=4 head=5
+```
+
+`Radeon3DTestFence`/`Radeon3DWaitFence` (`radeon3d_service.c:2094-2129`)
+route through `IsSessionFence` (`:2077-2092`), which only accepts
+`active->LastFence == fence`. Every submission overwrites `LastFence`
+(`:1081` CommitV1, `:1265` CommitBatch, `:1624` StateBatch, `:1899`
+Execute, `:2063` DispatchIndirect), so once a second CP batch is submitted
+the first batch's fence can never be validated: the drain fails immediately
+and the session is lost. Per-slice retirement therefore requires a driver
+change (fence-range or session-table validation); the current host keeps the
+validated single-outstanding-fence model. The step-5 host source was
+reverted, and the experiment cost one recovery reboot (an orphaned host
+that spun on the failed fence ignores Exec break signals).
+
 ### Original design notes
 
 Blockers for fullscreen, with exact sites:
