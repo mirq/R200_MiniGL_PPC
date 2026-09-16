@@ -3946,7 +3946,9 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
         }
         /* One 32-bit store per pixel: the aperture does not absorb
          * byte stores, so four 8-bit writes per texel cost a bus
-         * transaction each and dominate the upload. */
+         * transaction each and dominate the upload. Burst stores
+         * (stswi) to this aperture hang the GPU on real hardware, so
+         * keep the per-texel store path. */
         if (((ULONG)out & 3UL) == 0UL) {
             ULONG *out32 = (ULONG *)out;
             for (column = 0; column < width; ++column)

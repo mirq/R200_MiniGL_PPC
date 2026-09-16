@@ -1101,8 +1101,7 @@ static void DrawThroughput(ULONG frame)
     glEnd();
 }
 
-static void DrawCubeGeometry(void)
-{
+static void DrawCubeGeometry(void){
     glBegin(GL_QUADS);
     glColor3ub(235, 65, 55);
     glVertex3f(-1,-1, 1); glVertex3f( 1,-1, 1); glVertex3f( 1, 1, 1); glVertex3f(-1, 1, 1);
@@ -1907,6 +1906,83 @@ static void DrawFullscreenQuad(void)
     glTexCoord2f(1, 1); glVertex2f(0.9f, 0.9f);
     glTexCoord2f(0, 1); glVertex2f(-0.9f, 0.9f);
     glEnd();
+}
+
+/* Replicates Silent Hill's per-frame present uploads: two 256x256
+ * 16-bit (565) VRAM tiles re-uploaded and drawn as textured quads every
+ * frame. The benchmark FPS therefore tracks the MiniGL texture upload
+ * path; a faster implementation raises it. (mglLockBack is omitted: the
+ * lock leaves the suite's readback capture unable to calibrate.) */
+#define TEXUPLOAD_DIM 256
+static GLuint g_texUpload[2];
+static UBYTE g_texUploadData[2][TEXUPLOAD_DIM * TEXUPLOAD_DIM * 2];
+
+static void PrepareTexUpload(void)
+{
+    int t, i;
+
+    if (g_texUpload[0])
+        return;
+    for (t = 0; t < 2; ++t) {
+        for (i = 0; i < TEXUPLOAD_DIM * TEXUPLOAD_DIM; ++i) {
+            unsigned v = (unsigned)(t ? 0xF800u : 0x001Fu) |
+                         ((unsigned)i & 0x1Fu);
+            g_texUploadData[t][i * 2] = (UBYTE)(v >> 8);
+            g_texUploadData[t][i * 2 + 1] = (UBYTE)(v & 0xffu);
+        }
+        glGenTextures(1, &g_texUpload[t]);
+        glBindTexture(GL_TEXTURE_2D, g_texUpload[t]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    }
+}
+
+static void DrawTexUploadScene(GLboolean doLock)
+{
+    int t;
+
+    (void)doLock;
+    PrepareTexUpload();
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    for (t = 0; t < 2; ++t) {
+        glBindTexture(GL_TEXTURE_2D, g_texUpload[t]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, TEXUPLOAD_DIM, TEXUPLOAD_DIM, 0,
+                     MGL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT,
+                     g_texUploadData[t]);
+        DrawFullscreenQuad();
+    }
+}
+
+static void DrawTexUploadBench(ULONG frame)
+{
+    (void)frame;
+    DrawTexUploadScene(GL_TRUE);
+}
+
+static GLboolean VerifyTexUploadBench(char *detail)
+{
+    int r = -1, g = -1, b = -1;
+
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrainErrors();
+    DrawTexUploadScene(GL_FALSE);
+    if (!SampleRGB(0.0f, 0.0f, &r, &g, &b)) {
+        strcpy(detail, "surface capture failed");
+        return GL_FALSE;
+    }
+    if ((r | g | b) == 0) {
+        sprintf(detail, "uploaded tile did not render (%d,%d,%d)", r, g, b);
+        return GL_FALSE;
+    }
+    strcpy(detail, "two 256x256 uploads per frame render");
+    return GL_TRUE;
 }
 
 static void DrawQuakeLightmap(ULONG frame)
@@ -4983,6 +5059,12 @@ static MiniGLTest g_tests[] = {
      "Measure 64 immediate triangles including presentation.",
      "A dense animated 8 by 8 colored triangle grid fills most of the view.",
      DrawThroughput, VerifyThroughput, AlwaysAvailable, GL_TRUE, {0}},
+    {"benchmark.tex-upload", "BENCHMARK", "TEXTURE UPLOAD",
+     "Silent Hill's present pattern: lockBack plus two 256x256 16-bit "
+     "texture uploads and textured quads every frame.",
+     "Sustained FPS reports the texture-upload path; the uploaded tile "
+     "must still render.",
+     DrawTexUploadBench, VerifyTexUploadBench, AlwaysAvailable, GL_TRUE, {0}},
     {"lighting.availability", "LIGHTING", "LIGHTING VECTORS",
      "Report whether optional ABI v4 lighting is available.",
      "PASS means lighting tests can be added; SKIP is valid when unsupported.",

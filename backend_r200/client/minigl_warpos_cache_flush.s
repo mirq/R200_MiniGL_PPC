@@ -95,8 +95,10 @@ MGLPPCBlit565Swap:
 	blr
 
 	.globl MGLPPCInvalidateLine32
-	.type MGLPPCInvalidateLine32,@function
+	.type	MGLPPCInvalidateLine32,@function
 MGLPPCInvalidateLine32:
 	dcbf	0,3
 	sync
+	blr
+
 	blr
