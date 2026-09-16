@@ -1049,6 +1049,22 @@ void MGLPPCSwapTCL10(ULONG *destination, const ULONG *source, ULONG count,
                      ULONG unit0Mask, ULONG unit1Mask, ULONG fogMask);
 void MGLPPCSwapTCL7(ULONG *destination, const ULONG *source, ULONG count,
                     ULONG unit0Mask);
+/* AltiVec staging variants (client/minigl_ppc_serial_altivec.c): the same
+ * scalar kernels write a 16-byte-aligned cacheable scratch, then 16-byte
+ * vector blocks move it to the aperture. Byte-identical output; only used
+ * when MGLPPCAltiVecVertexEnabled is set by the runtime CPU probe. */
+extern BOOL MGLPPCAltiVecVertexEnabled;
+void MGLPPCAltiVecVertexProbe(void);
+void MGLPPCSwapLit13Vector(ULONG *destination, const ULONG *source,
+                           ULONG count, ULONG unit0Mask, ULONG unit1Mask,
+                           ULONG fogMask);
+void MGLPPCSwapLit10Vector(ULONG *destination, const ULONG *source,
+                           ULONG count, ULONG unit0Mask);
+void MGLPPCSwapTCL10Vector(ULONG *destination, const ULONG *source,
+                           ULONG count, ULONG unit0Mask, ULONG unit1Mask,
+                           ULONG fogMask);
+void MGLPPCSwapTCL7Vector(ULONG *destination, const ULONG *source,
+                          ULONG count, ULONG unit0Mask);
 #endif
 void SetError(struct MiniGLR200Context *context, GLenum error);
 void BumpSemanticStateSerial(struct MiniGLR200Context *context);

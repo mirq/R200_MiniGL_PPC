@@ -74,6 +74,8 @@ OBJS = $(OBJDIR)/minigl_ppc_dispatch_r200.o \
        $(OBJDIR)/minigl_ppc_transport.o \
        $(OBJDIR)/minigl_ppc_yield.o \
        $(OBJDIR)/minigl_ppc_serial.o \
+       $(OBJDIR)/minigl_ppc_serial_altivec.o \
+       $(OBJDIR)/minigl_ppc_serial_vector.o \
        $(OBJDIR)/minigl_warpos_cache_flush.o \
        $(OBJDIR)/r200_poweropen_bridge.o \
        $(OBJDIR)/dllstartup.o \
@@ -135,6 +137,17 @@ $(OBJDIR)/minigl_ppc_yield.o: $(R200_CLIENT)/minigl_ppc_yield.c \
 
 $(OBJDIR)/minigl_ppc_serial.o: $(R200_CLIENT)/minigl_ppc_serial.s | $(OBJDIR)
 	$(CC) $(WOS_ARCH_CFLAGS) -Wa,-mregnames -c $< -o $@
+
+# AltiVec kernel: the assembler needs its own AltiVec enable on top of the
+# 604e architecture flags, and GNU as only parses rN/vN names with
+# -mregnames. Only the volatile vector registers v0-v4 are touched and
+# VRSAVE is saved/restored by the kernel itself.
+$(OBJDIR)/minigl_ppc_serial_altivec.o: $(R200_CLIENT)/minigl_ppc_serial_altivec.s | $(OBJDIR)
+	$(CC) $(WOS_ARCH_CFLAGS) -Wa,-maltivec,-mregnames -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_serial_vector.o: $(R200_CLIENT)/minigl_ppc_serial_altivec.c \
+              $(R200_LIBRARY)/minigl_r200_internal.h | $(OBJDIR)
+	$(CC) $(R200_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJDIR)/minigl_warpos_cache_flush.o: \
               $(R200_CLIENT)/minigl_warpos_cache_flush.s | $(OBJDIR)

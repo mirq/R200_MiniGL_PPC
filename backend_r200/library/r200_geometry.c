@@ -563,31 +563,48 @@ serialize_vertices:
     if (hardwareTransform && useCommit) {
         const ULONG *serialSource = (const ULONG *)context->screenVertices;
         ULONG serialCount = context->screenVertexCount;
+        BOOL vector = MGLPPCAltiVecVertexEnabled;
 
         if (state->normalVertex &&
             vertexDwords == R200_LIT_VERTEX_DWORDS) {
             context->perf.serializeKernelFlushes++;
             context->perf.serializeKernelVertices += serialCount;
-            MGLPPCSwapLit13(destination, serialSource, serialCount,
-                            unit0Mask, unit1Mask, fogMask);
+            if (vector)
+                MGLPPCSwapLit13Vector(destination, serialSource, serialCount,
+                                      unit0Mask, unit1Mask, fogMask);
+            else
+                MGLPPCSwapLit13(destination, serialSource, serialCount,
+                                unit0Mask, unit1Mask, fogMask);
         } else if (state->normalVertex &&
                    vertexDwords == R200_LIT_VERTEX_COMPACT_DWORDS) {
             context->perf.serializeKernelFlushes++;
             context->perf.serializeKernelVertices += serialCount;
-            MGLPPCSwapLit10(destination, serialSource, serialCount,
-                            unit0Mask);
+            if (vector)
+                MGLPPCSwapLit10Vector(destination, serialSource, serialCount,
+                                      unit0Mask);
+            else
+                MGLPPCSwapLit10(destination, serialSource, serialCount,
+                                unit0Mask);
         } else if (!state->normalVertex &&
                    vertexDwords == R200_TCL_VERTEX_DWORDS) {
             context->perf.serializeKernelFlushes++;
             context->perf.serializeKernelVertices += serialCount;
-            MGLPPCSwapTCL10(destination, serialSource, serialCount,
-                            unit0Mask, unit1Mask, fogMask);
+            if (vector)
+                MGLPPCSwapTCL10Vector(destination, serialSource, serialCount,
+                                      unit0Mask, unit1Mask, fogMask);
+            else
+                MGLPPCSwapTCL10(destination, serialSource, serialCount,
+                                unit0Mask, unit1Mask, fogMask);
         } else if (!state->normalVertex &&
                    vertexDwords == R200_TCL_VERTEX_COMPACT_DWORDS) {
             context->perf.serializeKernelFlushes++;
             context->perf.serializeKernelVertices += serialCount;
-            MGLPPCSwapTCL7(destination, serialSource, serialCount,
-                           unit0Mask);
+            if (vector)
+                MGLPPCSwapTCL7Vector(destination, serialSource, serialCount,
+                                     unit0Mask);
+            else
+                MGLPPCSwapTCL7(destination, serialSource, serialCount,
+                               unit0Mask);
         } else {
             goto serialize_generic;
         }

@@ -2509,6 +2509,9 @@ haveSegment:
 void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
 {
     ULONG index;
+    /* Vector-state support is machine-global; the probe is idempotent and
+     * also applies the MGLPPC_NOALTIVEC override. */
+    MGLPPCAltiVecVertexProbe();
     FrontendPlatform.nativeBindingKnown = FALSE;
     (void)offx;
     (void)offy;
