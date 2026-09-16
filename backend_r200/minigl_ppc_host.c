@@ -72,7 +72,8 @@ typedef struct MGLPPCHostState {
     int ibDryRun;
     BOOL cpEnabled, cpSegmentLeased, cpFailed;
     struct Radeon3DSegment cpSegment;
-    ULONG cpColorToken, cpDispatches, cpDwords;
+    ULONG cpColorToken, cpColorSeq, cpDispatches, cpDwords;
+    int cpTokenMismatchReported;
     ULONG uploadArgs[8];
     /* Native glGetIntegerv exposes neither pack nor unpack. Track host writes. */
     GLint unpack[4];
@@ -357,6 +358,27 @@ static void PatchRecordTargets(ULONG *records, ULONG recordDwords,
         records[offset + 2UL] = targetToken;
         offset += length;
     }
+}
+
+/* Ring control v6: publish the live color target for the PPC CP emitter.
+ * The native display rotation lives on this side (screen-buffer flip/blit),
+ * so the PPC cannot derive the current drawing target from its own mirrors.
+ * The PPC reads the token only after observing a new sequence value: write
+ * the token first, then the incremented sequence, then clean both dwords
+ * into the non-cacheable control block. Only used while CP is enabled. */
+static void PublishCpColorTarget(MGLPPCHostState *state, ULONG token)
+{
+    volatile MGLPPCRingControlV1 *control = state->ringControl;
+
+    if (!control || !token)
+        return;
+    control->colorToken = token;
+    CacheClearE((APTR)&control->colorToken, sizeof(ULONG), CACRF_ClearD);
+    ++state->cpColorSeq;
+    if (!state->cpColorSeq)
+        ++state->cpColorSeq;
+    control->colorSeq = state->cpColorSeq;
+    CacheClearE((APTR)&control->colorToken, 2UL * sizeof(ULONG), CACRF_ClearD);
 }
 
 /* Sonnet's legacy LoadSeg heuristic scans every hunk for the uppercase RACE
@@ -902,8 +924,11 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         message->status = MGLPPC_STATUS_BAD_PAYLOAD;
         return FALSE;
     }
+    /* Fullscreen is allowed: ring control v6 publishes the live color target
+     * after every display switch, and the PPC stamps each CP batch with it.
+     * Windowed contexts keep the stable surfaces[0] target. */
     if (cpRequested && (message->protocolVersion != MGLPPC_PROTOCOL_VERSION ||
-        (message->value[3] & MGLPPC_RING_REGISTER_INDIRECT) || !state->contextWindowed)) {
+        (message->value[3] & MGLPPC_RING_REGISTER_INDIRECT))) {
         message->status = MGLPPC_STATUS_UNSUPPORTED;
         return FALSE;
     }
@@ -1064,6 +1089,8 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
             goto failed;
         }
         state->cpColorToken = bridge.colorSurfaceToken;
+        state->cpColorSeq = 0;
+        PublishCpColorTarget(state, bridge.colorSurfaceToken);
         memset(&state->cpSegment, 0, sizeof(state->cpSegment));
         state->cpSegment.Size = sizeof(state->cpSegment);
         if (!Radeon3DAllocSegment((struct Radeon3DDevice *)state->ringDeviceToken,
@@ -1307,10 +1334,25 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
     if (!DrainSemanticFence(state) || !QueryBackendBridgeV2(&bridge) ||
         bridge.deviceEpoch != state->ringDeviceEpoch ||
         bridge.deviceToken != state->ringDeviceToken ||
-        bridge.colorSurfaceToken != state->cpColorToken ||
         !Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
                                   &indirect, &fence) || !fence)
         return FALSE;
+    /* Sanity only: the PPC stamped the target it observed through the v6
+     * publication. A mismatch means the native drawing buffer moved between
+     * the PPC's last read and this dispatch (for example an out-of-band
+     * retarget). The stream is already built, so keep the session alive,
+     * refresh the publication and report once. Do NOT latch cpFailed here. */
+    if (bridge.colorSurfaceToken != state->cpColorToken) {
+        state->cpColorToken = bridge.colorSurfaceToken;
+        PublishCpColorTarget(state, bridge.colorSurfaceToken);
+        if (!state->cpTokenMismatchReported) {
+            state->cpTokenMismatchReported = 1;
+            printf("MiniGLPPC host: cp_token_mismatch live=%08lx seq=%lu\n",
+                   (unsigned long)bridge.colorSurfaceToken,
+                   (unsigned long)state->cpColorSeq);
+            fflush(stdout);
+        }
+    }
     state->semanticFence = fence;
     state->queuedSegmentMask = mask;
     state->ringLastGen[entry->slot] = entry->generation;
@@ -1874,6 +1916,19 @@ static ULONG RingPoll(MGLPPCHostState *state)
                     fflush(stdout);
                     control->error = 1;
                     break;
+                }
+            }
+            /* A fullscreen switch may have retargeted the native drawing
+             * buffer. Re-query and publish it (ring control v6) so the PPC
+             * stamps its next CP batch for the surface this host will own
+             * when that entry is consumed. The bridge snapshot is stale
+             * after the switch; keep bridgeValid FALSE for the next entry. */
+            if (state->cpEnabled) {
+                MGLR200PrivateBridgeV2 liveBridge;
+                if (QueryBackendBridgeV2(&liveBridge) &&
+                    liveBridge.deviceEpoch == state->ringDeviceEpoch) {
+                    state->cpColorToken = liveBridge.colorSurfaceToken;
+                    PublishCpColorTarget(state, liveBridge.colorSurfaceToken);
                 }
             }
             HOST_PACING_PRESENT();

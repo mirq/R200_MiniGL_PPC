@@ -486,6 +486,7 @@ static BOOL Radeon3DCommitStateBatch(struct Radeon3DDevice *d,
 }
 '''
 code += function(H, "static void PatchRecordTargets(")
+code += function(H, "static void PublishCpColorTarget(")
 code += r'''
 struct NativeContext {
     struct Radeon3DDevice *device;
@@ -693,8 +694,9 @@ static BOOL SubmitAndWait(struct MiniGLR200Context *c);
 for signature in ("static BOOL PlatformMailboxReady(", "static BOOL PlatformMailboxWait(",
                   "static BOOL PlatformCallFail(", "static BOOL PlatformCall(",
                   "static void CopyRecordToRingSlot(", "void R200PPCPlatformResetClientDefaults(",
-                    "BOOL R200PPCPlatformOpen(", "static BOOL R200PPCIbSmokeAfterRegistration(",
-                   "static BOOL ResolveCpSurface(", "static BOOL PublishCpSlot(",
+                    "BOOL R200PPCPlatformOpen(",                     "static BOOL R200PPCIbSmokeAfterRegistration(",
+                   "static BOOL ResolveCpSurface(", "static void RefreshCpColorTarget(",
+                   "static BOOL PublishCpSlot(",
                    "BOOL R200PPCPlatformPublishSlot(",
                   "BOOL R200PPCPlatformWaitSlot(", "BOOL R200PPCPlatformBarrier(",
                   "BOOL R200PPCPlatformRotateSegment(",

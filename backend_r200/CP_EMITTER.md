@@ -104,6 +104,59 @@ failed=0`. The live driver supports trusted indirect dispatch; no driver
 deployment is required (an `r3dinfo` report of interface 17 is its
 negotiated request, not the chip version).
 
+### Implementation: live color target (ring control v6)
+
+Steps 1-4 of `PHASE3_HANDOFF.md` section 5 are implemented:
+
+- `MGLPPCRingControlV1` (ring control v6) appends `colorToken`/`colorSeq`;
+  the existing compile-time size/offset asserts cover the new pair, which
+  sits 32-byte aligned at the end of the block (456 bytes / 114 dwords).
+- The host publishes the live token at CP registration and after every
+  `mglSwitchDisplay()` in the PRESENT path (`PublishCpColorTarget`); it
+  writes the token first, then the incremented sequence, with `CacheClearE`.
+  `state->cpColorToken` follows every publication. The `ExecuteCpEntry`
+  comparison is demoted to a one-shot `cp_token_mismatch` report and never
+  latches `cpFailed`.
+- The frontend compares `colorSeq` before each CP batch in `PublishCpSlot`
+  (invalidating the line first). On a move it stamps the new token into the
+  record target dwords with exactly the host's `PatchRecordTargets` walk;
+  `ResolveCpSurface` then fetches the descriptor through
+  `MGLPPC_CMD_CP_SURFACE`. Rotation between two or three screen buffers
+  settles in the 16-entry descriptor cache after the first cycle.
+- `!state->contextWindowed` is gone from the host registration gate.
+
+The record target dword is written on the PPC side in three places:
+`CapturePendingDrawState` (`r200_state.c:305-306`, `header[2]`),
+`Lib_glClear` (`r200_surface.c:496`, `record[2]`) and the post-present
+mirror patch (`r200_surface.c:1615-1620`); `FlushScreenVertices` copies
+those headers into `slot->records` (`r200_geometry.c:436-437` state batch,
+`:543-544` plain). The v6 stamp overrides the target at CP publish time,
+which is where the emitted CP stream bakes address/pitch/format.
+
+Measured this session (quiet DLL `9E44E240` + host `32716DD9`, chip
+`CEB838A6`, no driver change):
+
+- windowed `precalc -frames 300 800x600x32 -window -nosync`: **68.181 fps,
+  error=0**, `CP_RUN dispatches=1016 dwords=255920 failed=0` (baseline
+  68.493 fps).
+- fullscreen `precalc -frames 600 640x480x16 -buffers 3 -nosync -nofps`:
+  **172.413 fps, error=0**, `CP_RUN dispatches=2031 dwords=511620
+  failed=0`; the semantic reference is 133.928 fps.
+- `r200_triangle_smoke 16 fullscreen` with CP: pixels pass; CP and semantic
+  readbacks are byte-identical (`center=115,145,164 corner=8,12,24`).
+- `r200_texture_update_test` (windowed, CP): `CHECKS=3495 FAILURES=1`, the
+  pre-existing `INDEXED SOURCE` expectation; `CP_RUN dispatches=24
+  dwords=3024 failed=0`.
+
+Known limitation: with `MINIGL_PRESENT=FLIP` the native drawing buffer
+rotates on the host, and a CP batch emitted after the present but before the
+PPC observes the new `colorSeq` can still carry the previous target. The
+host reports `cp_token_mismatch` once and keeps the session alive. BLIT
+presentation (the default with sync off and the validated path) has a stable
+drawing target and is unaffected.
+
+### Original design notes
+
 Blockers for fullscreen, with exact sites:
 
 - Host rejects CP for non-windowed contexts: `minigl_ppc_host.c:905-909`

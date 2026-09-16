@@ -179,3 +179,30 @@ serialize all Amiga filesystem operations; <=16 character Amiga names;
 CRC every transfer; `MGLPPC_HOSTPRI=-1` (archived) before any host start;
 cold boot for grey screens or driver changes; keep diagnostics
 (`MGLPPC_VERBOSE`, `MGLPPC_UPLOAD_TRACE`, traces) off for benchmarks.
+
+## 10. Status (2026-09-16 session): steps 1-4 implemented and validated
+
+- **Record-token write site found** (the open item in section 5.3):
+  `CapturePendingDrawState` writes `header[2]` (`r200_state.c:305-306`),
+  `Lib_glClear` writes `record[2]` (`r200_surface.c:496`) and the
+  post-present mirror patch rewrites both at `r200_surface.c:1615-1620`.
+  `FlushScreenVertices` copies those headers into `slot->records`
+  (`r200_geometry.c:436-437` / `:543-544`). The v6 stamp runs in
+  `PublishCpSlot` before `MGLPPCEmitBatch`, so the emitted CP stream always
+  bakes the token the host will own when the entry is consumed.
+- Ring control v6 (`colorToken`/`colorSeq`, 456 bytes), host publication at
+  registration and after `mglSwitchDisplay()`, `cpColorToken` kept in sync,
+  `ExecuteCpEntry` comparison demoted to a one-shot sanity report, PPC
+  `PublishCpSlot` re-stamp on sequence change, and the `!contextWindowed`
+  gate removed.
+- Validation: windowed 68.181 fps `failed=0`; fullscreen 640x480x16 3-buffer
+  172.413 fps `failed=0` (semantic 133.928); CP/semantic triangle readbacks
+  identical; `r200_texture_update_test` unchanged (`3495/1`, pre-existing).
+  Details and the FLIP-mode limitation are in `CP_EMITTER.md`.
+- Deployed artifacts: quiet DLL `9E44E240` (306628 B, converted on target)
+  and host `32716DD9` (42264 B, protection `00020000`). Rollbacks:
+  `Work:ibdraw/dll.pre-p3` = `32216D6B` (old quiet DLL),
+  `DH2:ibdraw/mglhost.pre3` = `85F1A513`; `DH2:u0/minigl_ppc.dll` was
+  updated to the new DLL (`dll.u0old` = old).
+- Remaining: step 5 (N in-flight dispatches) and the three-cold-boot
+  benchmark protocol.

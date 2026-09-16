@@ -96,8 +96,10 @@ typedef uint32_t ULONG;
  * stream inside the ring control segment (CP-native byte order), dword[1]
  * = dword count. The host supplies its own ring segment id. */
 #define MGLPPC_CAP_INDIRECT (1UL << 11)
-/* Trusted PPC emitter, windowed only. Requires a live render-transition
- * capability at registration; distinct from the fixed startup smoke. */
+/* Trusted PPC emitter, windowed and fullscreen. Requires a live
+ * render-transition capability at registration and ring control v6 (live
+ * color-target publication) so fullscreen buffer rotation is followed;
+ * distinct from the fixed startup smoke. */
 #define MGLPPC_CAP_CP_EMIT (1UL << 12)
 /* The host serves MGLPPC_CMD_TEXTURE_UPLOAD_SHARED through the mailbox
  * whitelist. Without this bit the client must send it over the Exec
@@ -270,7 +272,9 @@ static __inline__ int MGLPPCTextureRect(ULONG baseWidth, ULONG baseHeight,
  * cleans them (dcbf+sync) before posting, the host invalidates
  * (CacheClearE) before Execute, exactly as in the v10 message path. */
 #define MGLPPC_RING_MAGIC 0x52494e47UL
-#define MGLPPC_RING_CONTROL_VERSION 5UL
+/* v6 appends the live color-target publication (colorToken/colorSeq). Both
+ * peers must agree; a v5 peer fails ring registration and falls back. */
+#define MGLPPC_RING_CONTROL_VERSION 6UL
 #define MGLPPC_RING_SLOTS 8UL
 #define MGLPPC_EVENT_SLOTS 16UL
 #define MGLPPC_RING_SEGMENT_BYTES (64UL * 1024UL)
@@ -367,6 +371,18 @@ typedef struct MGLPPCRingControlV1 {
     ULONG eventTailPad[7];
     ULONG eventClass[MGLPPC_EVENT_SLOTS];
     ULONG eventCode[MGLPPC_EVENT_SLOTS];
+    /* v6 live color-target publication. The host owns the native display
+     * rotation, so the PPC CP emitter cannot derive the current drawing
+     * target from its own surfaces mirror (fullscreen exposes only
+     * surfaces[0] at create). The host writes the live target token and a
+     * monotonically increasing sequence after registration and after every
+     * display switch; the PPC invalidates this line, compares the sequence
+     * before each CP batch and re-stamps the target dword of every record
+     * when the sequence moves. colorToken is 32-byte aligned and the pair
+     * shares one line; the host writes token first, sequence last, then
+     * CacheClearE, and the PPC reads sequence first. */
+    ULONG colorToken;
+    ULONG colorSeq;
 } MGLPPCRingControlV1;
 
 typedef char MGLPPCMailboxExtentCheck[
@@ -377,10 +393,16 @@ typedef char MGLPPCMailboxExtentCheck[
 
 #define MGLPPC_RING_CONTROL_DWORDS \
     (10UL + MGLPPC_RING_SLOTS + MGLPPC_RING_SLOTS * 5UL + \
-     22UL + MGLPPC_EVENT_SLOTS * 2UL)
+     22UL + MGLPPC_EVENT_SLOTS * 2UL + 2UL)
 typedef char MGLPPCRingControlSizeCheck[
     sizeof(MGLPPCRingControlV1) ==
         MGLPPC_RING_CONTROL_DWORDS * sizeof(ULONG) ? 1 : -1];
+typedef char MGLPPCRingControlOffsetCheck[
+    offsetof(MGLPPCRingControlV1, colorToken) ==
+        (MGLPPC_RING_CONTROL_DWORDS - 2UL) * sizeof(ULONG) &&
+    offsetof(MGLPPCRingControlV1, colorSeq) ==
+        (MGLPPC_RING_CONTROL_DWORDS - 1UL) * sizeof(ULONG) &&
+    (offsetof(MGLPPCRingControlV1, colorToken) & 31UL) == 0 ? 1 : -1];
 typedef char MGLPPCRingSegmentSizeCheck[
     MGLPPC_RING_CONTROL_DWORDS * sizeof(ULONG) <=
         MGLPPC_RING_SEGMENT_BYTES ? 1 : -1];

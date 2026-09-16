@@ -747,6 +747,7 @@ typedef struct R200PPCFrontendPlatform {
     BOOL cpRequested, cpEnabled, cpFailed;
     APTR cpAddress;
     ULONG cpBytes, cpSurfaceCount;
+    ULONG cpColorToken, cpColorSeq;
     struct {
         ULONG token, epoch;
         struct MGLPPCEmitSurface surface;
@@ -1748,6 +1749,44 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
     return TRUE;
 }
 
+/* Ring control v6 live color target. The host owns the native display
+ * rotation, so fullscreen CP records cannot bake a token the PPC derives
+ * locally (its surfaces mirror only exposes surface 0 at create). The host
+ * publishes the current drawing target plus a sequence that moves on every
+ * display switch; a sequence change re-stamps every record target dword
+ * (the same walk as the host's PatchRecordTargets) before the emitter
+ * resolves them into CP words. ResolveCpSurface then fetches the matching
+ * descriptor through MGLPPC_CMD_CP_SURFACE; the 16-entry cache holds the
+ * two or three rotating screen-buffer tokens after the first cycle. */
+static void RefreshCpColorTarget(volatile MGLPPCRingControlV1 *control,
+                                 ULONG *records, ULONG recordDwords)
+{
+    ULONG token, offset = 0, seq;
+
+    if (!control || !records || !recordDwords)
+        return;
+    MGLPPCInvalidateLine32((APTR)&control->colorToken);
+    seq = control->colorSeq;
+    if (seq == FrontendPlatform.cpColorSeq)
+        return;
+    token = control->colorToken;
+    FrontendPlatform.cpColorSeq = seq;
+    if (!token || token == FrontendPlatform.cpColorToken)
+        return;
+    FrontendPlatform.cpColorToken = token;
+    while (offset + 3UL <= recordDwords) {
+        ULONG opcode = records[offset];
+        ULONG length = records[offset + 1UL];
+
+        if (opcode < RADEON3D_EXEC_CLEAR ||
+            opcode > RADEON3D_EXEC_DRAW_LINE_LOOP ||
+            !length || length > recordDwords - offset)
+            break;
+        records[offset + 2UL] = token;
+        offset += length;
+    }
+}
+
 static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *slot)
 {
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
@@ -1797,6 +1836,10 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
                                             slot->vertexOffsets;
     }
     failure = "emit_or_surface";
+    /* v6: the host may have rotated the fullscreen drawing buffer since the
+     * last batch; make the record targets match before the emitter bakes
+     * address/pitch/format into the CP stream. */
+    RefreshCpColorTarget(control, slot->records, slot->recordCount);
     count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
                             vertices.drawCount ? &vertices : NULL,
                             ResolveCpSurface, context);
@@ -2558,6 +2601,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     FrontendPlatform.cpEnabled = FrontendPlatform.cpFailed = FALSE;
     FrontendPlatform.cpAddress = NULL;
     FrontendPlatform.cpBytes = FrontendPlatform.cpSurfaceCount = 0;
+    FrontendPlatform.cpColorToken = FrontendPlatform.cpColorSeq = 0;
     {
         UBYTE flag[8];
         flag[0] = 0;
