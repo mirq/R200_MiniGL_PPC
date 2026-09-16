@@ -141,6 +141,18 @@ static struct timerequest TimerRequest;
 static struct MsgPort TimerPort;
 static ULONG TimerClockRate;
 
+/* How long the host must be continuously idle before it sleeps. A running
+ * client's inter-command gaps are milliseconds; a game frame's PPC-only
+ * phase is tens of milliseconds. Any sleep inside those windows costs the
+ * client a full Delay(1) tick (~20 ms) on its next command, which is what
+ * made Silent Hill's present stage 61-79 ms instead of ~35 ms. Sleep only
+ * after a second and a half of real idle; spin otherwise. Spinning costs
+ * the 68k host nothing it needs while a client is rendering, and it keeps
+ * every command served in microseconds. The tick limit is cached once:
+ * dividing in the idle loop cost thousands of 68k cycles per frame. */
+#define MGLPPC_IDLE_SLEEP_MS 1500UL
+static ULONG HostIdleSleepTicks;
+
 static BOOL OpenTimerClock(void)
 {
     struct EClockVal value;
@@ -160,8 +172,10 @@ static BOOL OpenTimerClock(void)
         return FALSE;
     TimerBase = TimerRequest.tr_node.io_Device;
     TimerClockRate = ReadEClock(&value);
-    if (TimerClockRate != 0)
+    if (TimerClockRate != 0) {
+        HostIdleSleepTicks = (TimerClockRate / 1000UL) * MGLPPC_IDLE_SLEEP_MS;
         return TRUE;
+    }
     CloseDevice((struct IORequest *)&TimerRequest);
     TimerBase = NULL;
     return FALSE;
@@ -536,6 +550,12 @@ static ULONG HostControlTicks;
 static ULONG HostRingTicks;
 static ULONG HostMailboxCount;
 static ULONG HostMailboxTicks;
+/* U0 direct-upload handler split. BEGIN's handler time includes its
+ * DrainSemanticFence; COMMIT deliberately performs no drain. */
+static ULONG HostDirectBeginCount;
+static ULONG HostDirectBeginTicks;
+static ULONG HostDirectCommitCount;
+static ULONG HostDirectCommitTicks;
 static ULONG HostIdleTicks;
 static ULONG HostWallStart;
 static ULONG HostWallTicks;
@@ -1321,7 +1341,6 @@ static BOOL FlushCommitAccumulator(MGLPPCHostState *state,
                                    MGLR200PrivateBridgeV2 *bridge,
                                    BOOL *bridgeValid)
 {
-    volatile MGLPPCRingControlV1 *control = state->ringControl;
     struct Radeon3DCommitBatch batch;
     struct Radeon3DInfo info;
     ULONG fence = 0;
@@ -1397,6 +1416,12 @@ static BOOL FlushCommitAccumulator(MGLPPCHostState *state,
     return TRUE;
 }
 
+/* Set while a mailbox handler is executing. A handler that needs the ring
+ * (none do today) must not recurse back into RingPoll's inner mailbox
+ * service; ordinary RingPoll execution leaves it zero. */
+static BOOL HostRingMailboxActive;
+static BOOL PollMailbox(MGLPPCHostState *state);
+
 static ULONG RingPoll(MGLPPCHostState *state)
 {
     volatile MGLPPCRingControlV1 *control = state->ringControl;
@@ -1416,6 +1441,27 @@ static ULONG RingPoll(MGLPPCHostState *state)
         return 0;
     HOST_START(ringStart);
     while (state->ringCompleted < control->head) {
+        /* Serve a pending upload control between entries. The PPC blocks in
+         * its mailbox wait while this host is inside a multi-entry submit
+         * burst, and that burst is the dominant begin/commit round-trip
+         * latency (U0: BEGIN round trip 4.4 ms of which the host handler is
+         * 1.6 ms). No mailbox handler may run while absorbed-but-unsubmitted
+         * records still reference texture handles a BEGIN/COMMIT can
+         * replace, so the accumulator is flushed first. The mailbox handlers
+         * do not enter RingPoll, so this service cannot recurse. */
+        if (!HostRingMailboxActive) {
+            if (RingAccValid && !control->error) {
+                if (!FlushCommitAccumulator(state, &bridge, &bridgeValid))
+                    control->error = 1;
+            }
+            if (!control->error && PollMailbox(state)) {
+                ++processed;
+                if (state->ringCompleted >= control->head)
+                    break;
+                if (control->error)
+                    break;
+            }
+        }
         volatile MGLPPCRingEntryV1 *source =
             &control->entries[state->ringCompleted % MGLPPC_RING_SLOTS];
         MGLPPCRingEntryV1 entry;
@@ -2535,7 +2581,8 @@ static void HandleMessage(MGLPPCMessage *message,
                             | MGLPPC_CAP_SEMANTIC_RING
                             | MGLPPC_CAP_INDIRECT | MGLPPC_CAP_CP_EMIT
                             | (state->mailboxDisabled ? 0UL :
-                               MGLPPC_CAP_MAILBOX_V1)
+                               (MGLPPC_CAP_MAILBOX_V1 |
+                                MGLPPC_CAP_MAILBOX_UPLOAD_SHARED))
 #endif
 #ifdef MGLPPC_HOST_VERIFY_CRC
                             ;
@@ -3395,8 +3442,13 @@ static BOOL PollMailbox(MGLPPCHostState *state)
         message.status = MGLPPC_STATUS_UNKNOWN_COMMAND;
     else if (!state->context || message.contextId != state->contextId)
         message.status = MGLPPC_STATUS_NO_CONTEXT;
-    else
+    else {
+        /* Prevent a handler that reaches back into RingPoll from recursing
+         * into the inner mailbox service. */
+        HostRingMailboxActive = TRUE;
         HandleMessage(&message, state);
+        HostRingMailboxActive = FALSE;
+    }
     for (index = 0; index < 8; ++index)
         box->ackValue[index] = message.value[index];
     CacheClearE((APTR)&box->ackValue[0], 32, CACRF_ClearD);
@@ -3406,8 +3458,18 @@ static BOOL PollMailbox(MGLPPCHostState *state)
     CacheClearE((APTR)&box->ackSerial, 32, CACRF_ClearD);
     state->mailboxSerial = serial;
 #if MGLPPC_PROFILE
-    HostMailboxCount++;
-    HostMailboxTicks += HostClock() - start;
+    {
+        ULONG mailboxElapsed = HostClock() - start;
+        HostMailboxCount++;
+        HostMailboxTicks += mailboxElapsed;
+        if (message.command == MGLPPC_CMD_TEXTURE_DIRECT_BEGIN) {
+            HostDirectBeginCount++;
+            HostDirectBeginTicks += mailboxElapsed;
+        } else if (message.command == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT) {
+            HostDirectCommitCount++;
+            HostDirectCommitTicks += mailboxElapsed;
+        }
+    }
 #endif
     return TRUE;
 }
@@ -3542,6 +3604,7 @@ int main(int argc, char **argv)
         ULONG ringBusy;
         BOOL workHandled;
         static ULONG idleLoops;
+        static ULONG idleSince;
 #if MGLPPC_PROFILE
         ULONG handleStart, handleElapsed;
         ULONG pollStart = 0;
@@ -3620,7 +3683,14 @@ int main(int argc, char **argv)
             (state.ringControl && !state.ringControl->error &&
              state.ringCompleted < state.ringControl->head)) {
             idleLoops = 0;
-        } else if (++idleLoops > 500UL) {
+            idleSince = 0;
+        } else {
+            ++idleLoops;
+            if (idleLoops == 1UL)
+                idleSince = ProbeTicks();
+            else if (!(idleLoops & 1023UL) && HostIdleSleepTicks &&
+                     (ULONG)(ProbeTicks() - idleSince) >=
+                         HostIdleSleepTicks) {
 #if MGLPPC_IDLE_DIAG
             ULONG sleepStart = ProbeTicks();
             BOOL active = state.semanticRegistered != 0;
@@ -3643,6 +3713,9 @@ int main(int argc, char **argv)
                 ++IdleEmptySleeps;
             }
 #endif
+            idleLoops = 0;
+            idleSince = 0;
+            }
         }
     }
 #if MGLPPC_PROFILE
@@ -3699,6 +3772,12 @@ int main(int argc, char **argv)
         printf("MiniGLPPC host: mailbox=%lu mailbox_us=%lu\n",
                (unsigned long)HostMailboxCount,
                (unsigned long)ProbeMicros(0, HostMailboxTicks));
+        printf("MiniGLPPC host: direct_begin=%lu direct_begin_us=%lu "
+               "direct_commit=%lu direct_commit_us=%lu\n",
+               (unsigned long)HostDirectBeginCount,
+               (unsigned long)ProbeMicros(0, HostDirectBeginTicks),
+               (unsigned long)HostDirectCommitCount,
+               (unsigned long)ProbeMicros(0, HostDirectCommitTicks));
         printf("MiniGLPPC host: uploads=%lu upload_fails=%lu\n",
                (unsigned long)state.uploadCount,
                (unsigned long)state.uploadFails);

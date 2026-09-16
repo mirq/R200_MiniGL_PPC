@@ -1429,7 +1429,10 @@ static BOOL PlatformCall(ULONG command, ULONG contextId)
         command != MGLPPC_CMD_SEMANTIC_BARRIER)
         return PlatformCallFail(command, "pcall abandoned");
     if (FrontendPlatform.mailbox &&
-        MGLPPC_MAILBOX_COMMAND_ALLOWED(command)) {
+        MGLPPC_MAILBOX_COMMAND_ALLOWED(command) &&
+        (command != MGLPPC_CMD_TEXTURE_UPLOAD_SHARED ||
+         (FrontendPlatform.capabilities &
+          MGLPPC_CAP_MAILBOX_UPLOAD_SHARED))) {
         volatile MGLPPCMailboxV1 *box = FrontendPlatform.mailbox;
         ULONG index;
         if (contextId != FrontendPlatform.contextId || !contextId)
@@ -2134,6 +2137,7 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
     ULONG stallSleeps = 0, stallEntered = 0;
 #endif
     ULONG spin;
+    ULONG drainSeen = 0;
     volatile MGLPPCRingControlV1 *control;
     BOOL result = TRUE;
     if (present && context)
@@ -2250,6 +2254,8 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
             drainStart = PerfClock();
 #endif
             spin = 0;
+            drainSeen = FrontendPlatform.cpEnabled ? control->retired
+                                                   : control->completed;
 #if MGLPPC_PROFILE
             stallSleeps = 0;
             stallEntered = control->completed != control->head;
@@ -2265,6 +2271,21 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
                     if (!control->error &&
                         (FrontendPlatform.cpEnabled ? control->retired : control->completed) == control->head)
                         break;
+                    /* Reset the yield budget while the host keeps consuming:
+                     * a WaitTime park costs ~20 ms while an active drain is
+                     * only milliseconds; parking mid-drain is a net loss
+                     * (U0: 119 of 120 frames yielded once each even though
+                     * the host was consuming). Only a full budget with no
+                     * progress earns a yield. */
+                    {
+                        ULONG now = FrontendPlatform.cpEnabled
+                                        ? control->retired
+                                        : control->completed;
+                        if (now != drainSeen) {
+                            drainSeen = now;
+                            spin = 0;
+                        }
+                    }
                 }
                 /* Spin budget before the first sleep; see the publish loop. */
                 if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL))) {
@@ -2861,7 +2882,9 @@ void R200PPCDispatchDeleteContext(void)
         printf("PPCPERF_TEX calls=%lu ok=%lu bytes=%lu direct=%lu "
                "directTicks=%lu shared=%lu chunked=%lu barriers=%lu "
                "barrierTicks=%lu "
-               "texWaits=%lu bufferWaits=%lu drainWaits=%lu\n",
+               "texWaits=%lu bufferWaits=%lu drainWaits=%lu "
+               "dbegTicks=%lu dwriteTicks=%lu dflushTicks=%lu "
+               "dcomTicks=%lu dshadowTicks=%lu\n",
                (unsigned long)PlatformProfile.textureCalls,
                (unsigned long)PlatformProfile.textureSuccesses,
                (unsigned long)PlatformProfile.textureBytes,
@@ -2873,7 +2896,12 @@ void R200PPCDispatchDeleteContext(void)
                (unsigned long)PlatformProfile.textureBarrierTicks,
                (unsigned long)perf->textureWaits,
                (unsigned long)perf->bufferWaits,
-               (unsigned long)perf->drainWaits);
+               (unsigned long)perf->drainWaits,
+               (unsigned long)PlatformProfile.textureDirectBeginTicks,
+               (unsigned long)PlatformProfile.textureDirectWriteTicks,
+               (unsigned long)PlatformProfile.textureDirectFlushTicks,
+               (unsigned long)PlatformProfile.textureDirectCommitTicks,
+               (unsigned long)PlatformProfile.textureDirectShadowTicks);
         if (perf->worstFrameCount) {
             const struct WorstFrameSlot *worst = &perf->worstFrames[0];
             printf("PPCPERF_WORST frame=%lu total=%lu serialize=%lu "
@@ -3041,7 +3069,9 @@ void R200PPCDispatchDeleteContext(void)
             fprintf(report, "PPC_TEXTURE calls=%lu successes=%lu bytes=%lu "
                     "ticks=%lu direct_calls=%lu direct_ticks=%lu "
                     "shared_calls=%lu chunked_calls=%lu barrier_calls=%lu "
-                    "barrier_ticks=%lu\n",
+                    "barrier_ticks=%lu direct_begin_ticks=%lu "
+                    "direct_write_ticks=%lu direct_flush_ticks=%lu "
+                    "direct_commit_ticks=%lu direct_shadow_ticks=%lu\n",
                     (unsigned long)profile->textureCalls,
                     (unsigned long)profile->textureSuccesses,
                     (unsigned long)profile->textureBytes,
@@ -3051,7 +3081,12 @@ void R200PPCDispatchDeleteContext(void)
                     (unsigned long)profile->textureSharedCalls,
                     (unsigned long)profile->textureChunkedCalls,
                     (unsigned long)profile->textureBarrierCalls,
-                    (unsigned long)profile->textureBarrierTicks);
+                    (unsigned long)profile->textureBarrierTicks,
+                    (unsigned long)profile->textureDirectBeginTicks,
+                    (unsigned long)profile->textureDirectWriteTicks,
+                    (unsigned long)profile->textureDirectFlushTicks,
+                    (unsigned long)profile->textureDirectCommitTicks,
+                    (unsigned long)profile->textureDirectShadowTicks);
             /* Ring back-pressure split: enters counts waits that found no
              * space, nosleep those that got space back from a cache refresh
              * alone, sleeps the number of short PPC-native yields taken.
@@ -3750,6 +3785,30 @@ static GLenum FrontendWireSourceType(GLenum type)
     return type;
 }
 
+/* 565 -> 8-bit expansion tables, built once on first use. The values are
+ * the exact integer expansions FrontendSourceToBGRA32 computes
+ * (v*255/31, v*255/63), pre-shifted into the BGRA dword. 512 bytes total,
+ * L1-resident; the streaming 565 paths were compute-bound on the two
+ * division sequences per texel (U0 attribution). */
+static ULONG Frontend565R[32];
+static ULONG Frontend565G[64];
+static ULONG Frontend565B[32];
+static BOOL Frontend565TablesReady;
+
+static void Frontend565TableInit(void)
+{
+    ULONG i;
+    if (Frontend565TablesReady)
+        return;
+    for (i = 0; i < 32UL; ++i)
+        Frontend565R[i] = (i * 255UL / 31UL) << 8;
+    for (i = 0; i < 64UL; ++i)
+        Frontend565G[i] = (i * 255UL / 63UL) << 16;
+    for (i = 0; i < 32UL; ++i)
+        Frontend565B[i] = (i * 255UL / 31UL) << 24;
+    Frontend565TablesReady = TRUE;
+}
+
 /* Convert a client source patch into the staging buffer as canonical
  * BGRA8888 (same texel expansion as the native ConvertPixel and as the
  * direct path), reading the source with the client unpack layout and
@@ -3776,6 +3835,25 @@ static void FrontendStageTextureBGRA(UBYTE *destination,
         struct MiniGLR200Context *cc = CurrentContext();
         if (cc)
             palette = (const UBYTE (*)[4])cc->colorTable;
+    }
+    if (!palette && type == MGL_UNSIGNED_SHORT_5_6_5) {
+        /* 565 sources are the streaming-lightmap/console-video case.
+         * Table-driven expansion: the exact dwords the generic helper
+         * computes, without the per-texel division sequences. */
+        Frontend565TableInit();
+        for (row = 0; row < (ULONG)height; ++row) {
+            const UBYTE *srcRow = source + row * sourceStride;
+            ULONG *dstRow = (ULONG *)(destination + row * (ULONG)width * 4UL);
+            for (column = 0; column < (ULONG)width; ++column) {
+                ULONG value = ((ULONG)srcRow[column * 2UL] << 8) |
+                              srcRow[column * 2UL + 1UL];
+                dstRow[column] = Frontend565R[(value >> 11) & 31UL] |
+                                 Frontend565G[(value >> 5) & 63UL] |
+                                 Frontend565B[value & 31UL] | 0xffUL;
+            }
+        }
+        (void)rowBytes;
+        return;
     }
     for (row = 0; row < (ULONG)height; ++row) {
         const UBYTE *srcRow = source + row * sourceStride;
@@ -3875,7 +3953,8 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
                                         ULONG width, ULONG height,
                                         GLenum format, GLenum type,
                                         const UBYTE *source,
-                                        ULONG sourceStride)
+                                        ULONG sourceStride,
+                                        UBYTE *shadowDestination)
 {
     ULONG textureName = context->boundTexture[context->activeTexture];
     /* R5G6B5PC texture surfaces are rejected by the service's import
@@ -3885,6 +3964,11 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
     ULONG row, column, pitch, bytes;
     ULONG sourceBytes;
     UBYTE *destination;
+#if MGLPPC_PROFILE
+    /* U0 direct-upload latency split: begin / convert+write / flush / commit.
+     * Enclosed by textureDirectTicks at the call sites. */
+    ULONG phaseStart;
+#endif
 
     if (type == MGL_UNSIGNED_SHORT_5_6_5 ||
         type == MGL_UNSIGNED_SHORT_4_4_4_4)
@@ -3899,9 +3983,16 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
     FrontendPlatform.control.value[1] = width;
     FrontendPlatform.control.value[2] = height;
     FrontendPlatform.control.value[3] = requestFormat;
+#if MGLPPC_PROFILE
+    phaseStart = PerfClock();
+#endif
     if (!PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_BEGIN,
                       FrontendPlatform.contextId))
         return FALSE;
+#if MGLPPC_PROFILE
+    PlatformProfile.textureDirectBeginTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
     pitch = FrontendPlatform.control.value[2];
     bytes = FrontendPlatform.control.value[3];
     grantedFormat = FrontendPlatform.control.value[5];
@@ -3949,12 +4040,42 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
          * transaction each and dominate the upload. Burst stores
          * (stswi) to this aperture hang the GPU on real hardware, so
          * keep the per-texel store path. */
+        if (type == MGL_UNSIGNED_SHORT_5_6_5 &&
+            ((ULONG)out & 3UL) == 0UL) {
+            /* Specialized 565 -> BGRA32 via the expansion tables (exact
+             * dwords; no per-texel division). When the caller supplies a
+             * canonical-shadow destination the same converted dword fills
+             * both, so the shadow costs one cached store per texel. */
+            ULONG *out32 = (ULONG *)out;
+            ULONG *shadow32 = shadowDestination
+                ? (ULONG *)(shadowDestination + row * width * 4UL) : NULL;
+            Frontend565TableInit();
+            for (column = 0; column < width; ++column) {
+                ULONG value = ((ULONG)srcRow[column * 2UL] << 8) |
+                              srcRow[column * 2UL + 1UL];
+                value = Frontend565R[(value >> 11) & 31UL] |
+                        Frontend565G[(value >> 5) & 63UL] |
+                        Frontend565B[value & 31UL] | 0xffUL;
+                out32[column] = value;
+                if (shadow32)
+                    shadow32[column] = value;
+            }
+            continue;
+        }
         if (((ULONG)out & 3UL) == 0UL) {
             ULONG *out32 = (ULONG *)out;
-            for (column = 0; column < width; ++column)
-                out32[column] = FrontendSourceToBGRA32(
+            ULONG *shadow32 = shadowDestination
+                ? (ULONG *)(shadowDestination + row * width * 4UL) : NULL;
+            for (column = 0; column < width; ++column) {
+                ULONG value = FrontendSourceToBGRA32(
                     format, type, srcRow + column * sourceBytes);
+                out32[column] = value;
+                if (shadow32)
+                    shadow32[column] = value;
+            }
         } else {
+            ULONG *shadow32 = shadowDestination
+                ? (ULONG *)(shadowDestination + row * width * 4UL) : NULL;
             for (column = 0; column < width; ++column) {
                 ULONG value = FrontendSourceToBGRA32(
                     format, type, srcRow + column * sourceBytes);
@@ -3962,16 +4083,29 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
                 out[column * 4UL + 1] = (UBYTE)(value >> 16);
                 out[column * 4UL + 2] = (UBYTE)(value >> 8);
                 out[column * 4UL + 3] = (UBYTE)value;
+                if (shadow32)
+                    shadow32[column] = value;
             }
         }
     }
+#if MGLPPC_PROFILE
+    PlatformProfile.textureDirectWriteTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
     MGLPPCFlushDataRange((APTR)destination, pitch * height);
+#if MGLPPC_PROFILE
+    PlatformProfile.textureDirectFlushTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = textureName;
     FrontendPlatform.control.value[1] = 0UL;
     if (!PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_COMMIT,
                       FrontendPlatform.contextId))
         return FALSE;
+#if MGLPPC_PROFILE
+    PlatformProfile.textureDirectCommitTicks += PerfClock() - phaseStart;
+#endif
     return TRUE;
 }
 
@@ -4110,6 +4244,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         level == 0 && width <= 2048 && height <= 2048 &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
         !(width & (width - 1UL)) && !(height & (height - 1UL))) {
+        UBYTE *fusedShadow = NULL;
         /* Publish old texture snapshots before BEGIN can replace their handle.
          * Mailbox dispatch precedes RingPoll on the host: consume the ring
          * first, but leave the GPU fence wait to BEGIN's DrainSemanticFence. */
@@ -4132,10 +4267,20 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         chunkStart = PerfClock();
         PlatformProfile.textureDirectCalls++;
 #endif
+        /* Fuse the canonical-shadow fill into the direct conversion pass:
+         * the loop already computes each BGRA dword, so the shadow costs one
+         * extra cached store per texel instead of a second conversion pass
+         * (~6 ms per 256x256 upload, U0 attribution). Only when the upload
+         * target owns the shadow, which is keyed to texture unit 0 (see the
+         * subimage patch path). */
+        if (&context->textures[context->boundTexture[0]] == texture &&
+            FrontendShadowEnsure(context, texture, (ULONG)width,
+                                 (ULONG)height))
+            fusedShadow = texture->shadow;
         if (FrontendDirectTextureUpload(context, (ULONG)width,
                                         (ULONG)height, format, type,
                                         source + sourceOffset,
-                                        sourceStride)) {
+                                        sourceStride, fusedShadow)) {
 #if MGLPPC_PROFILE
             PlatformProfile.textureDirectTicks += PerfClock() - chunkStart;
 #endif
@@ -4149,19 +4294,30 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                 return;
             }
             FrontendMirrorTextureReply(context);
-            /* Retain this level-0 image as the canonical shadow so a
-             * following TexSubImage can patch-and-recommit here. */
-            {
-                struct TextureObject *shadowTarget =
-                    &context->textures[context->boundTexture[0]];
-                ULONG shadowSourceBytes =
-                    MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
-                if (FrontendShadowEnsure(context, shadowTarget,
-                                         (ULONG)width, (ULONG)height))
-                    FrontendStageTextureBGRA(
-                        shadowTarget->shadow, source + sourceOffset,
-                        width, height, format, type, shadowSourceBytes,
-                        rowBytes, sourceStride);
+            /* The fused pass above fills the canonical shadow whenever the
+             * upload target owns it. Stage it separately only when the
+             * target does not own the shadow (unit-0 keying) or Ensure
+             * failed, so a following TexSubImage can patch-and-recommit. */
+            if (!fusedShadow) {
+#if MGLPPC_PROFILE
+                chunkStart = PerfClock();
+#endif
+                {
+                    struct TextureObject *shadowTarget =
+                        &context->textures[context->boundTexture[0]];
+                    ULONG shadowSourceBytes =
+                        MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
+                    if (FrontendShadowEnsure(context, shadowTarget,
+                                             (ULONG)width, (ULONG)height))
+                        FrontendStageTextureBGRA(
+                            shadowTarget->shadow, source + sourceOffset,
+                            width, height, format, type, shadowSourceBytes,
+                            rowBytes, sourceStride);
+                }
+#if MGLPPC_PROFILE
+                PlatformProfile.textureDirectShadowTicks +=
+                    PerfClock() - chunkStart;
+#endif
             }
 #if MGLPPC_PROFILE
             PlatformProfile.textureSuccesses++;
@@ -4513,7 +4669,8 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                                         texture->shadowHeight,
                                         MGL_UBYTE_BGRA, GL_UNSIGNED_BYTE,
                                         texture->shadow,
-                                        texture->shadowWidth * 4UL)) {
+                                        texture->shadowWidth * 4UL,
+                                        NULL)) {
 #if MGLPPC_PROFILE
             PlatformProfile.textureDirectTicks += PerfClock() - subChunkStart;
 #endif

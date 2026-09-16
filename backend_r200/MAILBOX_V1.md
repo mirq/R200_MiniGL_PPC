@@ -61,9 +61,14 @@ same HandleMessage used by Exec. Invalid requests receive an error ack without
 invoking a semantic handler. Duplicate observed serials are not re-executed.
 
 Only zero-payload BIND_TEXTURE, GET_INTEGER, TEXTURE_DIRECT_BEGIN,
-TEXTURE_DIRECT_COMMIT and TEXTURE_DIRECT_ABORT use the mailbox. PlatformCall
-copies successful transport replies, including semantic errors, back into its
-existing control message. Other commands retain Exec. Semantic errors do not
+TEXTURE_DIRECT_COMMIT, TEXTURE_DIRECT_ABORT, TEXTURE_SUBIMAGE_SHARED,
+READ_PIXELS_SHARED, CP_SURFACE and TEXTURE_UPLOAD_SHARED use the mailbox.
+The last one is gated on the HELLO capability bit
+`MGLPPC_CAP_MAILBOX_UPLOAD_SHARED` (bit 13): a host without it rejects the
+command with UNKNOWN_COMMAND, so the client keeps it on the Exec transport
+against older hosts. PlatformCall copies successful transport replies,
+including semantic errors, back into its existing control message. Other
+commands retain Exec. Semantic errors do not
 trigger an Exec retry; a conclusive ordinary direct-upload failure can still
 use the existing explicit ABORT and shared-upload fallback.
 

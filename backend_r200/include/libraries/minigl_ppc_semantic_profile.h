@@ -40,6 +40,18 @@ typedef struct MGLPPCSemanticPlatformProfile {
     ULONG textureChunkedCalls;
     ULONG textureBarrierCalls;
     ULONG textureBarrierTicks;
+    /* Direct-upload latency split (U0 attribution). Appended after the
+     * barrier/direct pair so older parsers keep working. Each direct call is
+     * divided into its BEGIN round trip, PPC convert+write, aperture flush
+     * and COMMIT round trip; directShadowTicks covers the retained shadow
+     * update that follows a successful direct TexImage. All raw mftb ticks,
+     * nested inside textureDirectTicks (which encloses begin..commit), so
+     * they must not be added to it. */
+    ULONG textureDirectBeginTicks;
+    ULONG textureDirectWriteTicks;
+    ULONG textureDirectFlushTicks;
+    ULONG textureDirectCommitTicks;
+    ULONG textureDirectShadowTicks;
     /* Ring back-pressure split. Each wait loop reports how often it was
      * entered with no space (enters), how often it got space back from a
      * cache refresh alone (noSleep), and how many scheduling yields it

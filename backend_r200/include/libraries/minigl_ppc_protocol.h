@@ -99,6 +99,10 @@ typedef uint32_t ULONG;
 /* Trusted PPC emitter, windowed only. Requires a live render-transition
  * capability at registration; distinct from the fixed startup smoke. */
 #define MGLPPC_CAP_CP_EMIT (1UL << 12)
+/* The host serves MGLPPC_CMD_TEXTURE_UPLOAD_SHARED through the mailbox
+ * whitelist. Without this bit the client must send it over the Exec
+ * transport: an old host would reject it with UNKNOWN_COMMAND. */
+#define MGLPPC_CAP_MAILBOX_UPLOAD_SHARED (1UL << 13)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL
@@ -334,7 +338,8 @@ typedef char MGLPPCMailboxLayoutCheck[
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT || \
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_ABORT || \
      (cmd) == MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED || \
-     (cmd) == MGLPPC_CMD_READ_PIXELS_SHARED)
+     (cmd) == MGLPPC_CMD_READ_PIXELS_SHARED || \
+     (cmd) == MGLPPC_CMD_TEXTURE_UPLOAD_SHARED)
 
 typedef struct MGLPPCRingControlV1 {
     ULONG magic;

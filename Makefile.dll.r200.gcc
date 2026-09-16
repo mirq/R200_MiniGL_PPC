@@ -158,7 +158,10 @@ $(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
               $(R200_INCLUDE)/libraries/minigl_r200_bridge.h \
               $(R200_INCLUDE)/libraries/minigl_ppc_ib_trace.h \
               $(R200_NATIVE_IMPORT) Makefile.dll.r200.gcc | bin
-	$(M68K_CC) -std=gnu99 -O2 -mcpu=68020 -noixemul -Wall \
+# The host runs on the target 68060 (the R200 backend is 68060-only); build
+# it with 68060 scheduling instead of the historical 68020 codegen. The
+# native import archive it links is already built with CPU=68060.
+	$(M68K_CC) -std=gnu99 -O2 -mcpu=68060 -noixemul -Wall \
 		-Werror=incompatible-pointer-types -DMGLPPC_HOST_TRACE=$(MGLPPC_HOST_TRACE) \
 		-DMGLPPC_PROFILE=$(MGLPPC_PROFILE) -DMGLPPC_PACING=$(MGLPPC_PACING) \
 		-DMGLPPC_IDLE_DIAG=$(MGLPPC_IDLE_DIAG) \
