@@ -134,19 +134,26 @@ those headers into `slot->records` (`r200_geometry.c:436-437` state batch,
 which is where the emitted CP stream bakes address/pitch/format.
 
 Measured this session (quiet DLL `9E44E240` + host `32716DD9`, chip
-`CEB838A6`, no driver change):
+`CEB838A6`, no driver change; three independent boots, diagnostics off,
+identical shader/dword counts every run):
 
-- windowed `precalc -frames 300 800x600x32 -window -nosync`: **68.181 fps,
-  error=0**, `CP_RUN dispatches=1016 dwords=255920 failed=0` (baseline
-  68.493 fps).
+- windowed `precalc -frames 300 800x600x32 -window -nosync`: 68.181 /
+  68.493 / 68.807 fps, **median 68.493 fps**, every run `error=0`,
+  `CP_RUN dispatches=1016 dwords=255920 failed=0` (old baseline 68.493).
 - fullscreen `precalc -frames 600 640x480x16 -buffers 3 -nosync -nofps`:
-  **172.413 fps, error=0**, `CP_RUN dispatches=2031 dwords=511620
-  failed=0`; the semantic reference is 133.928 fps.
+  172.413 / 174.418 / 179.640 fps, **median 174.418 fps**, every run
+  `error=0`, `CP_RUN dispatches=2031 dwords=511620 failed=0`; the
+  semantic reference is 133.928 fps (**+30%**).
 - `r200_triangle_smoke 16 fullscreen` with CP: pixels pass; CP and semantic
   readbacks are byte-identical (`center=115,145,164 corner=8,12,24`).
 - `r200_texture_update_test` (windowed, CP): `CHECKS=3495 FAILURES=1`, the
   pre-existing `INDEXED SOURCE` expectation; `CP_RUN dispatches=24
   dwords=3024 failed=0`.
+- Silent Hill (fullscreen, quiet DLL + host): 1,422 presents,
+  `executes=5972`, no host errors, clean quit. The game's 4-6 fps outdoor
+  segments are its own CPU load (median 205 ms frame: logic 100 + raster
+  19); MiniGL's share is `present` 28 ms (game software scaling) plus
+  `endscene` 2.4 ms. FMV intervals ran 15-16 fps.
 
 Known limitation: with `MINIGL_PRESENT=FLIP` the native drawing buffer
 rotates on the host, and a CP batch emitted after the present but before the

@@ -214,6 +214,29 @@ cold boot for grey screens or driver changes; keep diagnostics
   172.413 fps `failed=0` (semantic 133.928); CP/semantic triangle readbacks
   identical; `r200_texture_update_test` unchanged (`3495/1`, pre-existing).
   Details and the FLIP-mode limitation are in `CP_EMITTER.md`.
+- Benchmark protocol (three independent boots, diagnostics off, identical
+  dispatch counts every run):
+
+  | Boot | windowed 300f 800x600x32 | fullscreen 600f 640x480x16 3buf |
+  | --- | ---: | ---: |
+  | A | 68.181 fps | 172.413 fps |
+  | B | 68.493 fps | 174.418 fps |
+  | C | 68.807 fps | 179.640 fps |
+  | **median** | **68.493 fps** | **174.418 fps** |
+
+  Every run `error=0`, `CP_RUN ... failed=0` (`1016/255920` windowed,
+  `2031/511620` fullscreen). The semantic reference is 133.928 fps
+  fullscreen; CP adds ~30% there. Windowed matches the old baseline
+  (68.493) within noise.
+- Silent Hill (fullscreen 640x480x16, 3 buffers, quiet DLL + host):
+  1,422 presents, `executes=5972`, no host errors, clean client quit and
+  host exit. Log breakdown over 24 intervals: median frame 205 ms with
+  the game's own `logic` 100 ms + `raster` 19 ms dominating; MiniGL
+  `present` 28 ms (the game's software scaling) + `endscene` 2.4 ms.
+  FMV intervals ran 15-16 fps; the 4-6 fps segments are heavy outdoor
+  scenes (26k-47k tris/frame) where the game's own CPU work dominates.
+  The game DLL was swapped to the quiet v6 build (`9E44E240`); the fused
+  profiled `7ADA06F4` is preserved as `Work:SilentHill WOS/dll.7ada`.
 - Deployed artifacts: quiet DLL `9E44E240` (306628 B, converted on target)
   and host `32716DD9` (42264 B, protection `00020000`). Rollbacks:
   `Work:ibdraw/dll.pre-p3` = `32216D6B` (old quiet DLL),
