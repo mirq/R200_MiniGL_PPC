@@ -1034,6 +1034,12 @@ BOOL R200PPCPlatformWaitSlot(struct MiniGLR200Context *context,
 BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
                                   ULONG vertexBytes);
 BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present);
+/* Completes the deferred first tile of the batched two-tile direct upload
+ * (see the frontend's pendingDirect state): BEGIN + aperture fill + COMMIT
+ * through the ordinary single-tile path. Returns TRUE when there is nothing
+ * pending. Called from every point that can observe the texture or
+ * invalidate its staging buffer. */
+BOOL R200PPCPendingUploadFlush(struct MiniGLR200Context *context);
 ULONG R200PPCPlatformStallTicks(void);
 /* PPC serialization kernels (client/minigl_ppc_serial.s): byte-reversing
  * block copies from the ScreenVertex array into a streaming vertex

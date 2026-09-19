@@ -2087,6 +2087,222 @@ static GLboolean VerifyShIntroBench(char *detail)
     return GL_TRUE;
 }
 
+/* Animated Silent Hill FMV variant: ten distinct 320x256 16-bit frames are
+ * precomputed and cycled one per rendered frame, so the whole view changes
+ * every frame the way a real FMV does. Each frame is a different image
+ * (colour bars, gradient, checkerboard, stripes, rings, a walking disc,
+ * border frame, crosshair); the 320-pixel-wide picture is split into the
+ * same 256 + 64 tile pair the logo/FMV present path uses and both tiles are
+ * re-uploaded per frame. Frames are precomputed so pixel generation never
+ * lands inside a measured frame. */
+#define SH_FMV_FRAMES 10
+#define SH_FMV_WIDTH 320
+#define SH_FMV_HEIGHT 256
+
+static GLuint g_shFmvTex[2];
+static UBYTE g_shFmvMain[SH_FMV_FRAMES][256 * SH_FMV_HEIGHT * 2];
+static UBYTE g_shFmvStrip[SH_FMV_FRAMES][64 * SH_FMV_HEIGHT * 2];
+static ULONG g_shFmvFrame;
+
+/* One pixel of frame `frame` at (x, y) of the 320x256 picture, returned as a
+ * big-endian R5G6B5 value. The ten images are structurally different, so
+ * consecutive frames never look like a flat colour change. */
+static unsigned ShFmvPixel(ULONG frame, ULONG x, ULONG y)
+{
+    switch (frame % SH_FMV_FRAMES) {
+    case 0: { /* vertical colour bars */
+        static const unsigned short bars[8] = {
+            0xFFFFu, 0xFFE0u, 0x07FFu, 0x07E0u,
+            0xF81Fu, 0xF800u, 0x001Fu, 0x0000u
+        };
+        return bars[(x * 8UL) / SH_FMV_WIDTH];
+    }
+    case 1: { /* top-to-bottom grey gradient */
+        ULONG level = (y * 31UL) / (SH_FMV_HEIGHT - 1UL);
+        return (unsigned)((level << 11) | ((level * 2UL) << 5) | level);
+    }
+    case 2: { /* checkerboard */
+        ULONG cell = ((x / 32UL) + (y / 32UL)) & 1UL;
+        return cell ? 0xF800u : 0x001Fu;
+    }
+    case 3: { /* diagonal stripes */
+        ULONG band = (x + y) % 32UL;
+        return band < 16UL ? 0xFFE0u : 0x0000u;
+    }
+    case 4: { /* concentric rings */
+        ULONG dx = x > SH_FMV_WIDTH / 2UL ? x - SH_FMV_WIDTH / 2UL
+                                          : SH_FMV_WIDTH / 2UL - x;
+        ULONG dy = y > SH_FMV_HEIGHT / 2UL ? y - SH_FMV_HEIGHT / 2UL
+                                           : SH_FMV_HEIGHT / 2UL - y;
+        ULONG radius = (dx > dy ? dx : dy) / 16UL;
+        return radius & 1UL ? 0xFFFFu : 0x0000u;
+    }
+    case 5: case 6: case 7: { /* white disc walking left to right */
+        ULONG step = frame - 4UL;
+        ULONG cx = (SH_FMV_WIDTH / 4UL) * step;
+        ULONG cy = SH_FMV_HEIGHT / 2UL;
+        ULONG radius = SH_FMV_HEIGHT / 6UL;
+        ULONG dx = x > cx ? x - cx : cx - x;
+        ULONG dy = y > cy ? y - cy : cy - y;
+        if (dx * dx + dy * dy < radius * radius)
+            return 0xFFFFu;
+        return (unsigned)(0x0010u | (((y / 4UL) & 31UL) << 5));
+    }
+    case 8: { /* white border frame with a red ramp interior */
+        if (x < 12UL || x >= SH_FMV_WIDTH - 12UL ||
+            y < 12UL || y >= SH_FMV_HEIGHT - 12UL)
+            return 0xFFFFu;
+        return (unsigned)(((x & 31UL) > 15UL ? 0xF800u : 0x4000u));
+    }
+    default: { /* case 9: red crosshair on a fine green checker */
+        ULONG dx = x > SH_FMV_WIDTH / 2UL ? x - SH_FMV_WIDTH / 2UL
+                                          : SH_FMV_WIDTH / 2UL - x;
+        ULONG dy = y > SH_FMV_HEIGHT / 2UL ? y - SH_FMV_HEIGHT / 2UL
+                                           : SH_FMV_HEIGHT / 2UL - y;
+        ULONG cell = ((x / 8UL) + (y / 8UL)) & 1UL;
+        if (dx < 4UL || dy < 4UL)
+            return 0xF800u;
+        return cell ? 0x07E0u : 0x0000u;
+    }
+    }
+}
+
+static void PrepareShFmv(void)
+{
+    UBYTE row[SH_FMV_WIDTH * 2];
+    int frame;
+    ULONG x, y;
+
+    if (g_shFmvTex[0])
+        return;
+    for (frame = 0; frame < SH_FMV_FRAMES; ++frame) {
+        for (y = 0; y < SH_FMV_HEIGHT; ++y) {
+            for (x = 0; x < SH_FMV_WIDTH; ++x) {
+                unsigned value = ShFmvPixel((ULONG)frame, x, y);
+                row[x * 2] = (UBYTE)(value >> 8);
+                row[x * 2 + 1] = (UBYTE)(value & 0xffu);
+            }
+            memcpy(g_shFmvMain[frame] + y * 256UL * 2UL, row, 256UL * 2UL);
+            memcpy(g_shFmvStrip[frame] + y * 64UL * 2UL, row + 256UL * 2UL,
+                   64UL * 2UL);
+        }
+    }
+    {
+        int index;
+        for (index = 0; index < 2; ++index) {
+            glGenTextures(1, &g_shFmvTex[index]);
+            glBindTexture(GL_TEXTURE_2D, g_shFmvTex[index]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        }
+    }
+}
+
+static void DrawShFmvScene(GLboolean upload)
+{
+    PrepareShFmv();
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    if (upload) {
+        glBindTexture(GL_TEXTURE_2D, g_shFmvTex[0]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 256, 256, 0,
+                     MGL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT,
+                     g_shFmvMain[g_shFmvFrame]);
+        glBindTexture(GL_TEXTURE_2D, g_shFmvTex[1]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 64, 256, 0,
+                     MGL_UNSIGNED_SHORT_5_6_5, GL_UNSIGNED_SHORT,
+                     g_shFmvStrip[g_shFmvFrame]);
+        g_shFmvFrame = (g_shFmvFrame + 1UL) % SH_FMV_FRAMES;
+    }
+    glBindTexture(GL_TEXTURE_2D, g_shFmvTex[0]);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(-0.9f, -0.9f);
+    glTexCoord2f(1, 0); glVertex2f(0.54f, -0.9f);
+    glTexCoord2f(1, 1); glVertex2f(0.54f, 0.9f);
+    glTexCoord2f(0, 1); glVertex2f(-0.9f, 0.9f);
+    glEnd();
+    glBindTexture(GL_TEXTURE_2D, g_shFmvTex[1]);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(0.54f, -0.9f);
+    glTexCoord2f(1, 0); glVertex2f(0.9f, -0.9f);
+    glTexCoord2f(1, 1); glVertex2f(0.9f, 0.9f);
+    glTexCoord2f(0, 1); glVertex2f(0.54f, 0.9f);
+    glEnd();
+}
+
+static void DrawShFmvBench(ULONG frame)
+{
+    (void)frame;
+    DrawShFmvScene(GL_TRUE);
+}
+
+/* Capture three points of the current image: two on the main tile and one on
+ * the strip. */
+static GLboolean SampleShFmvPoints(int r[3], int g[3], int b[3])
+{
+    return SampleRGB(-0.7f, 0.0f, &r[0], &g[0], &b[0]) &&
+           SampleRGB(-0.2f, 0.0f, &r[1], &g[1], &b[1]) &&
+           SampleRGB(0.70f, 0.0f, &r[2], &g[2], &b[2]);
+}
+
+static GLboolean VerifyShFmvBench(char *detail)
+{
+    int r0[3], g0[3], b0[3], r1[3], g1[3], b1[3];
+    int index, lit, differs;
+
+    if (!CalibrateChannels(detail))
+        return GL_FALSE;
+    DrainErrors();
+    /* Deterministic check: upload frame 0, capture, then frame 1, capture,
+     * and require both to render and the visible image to change. */
+    g_shFmvFrame = 0;
+    DrawShFmvScene(GL_TRUE);
+    if (!SampleShFmvPoints(r0, g0, b0)) {
+        strcpy(detail, "frame 0 capture failed");
+        return GL_FALSE;
+    }
+    g_shFmvFrame = 1;
+    DrawShFmvScene(GL_TRUE);
+    if (!SampleShFmvPoints(r1, g1, b1)) {
+        strcpy(detail, "frame 1 capture failed");
+        return GL_FALSE;
+    }
+    lit = 0;
+    for (index = 0; index < 3; ++index) {
+        if ((r0[index] | g0[index] | b0[index]) != 0)
+            ++lit;
+        if ((r1[index] | g1[index] | b1[index]) != 0)
+            ++lit;
+    }
+    if (lit < 4) {
+        sprintf(detail, "frames did not render (lit=%d)", lit);
+        return GL_FALSE;
+    }
+    differs = 0;
+    for (index = 0; index < 3; ++index) {
+        int dr = r0[index] - r1[index];
+        int dg = g0[index] - g1[index];
+        int db = b0[index] - b1[index];
+        if (dr < 0) dr = -dr;
+        if (dg < 0) dg = -dg;
+        if (db < 0) db = -db;
+        if (dr > 15 || dg > 15 || db > 15)
+            ++differs;
+    }
+    if (!differs) {
+        sprintf(detail, "frame change not visible (%d,%d,%d)",
+                r0[0], g0[0], b0[0]);
+        return GL_FALSE;
+    }
+    strcpy(detail, "10 two-tile images cycle; view changes every frame");
+    return GL_TRUE;
+}
+
 static void DrawQuakeLightmap(ULONG frame)
 {
     int index;
@@ -5174,6 +5390,13 @@ static MiniGLTest g_tests[] = {
      "Sustained FPS reports the asymmetric two-tile upload path the logo "
      "and FMV sequences use.",
      DrawShIntroBench, VerifyShIntroBench, AlwaysAvailable, GL_TRUE, {0}},
+    {"benchmark.sh-fmv", "BENCHMARK", "SH FMV ANIMATED",
+     "Animated Silent Hill FMV pattern: ten distinct 320x256 16-bit frames "
+     "cycle one per rendered frame, each re-uploaded as one 256x256 and one "
+     "64x256 tile, so the whole view changes every frame.",
+     "The full-screen image changes every frame (moving bar, per-frame "
+     "colour); sustained FPS reports the two-tile re-upload path.",
+     DrawShFmvBench, VerifyShFmvBench, AlwaysAvailable, GL_TRUE, {0}},
     {"lighting.availability", "LIGHTING", "LIGHTING VECTORS",
      "Report whether optional ABI v4 lighting is available.",
      "PASS means lighting tests can be added; SKIP is valid when unsupported.",

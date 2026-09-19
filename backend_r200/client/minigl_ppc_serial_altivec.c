@@ -95,22 +95,46 @@ static void AltiVecLogReset(const char *label, ULONG value)
 #define MGLPPC_VERTEX_SCRATCH_PAD   32UL
 #define MGLPPC_VERTEX_VERIFY_FIRST  64UL
 
-static UBYTE VertexScratch[MGLPPC_VERTEX_SCRATCH_BYTES +
-                           MGLPPC_VERTEX_SCRATCH_PAD]
-    __attribute__((aligned(16)));
-
 /* Self-test buffers: the copy kernel is exercised once against a cacheable
  * destination at every destination alignment and several lengths. This
  * isolates kernel correctness from the VRAM aperture and the geometry
  * path. */
 #define MGLPPC_COPY_TEST_BYTES 1024UL
-static UBYTE CopyTestSource[MGLPPC_COPY_TEST_BYTES + 32]
+
+/* The WarpOS loader does not guarantee section alignment (the same reason
+ * the original .rodata shift table was wrong), so every buffer the vector
+ * kernel reads or writes gets a runtime 16-byte-aligned pointer. The +15
+ * slack covers the worst-case raw address. */
+static UBYTE VertexScratchRaw[MGLPPC_VERTEX_SCRATCH_BYTES +
+                              MGLPPC_VERTEX_SCRATCH_PAD + 16UL]
     __attribute__((aligned(16)));
-static UBYTE CopyTestDestination[MGLPPC_COPY_TEST_BYTES + 64]
+static UBYTE CopyTestSourceRaw[MGLPPC_COPY_TEST_BYTES + 32UL + 16UL]
     __attribute__((aligned(16)));
-/* Cacheable replay destination for the aperture verification path. */
-static UBYTE CopyReplayDestination[MGLPPC_VERTEX_SCRATCH_BYTES + 64]
+static UBYTE CopyTestDestinationRaw[MGLPPC_COPY_TEST_BYTES + 64UL + 16UL]
     __attribute__((aligned(16)));
+static UBYTE CopyReplayDestinationRaw[MGLPPC_VERTEX_SCRATCH_BYTES + 64UL +
+                                      16UL]
+    __attribute__((aligned(16)));
+
+static UBYTE *VertexScratch;
+static UBYTE *CopyTestSource;
+static UBYTE *CopyTestDestination;
+static UBYTE *CopyReplayDestination;
+static BOOL MGLPPCAltiVecBuffersReady;
+static BOOL MGLPPCAltiVecSelfTestPassed;
+
+static void AltiVecAlignBuffers(void)
+{
+    if (MGLPPCAltiVecBuffersReady)
+        return;
+    MGLPPCAltiVecBuffersReady = TRUE;
+    VertexScratch = (UBYTE *)(((ULONG)VertexScratchRaw + 15UL) & ~15UL);
+    CopyTestSource = (UBYTE *)(((ULONG)CopyTestSourceRaw + 15UL) & ~15UL);
+    CopyTestDestination =
+        (UBYTE *)(((ULONG)CopyTestDestinationRaw + 15UL) & ~15UL);
+    CopyReplayDestination =
+        (UBYTE *)(((ULONG)CopyReplayDestinationRaw + 15UL) & ~15UL);
+}
 
 BOOL MGLPPCAltiVecVertexEnabled = FALSE;
 
@@ -127,6 +151,7 @@ static BOOL AltiVecCopySelfTest(void)
 {
     ULONG index, alignment, length;
 
+    MGLPPCAltiVecSelfTestPassed = FALSE;
     for (index = 0; index < MGLPPC_COPY_TEST_BYTES + 32UL; ++index)
         CopyTestSource[index] = (UBYTE)(index * 7UL + 3UL);
     for (alignment = 0; alignment < 16UL; alignment += 4UL) {
@@ -160,6 +185,7 @@ static BOOL AltiVecCopySelfTest(void)
             }
         }
     }
+    MGLPPCAltiVecSelfTestPassed = TRUE;
     return TRUE;
 }
 
@@ -251,10 +277,19 @@ void MGLPPCAltiVecVertexProbe(void)
     AltiVecLog("PROBE_BASE", (ULONG)PowerPCBase);
     AltiVecLog("PROBE_FORCED", forced ? 1UL : 0UL);
     AltiVecLog("PROBE_OVERRIDE", overridden ? 1UL : 0UL);
-    AltiVecLog("PROBE_ENABLED", MGLPPCAltiVecVertexEnabled ? 1UL : 0UL);
     AltiVecLog("PROBE_VERIFY", verify ? 1UL : 0UL);
-    if (MGLPPCAltiVecVertexEnabled)
+    if (MGLPPCAltiVecVertexEnabled) {
+        AltiVecAlignBuffers();
+        AltiVecLog("BUFFER_ALIGN", (ULONG)VertexScratch & 15UL);
         AltiVecLog("SELFTEST", AltiVecCopySelfTest() ? 1UL : 0UL);
+        if (!MGLPPCAltiVecSelfTestPassed) {
+            /* A misaligned or otherwise unusable vector path must never
+             * corrupt records: fall back to the scalar kernels. */
+            MGLPPCAltiVecVertexEnabled = FALSE;
+            AltiVecLog("SELFTEST_FALLBACK", 1UL);
+        }
+    }
+    AltiVecLog("PROBE_ENABLED", MGLPPCAltiVecVertexEnabled ? 1UL : 0UL);
 }
 
 /* Copy one staged chunk to the aperture. In verify mode the same copy is

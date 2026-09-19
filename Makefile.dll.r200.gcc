@@ -53,6 +53,14 @@ R200_CFLAGS = $(COMMON_CFLAGS) -I$(R200_INCLUDE) -Iinclude \
                -DMGLPPC_PROFILE=$(MGLPPC_PROFILE) \
                -DR200_STREAM_COMMITS=1 -DR200_ASYNC_ROTATION=1
 
+# MGLPPC_INFLIGHT=1 builds the host with the conservative drain-per-dispatch
+# submission model (one outstanding fence), overriding the multi-fence
+# pipeline. Diagnostic/A-B builds only. No define is passed otherwise, so
+# the source default (MGLPPC_RING_SLOTS) applies.
+MGLPPC_INFLIGHT ?= 0
+MGLPPC_INFLIGHT_FLAG = $(if $(filter 1,$(MGLPPC_INFLIGHT)),\
+	-DMGLPPC_INFLIGHT_SLOTS=1,)
+
 R200_SOURCES = $(R200_LIBRARY)/minigl_r200_warpos_compile_probe.c \
                $(R200_LIBRARY)/r200_unity.c \
                $(R200_LIBRARY)/minigl_r200.c \
@@ -177,7 +185,7 @@ $(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
 	$(M68K_CC) -std=gnu99 -O2 -mcpu=68060 -noixemul -Wall \
 		-Werror=incompatible-pointer-types -DMGLPPC_HOST_TRACE=$(MGLPPC_HOST_TRACE) \
 		-DMGLPPC_PROFILE=$(MGLPPC_PROFILE) -DMGLPPC_PACING=$(MGLPPC_PACING) \
-		-DMGLPPC_IDLE_DIAG=$(MGLPPC_IDLE_DIAG) \
+		-DMGLPPC_IDLE_DIAG=$(MGLPPC_IDLE_DIAG) $(MGLPPC_INFLIGHT_FLAG) \
 		-DMGLPPC_HOST_TARGET_CACHE=$(MGLPPC_HOST_TARGET_CACHE) \
 		-I$(R200_INCLUDE) -I$(R200_NATIVE_ROOT)/include \
 		-I$(R200_NATIVE_ROOT)/third_party/warp3d/include \

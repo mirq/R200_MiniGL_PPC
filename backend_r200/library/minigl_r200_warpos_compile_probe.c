@@ -773,11 +773,53 @@ typedef struct R200PPCFrontendPlatform {
     UBYTE *textureUploadBuffer;
     ULONG textureUploadCapacity;
     ULONG shadowBytesTotal;
+    /* Deferred first tile of a two-tile direct upload (Silent Hill's intro
+     * logo/FMV fills a 320x256 16-bit frame as a 256x256 plus a 64x256 tile
+     * back to back). The tile is converted into a PPC-resident staging
+     * buffer at TexImage2D time -- the client's texels are consumed exactly
+     * at the call, as the GL contract requires -- and BEGIN/COMMIT are
+     * deferred until the second tile arrives so both tiles share one BEGIN2
+     * and one COMMIT2 mailbox round trip. Every path that can observe the
+     * texture or invalidate the staging (draws, present, another upload,
+     * delete, readback, context teardown) flushes the pending tile through
+     * the ordinary single-tile direct path first. */
+    BOOL pendingDirectActive;
+    ULONG pendingDirectName;
+    ULONG pendingDirectWidth;
+    ULONG pendingDirectHeight;
+    ULONG pendingDirectShadowName; /* unit-0 texture at queue time; 0 = none */
+    ULONG pendingDirectEpoch;
+    UBYTE *pendingDirectStaging;   /* converted BGRA tile, tight rows */
+    BOOL pendingDirectStagingIsShadow;
+    BOOL batchDisabled;            /* opt-in gate, see MGLPPC_BATCH */
     BOOL opened;
     BOOL registered;
 } R200PPCFrontendPlatform;
 
+/* Snapshot of the deferred-tile fields above, taken before the pipeline is
+ * drained so the completion helpers never read a half-cleared state. */
+typedef struct R200PPCPendingDirectUpload {
+    ULONG textureName;
+    ULONG width;
+    ULONG height;
+    ULONG shadowName;
+    ULONG epoch;
+    UBYTE *staging;
+    BOOL stagingIsShadow;
+} R200PPCPendingDirectUpload;
+
+BOOL R200PPCPendingUploadFlush(struct MiniGLR200Context *context);
+
 static R200PPCFrontendPlatform FrontendPlatform;
+
+#if MGLPPC_PROFILE
+static void BatchDiagDump(void);
+/* Ordinary single-tile direct path phase attribution (same dump). */
+static ULONG SingleDiagCalls;
+static ULONG SingleDiagBeginTicks;
+static ULONG SingleDiagWriteTicks;
+static ULONG SingleDiagCommitTicks;
+#endif
 
 #define MGLPPC_REPLAY_BATCHES_PER_FRAME 4UL
 #define MGLPPC_REPLAY_MAX_DRAWS \
@@ -1595,11 +1637,20 @@ BOOL R200PPCPlatformOpen(void)
     if (!IntuitionBase)
         return FALSE;
     {
-        UBYTE verbose[8];
+        UBYTE verbose[8], nobatch[8];
         verbose[0] = 0;
         GetVar((CONST_STRPTR)"MGLPPC_VERBOSE", verbose, (LONG)sizeof(verbose),
                GVF_GLOBAL_ONLY);
         FrontendConsoleVerbose = verbose[0] ? 1UL : 0UL;
+        /* The batched two-tile path is opt-in: on the current host the
+         * deferred BEGIN2 lands in a window where the mailbox service
+         * latency is ~16 ms (vs ~0.3 ms for an immediate BEGIN), which
+         * costs more than the two round trips it saves. See
+         * BATCH_TWO_TILE_FINDINGS.md. MGLPPC_BATCH=1 enables it. */
+        nobatch[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_BATCH", nobatch, (LONG)sizeof(nobatch),
+               GVF_GLOBAL_ONLY);
+        FrontendPlatform.batchDisabled = nobatch[0] == '1' ? 0 : 1;
     }
     if (!MGLPPCTransportOpen(&FrontendPlatform.transport))
         return FALSE;
@@ -2183,6 +2234,10 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
     ULONG drainSeen = 0;
     volatile MGLPPCRingControlV1 *control;
     BOOL result = TRUE;
+    /* A deferred direct tile must be installed before this frame's work is
+     * presented or drained. */
+    if (!R200PPCPendingUploadFlush(context))
+        return FALSE;
     if (present && context)
         context->mismatchSubmits = 0;
     if (!PlatformMailboxReady())
@@ -2513,6 +2568,8 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
      * also applies the MGLPPC_NOALTIVEC override. */
     MGLPPCAltiVecVertexProbe();
     FrontendPlatform.nativeBindingKnown = FALSE;
+    /* No context can own a deferred tile before creation completes. */
+    FrontendPlatform.pendingDirectActive = FALSE;
     (void)offx;
     (void)offy;
     if (!FrontendPlatform.opened || R200PPCContext)
@@ -2875,10 +2932,23 @@ static BOOL FrontendShadowEnsure(struct MiniGLR200Context *context,
 void R200PPCDispatchDeleteContext(void)
 {
     ULONG index;
-    if (FrontendPlatform.ibSmokeFailed || FrontendPlatform.cpFailed ||
-        (FrontendPlatform.cpEnabled && FrontendPlatform.ring && FrontendPlatform.ring->error))
-        return; /* No reuse or teardown traffic after unacknowledged smoke work. */
+    /* Unacknowledged smoke work, a latched CP failure or a dead ring mean
+     * drains, barriers and slot waits can no longer be answered here. The
+     * host however still services the mailbox: if it never learns that the
+     * context died it holds the context -- and with it a fullscreen screen
+     * -- until the next cold boot. Skip only the risky waits below and
+     * still deliver the mailbox-only DESTROY_CONTEXT so the host releases
+     * everything and can exit when the client closes. */
+    BOOL deadPipe = FrontendPlatform.ibSmokeFailed || FrontendPlatform.cpFailed ||
+        (FrontendPlatform.cpEnabled && FrontendPlatform.ring &&
+         FrontendPlatform.ring->error);
     FrontendPlatform.nativeBindingKnown = FALSE;
+    /* A deferred tile cannot outlive its context; the host-side pending
+     * direct allocation (if any BEGIN had run) dies with the context. */
+    FrontendPlatform.pendingDirectActive = FALSE;
+#if MGLPPC_PROFILE
+    BatchDiagDump();
+#endif
     R200PPCTraceUL("delctx call ctx", (ULONG)R200PPCContext);
     if (!R200PPCContext) {
         R200PPCTraceStr("delctx skip (no ctx)");
@@ -3013,24 +3083,26 @@ void R200PPCDispatchDeleteContext(void)
      * this context; release them before the context struct is buried. */
     for (index = 0; index < MAX_TEXTURES; ++index)
         FrontendShadowFree(&proofContext.textures[index]);
-    if (!proofContext.insideBegin && !FrontendPlatform.mailboxAbandoned) {
+    if (!deadPipe && !proofContext.insideBegin && !FrontendPlatform.mailboxAbandoned) {
         if (!FlushScreenVertices(&proofContext) ||
             !SubmitAndWait(&proofContext)) {
             R200PPCTraceStr("delctx FAIL flush/submit");
             return;
         }
     }
-    if (FrontendPlatform.registered &&
+    if (!deadPipe && FrontendPlatform.registered &&
         !R200PPCPlatformBarrier(&proofContext, FALSE)) {
         R200PPCTraceStr("delctx FAIL barrier");
         return;
     }
-    for (index = 0; index < SUBMIT_SLOT_COUNT; ++index)
-        if (!R200PPCPlatformWaitSlot(&proofContext, index)) {
-            R200PPCTraceUL("delctx FAIL waitslot", index);
-            return;
-        }
-    if (FrontendPlatform.registered) {
+    if (!deadPipe) {
+        for (index = 0; index < SUBMIT_SLOT_COUNT; ++index)
+            if (!R200PPCPlatformWaitSlot(&proofContext, index)) {
+                R200PPCTraceUL("delctx FAIL waitslot", index);
+                return;
+            }
+    }
+    if (FrontendPlatform.registered && !deadPipe) {
         memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
         FrontendPlatform.control.value[5] = FrontendPlatform.epoch;
         if (!PlatformCall(MGLPPC_CMD_UNREGISTER_SEMANTIC_SLOTS,
@@ -3051,8 +3123,21 @@ void R200PPCDispatchDeleteContext(void)
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     if (!PlatformCall(MGLPPC_CMD_DESTROY_CONTEXT,
                       FrontendPlatform.contextId)) {
-        R200PPCTraceStr("delctx FAIL destroy");
-        return;
+        if (!deadPipe) {
+            R200PPCTraceStr("delctx FAIL destroy");
+            return;
+        }
+        /* A forced release answers GL_ERROR after releasing as much as it
+         * could. Keep going so the client-side state stays consistent and
+         * the platform close can still send SHUTDOWN. */
+        R200PPCTraceStr("delctx deadring destroy best-effort");
+    }
+    if (deadPipe) {
+        /* Mirror the frontend-local unregister state without host traffic;
+         * the forced host-side DESTROY above released the registration for
+         * real. */
+        FrontendPlatform.mailbox = NULL;
+        FrontendPlatform.ring = NULL;
     }
     for (index = 0; index < MGLPPC_RING_SLOTS; ++index) {
         if (FrontendPlatform.ringSlots[index]) {
@@ -3376,9 +3461,19 @@ static BOOL FrontendTextureBarrier(struct MiniGLR200Context *context)
 
 static void FrontendSetTransportError(struct MiniGLR200Context *context)
 {
-    GLenum error = FrontendPlatform.control.status == MGLPPC_STATUS_GL_ERROR &&
-                   FrontendPlatform.control.value[0] != GL_NO_ERROR
-        ? (GLenum)FrontendPlatform.control.value[0] : GL_INVALID_OPERATION;
+    GLenum error = GL_INVALID_OPERATION;
+    /* Forward a host-provided GL error only when it actually is one. The
+     * mailbox message is reused in place, so a handler that fails without
+     * writing value[0] leaves the REQUEST's value[0] in the reply (a token,
+     * a count, a serial, an address). Classic MiniGL error codes are the
+     * contiguous range GL_INVALID_ENUM (88) .. GL_OUT_OF_MEMORY (123);
+     * anything outside that range cannot be a real error and would surface
+     * as a bogus client-visible code. */
+    if (FrontendPlatform.control.status == MGLPPC_STATUS_GL_ERROR) {
+        GLenum reported = (GLenum)FrontendPlatform.control.value[0];
+        if (reported >= GL_INVALID_ENUM && reported <= GL_OUT_OF_MEMORY)
+            error = reported;
+    }
     SetError(context, error);
 }
 
@@ -3739,26 +3834,57 @@ write_failed:
         SetError(context, GL_INVALID_OPERATION);
 }
 
-static void FrontendMirrorTextureReply(struct MiniGLR200Context *context)
+static void FrontendMirrorTextureValues(struct MiniGLR200Context *context,
+                                        ULONG textureName, ULONG surfaceToken,
+                                        ULONG width, ULONG height,
+                                        ULONG definedLevels, ULONG levelCount,
+                                        ULONG contentSerial, ULONG deviceEpoch)
 {
     struct TextureObject *texture;
     ULONG generation;
 
-    texture = &context->textures[context->boundTexture[context->activeTexture]];
+    texture = &context->textures[textureName];
     generation = texture->imageGeneration + 1UL;
     if (!generation) generation = 1;
     texture->generated = TRUE;
     texture->resident = TRUE;
-    texture->surface.Handle = (APTR)FrontendPlatform.control.value[1];
-    texture->width = FrontendPlatform.control.value[2];
-    texture->height = FrontendPlatform.control.value[3];
-    texture->definedLevels = FrontendPlatform.control.value[4];
-    texture->levelCount = FrontendPlatform.control.value[5];
-    texture->contentSerial = FrontendPlatform.control.value[6];
-    texture->residentDeviceEpoch = FrontendPlatform.control.value[7];
+    texture->surface.Handle = (APTR)surfaceToken;
+    texture->width = width;
+    texture->height = height;
+    texture->definedLevels = definedLevels;
+    texture->levelCount = levelCount;
+    texture->contentSerial = contentSerial;
+    texture->residentDeviceEpoch = deviceEpoch;
     texture->imageGeneration = generation;
     texture->residentGeneration = generation;
     texture->dirtyLevelMask = 0;
+    BumpSemanticStateSerial(context);
+}
+
+static void FrontendMirrorTextureReply(struct MiniGLR200Context *context)
+{
+    FrontendMirrorTextureValues(context,
+        context->boundTexture[context->activeTexture],
+        FrontendPlatform.control.value[1],
+        FrontendPlatform.control.value[2],
+        FrontendPlatform.control.value[3],
+        FrontendPlatform.control.value[4],
+        FrontendPlatform.control.value[5],
+        FrontendPlatform.control.value[6],
+        FrontendPlatform.control.value[7]);
+}
+
+/* Drop the frontend residency mirror of a texture whose native residency
+ * may have been replaced by a failed update. Draws using the stale handle
+ * must be dropped until a later successful upload restores the mirror. */
+static void FrontendInvalidateTextureMirror(struct MiniGLR200Context *context,
+                                            ULONG textureName)
+{
+    struct TextureObject *texture = &context->textures[textureName];
+
+    texture->resident = FALSE;
+    texture->surface.Handle = NULL;
+    texture->residentGeneration = 0;
     BumpSemanticStateSerial(context);
 }
 
@@ -3996,26 +4122,18 @@ static void FrontendShadowPatch(struct TextureObject *texture,
     }
 }
 
-static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
-                                        ULONG width, ULONG height,
-                                        GLenum format, GLenum type,
-                                        const UBYTE *source,
-                                        ULONG sourceStride,
-                                        UBYTE *shadowDestination)
+/* Convert/expand one source image into the aperture surface, row by row.
+ * Kept as a standalone pass so the batched two-tile path can fill both
+ * tiles (one of them from its PPC-resident staging) without duplicating
+ * the conversion rules. */
+static void FrontendDirectWritePixels(UBYTE *destination, ULONG pitch,
+                                      ULONG grantedFormat,
+                                      const UBYTE *source,
+                                      ULONG sourceStride, ULONG width,
+                                      ULONG height, GLenum format,
+                                      GLenum type, UBYTE *shadowDestination)
 {
-    ULONG textureName = context->boundTexture[context->activeTexture];
-    /* R5G6B5PC texture surfaces are rejected by the service's import
-     * path (verified on hardware): always request BGRA32. */
-    ULONG requestFormat = MGLPPC_TEXDIRECT_FMT_BGRA32;
-    ULONG grantedFormat;
-    ULONG row, column, pitch, bytes;
-    ULONG sourceBytes;
-    UBYTE *destination;
-#if MGLPPC_PROFILE
-    /* U0 direct-upload latency split: begin / convert+write / flush / commit.
-     * Enclosed by textureDirectTicks at the call sites. */
-    ULONG phaseStart;
-#endif
+    ULONG row, column, sourceBytes;
 
     if (type == MGL_UNSIGNED_SHORT_5_6_5 ||
         type == MGL_UNSIGNED_SHORT_4_4_4_4)
@@ -4025,37 +4143,6 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
     else if (format == GL_ALPHA || format == GL_LUMINANCE) sourceBytes = 1;
     else sourceBytes = 4;
 
-    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
-    FrontendPlatform.control.value[0] = textureName;
-    FrontendPlatform.control.value[1] = width;
-    FrontendPlatform.control.value[2] = height;
-    FrontendPlatform.control.value[3] = requestFormat;
-#if MGLPPC_PROFILE
-    phaseStart = PerfClock();
-#endif
-    if (!PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_BEGIN,
-                      FrontendPlatform.contextId))
-        return FALSE;
-#if MGLPPC_PROFILE
-    PlatformProfile.textureDirectBeginTicks += PerfClock() - phaseStart;
-    phaseStart = PerfClock();
-#endif
-    pitch = FrontendPlatform.control.value[2];
-    bytes = FrontendPlatform.control.value[3];
-    grantedFormat = FrontendPlatform.control.value[5];
-    /* Validate the row and full span before multiplying or writing VRAM. */
-    if (!width || !height || !pitch || width > pitch / 4UL ||
-        height > bytes / pitch ||
-        FrontendPlatform.control.value[4] != context->deviceEpoch ||
-        grantedFormat != RADEON3D_FORMAT_B8G8R8A8)
-        return FALSE;
-    /* Both surface classes are written in place by the PPC through the
-     * aperture (the proven-fast discipline), and COMMIT installs
-     * without a copy (srcAddress = 0). The staging/68k-copy hybrid
-     * measured slower on every path and is retired. */
-    destination = (UBYTE *)FrontendPlatform.control.value[1];
-    if (!destination || pitch * height > 0xffffffffUL - (ULONG)destination)
-        return FALSE;
     for (row = 0; row < height; ++row) {
         const UBYTE *srcRow = source + row * sourceStride;
         UBYTE *out = destination + row * pitch;
@@ -4109,6 +4196,23 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
             }
             continue;
         }
+        if (format == MGL_UBYTE_BGRA && type == GL_UNSIGNED_BYTE &&
+            ((ULONG)out & 3UL) == 0UL) {
+            /* Canonical BGRA staging -> aperture is a byte-order-preserving
+             * dword copy on this big-endian CPU (FrontendSourceToBGRA32
+             * returns the source dword unchanged for MGL_UBYTE_BGRA). */
+            const ULONG *src32 = (const ULONG *)srcRow;
+            ULONG *out32 = (ULONG *)out;
+            ULONG *shadow32 = shadowDestination
+                ? (ULONG *)(shadowDestination + row * width * 4UL) : NULL;
+            for (column = 0; column < width; ++column) {
+                ULONG value = src32[column];
+                out32[column] = value;
+                if (shadow32)
+                    shadow32[column] = value;
+            }
+            continue;
+        }
         if (((ULONG)out & 3UL) == 0UL) {
             ULONG *out32 = (ULONG *)out;
             ULONG *shadow32 = shadowDestination
@@ -4135,7 +4239,72 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
             }
         }
     }
+}
+
+static BOOL FrontendDirectTextureUploadNamed(struct MiniGLR200Context *context,
+                                             ULONG textureName, ULONG width,
+                                             ULONG height, GLenum format,
+                                             GLenum type,
+                                             const UBYTE *source,
+                                             ULONG sourceStride,
+                                             UBYTE *shadowDestination)
+{
+    /* R5G6B5PC texture surfaces are rejected by the service's import
+     * path (verified on hardware): always request BGRA32. */
+    ULONG requestFormat = MGLPPC_TEXDIRECT_FMT_BGRA32;
+    ULONG grantedFormat;
+    ULONG pitch, bytes;
+    UBYTE *destination;
 #if MGLPPC_PROFILE
+    /* U0 direct-upload latency split: begin / convert+write / flush / commit.
+     * Enclosed by textureDirectTicks at the call sites. */
+    ULONG phaseStart;
+#endif
+
+#if MGLPPC_PROFILE
+    ULONG diagStart = PerfClock();
+#endif
+    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+    FrontendPlatform.control.value[0] = textureName;
+    FrontendPlatform.control.value[1] = width;
+    FrontendPlatform.control.value[2] = height;
+    FrontendPlatform.control.value[3] = requestFormat;
+#if MGLPPC_PROFILE
+    phaseStart = PerfClock();
+#endif
+    if (!PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_BEGIN,
+                      FrontendPlatform.contextId))
+        return FALSE;
+#if MGLPPC_PROFILE
+    SingleDiagBeginTicks += PerfClock() - diagStart;
+    diagStart = PerfClock();
+#endif
+#if MGLPPC_PROFILE
+    PlatformProfile.textureDirectBeginTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
+    pitch = FrontendPlatform.control.value[2];
+    bytes = FrontendPlatform.control.value[3];
+    grantedFormat = FrontendPlatform.control.value[5];
+    /* Validate the row and full span before multiplying or writing VRAM. */
+    if (!width || !height || !pitch || width > pitch / 4UL ||
+        height > bytes / pitch ||
+        FrontendPlatform.control.value[4] != context->deviceEpoch ||
+        grantedFormat != RADEON3D_FORMAT_B8G8R8A8)
+        return FALSE;
+    /* Both surface classes are written in place by the PPC through the
+     * aperture (the proven-fast discipline), and COMMIT installs
+     * without a copy (srcAddress = 0). The staging/68k-copy hybrid
+     * measured slower on every path and is retired. */
+    destination = (UBYTE *)FrontendPlatform.control.value[1];
+    if (!destination || pitch * height > 0xffffffffUL - (ULONG)destination)
+        return FALSE;
+    FrontendDirectWritePixels(destination, pitch, grantedFormat, source,
+                              sourceStride, width, height, format, type,
+                              shadowDestination);
+#if MGLPPC_PROFILE
+    SingleDiagWriteTicks += PerfClock() - diagStart;
+    diagStart = PerfClock();
     PlatformProfile.textureDirectWriteTicks += PerfClock() - phaseStart;
     phaseStart = PerfClock();
 #endif
@@ -4151,9 +4320,498 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
                       FrontendPlatform.contextId))
         return FALSE;
 #if MGLPPC_PROFILE
+    SingleDiagCommitTicks += PerfClock() - diagStart;
+    ++SingleDiagCalls;
     PlatformProfile.textureDirectCommitTicks += PerfClock() - phaseStart;
 #endif
     return TRUE;
+}
+
+static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
+                                        ULONG width, ULONG height,
+                                        GLenum format, GLenum type,
+                                        const UBYTE *source,
+                                        ULONG sourceStride,
+                                        UBYTE *shadowDestination)
+{
+    return FrontendDirectTextureUploadNamed(context,
+        context->boundTexture[context->activeTexture], width, height,
+        format, type, source, sourceStride, shadowDestination);
+}
+
+/* ------------------------------------------------------------------ */
+/* Batched two-tile direct upload                                      */
+/* ------------------------------------------------------------------ */
+
+#if MGLPPC_PROFILE
+/* File-based phase attribution for the two-tile batch (MGLPPC_BATCHDIAG=1):
+ * accumulated PerfClock ticks per phase, dumped at context teardown.
+ * Profile builds only: the quiet DLL must stay free of extra mftb reads. */
+static ULONG BatchDiagFrames;
+static ULONG BatchDiagPairs;
+static ULONG BatchDiagSingles;
+static ULONG BatchDiagBarrierTicks;
+static ULONG BatchDiagBeginTicks;
+static ULONG BatchDiagWriteTicks;
+static ULONG BatchDiagCommitTicks;
+static ULONG BatchDiagSingleTicks;
+
+static void BatchDiagHex(char **p, ULONG value)
+{
+    static const char digits[] = "0123456789abcdef";
+    char tmp[8];
+    int n = 0;
+    if (!value)
+        tmp[n++] = '0';
+    while (value) {
+        tmp[n++] = digits[value & 15UL];
+        value >>= 4;
+    }
+    while (n)
+        *(*p)++ = tmp[--n];
+}
+
+/* Append one phase-attribution line; called once at context teardown when
+ * MGLPPC_BATCHDIAG=1. Uses DOS writes (no stdio buffering). */
+static void BatchDiagDump(void)
+{
+    UBYTE enabled[8];
+    char buf[256];
+    char *p = buf;
+    BPTR file;
+
+    enabled[0] = 0;
+    GetVar((CONST_STRPTR)"MGLPPC_BATCHDIAG", enabled, (LONG)sizeof(enabled),
+           GVF_GLOBAL_ONLY);
+    if (enabled[0] != '1')
+        return;
+    file = Open((STRPTR)"DH2:wosbuild/batchdiag.txt", MODE_NEWFILE);
+    if (!file)
+        return;
+    *p++ = 'B'; *p++ = 'A'; *p++ = 'T'; *p++ = 'C'; *p++ = 'H';
+    *p++ = 'D'; *p++ = 'I'; *p++ = 'A'; *p++ = 'G';
+#define BATCHDIAG_FIELD(label, value)     do { *p++ = ' '; { const char *q = (label);          while (*q) *p++ = *q++; } *p++ = '=';          BatchDiagHex(&p, (value)); } while (0)
+    BATCHDIAG_FIELD("pairs", BatchDiagPairs);
+    BATCHDIAG_FIELD("singles", BatchDiagSingles);
+    BATCHDIAG_FIELD("barrier", BatchDiagBarrierTicks);
+    BATCHDIAG_FIELD("begin", BatchDiagBeginTicks);
+    BATCHDIAG_FIELD("write", BatchDiagWriteTicks);
+    BATCHDIAG_FIELD("commit", BatchDiagCommitTicks);
+    BATCHDIAG_FIELD("single", BatchDiagSingleTicks);
+    BATCHDIAG_FIELD("scalls", SingleDiagCalls);
+    BATCHDIAG_FIELD("sbegin", SingleDiagBeginTicks);
+    BATCHDIAG_FIELD("swrite", SingleDiagWriteTicks);
+    BATCHDIAG_FIELD("scommit", SingleDiagCommitTicks);
+    BATCHDIAG_FIELD("hz", PlatformClockRate);
+#undef BATCHDIAG_FIELD
+    *p++ = '\n';
+    Write(file, buf, (LONG)(p - buf));
+    Close(file);
+}
+
+#endif /* MGLPPC_PROFILE */
+
+/* Staged-tile outcome codes for FrontendDirectBatchOffer. */
+#define R200_BATCH_NONE 0      /* nothing pending; ordinary path applies */
+#define R200_BATCH_DEFERRED 1  /* current tile staged, BEGIN deferred */
+#define R200_BATCH_DONE 2      /* pending + current uploaded as one pair */
+#define R200_BATCH_FALLBACK 3  /* pending consumed; current still to upload */
+
+static void FrontendPendingDirectTake(R200PPCPendingDirectUpload *pending)
+{
+    pending->textureName = FrontendPlatform.pendingDirectName;
+    pending->width = FrontendPlatform.pendingDirectWidth;
+    pending->height = FrontendPlatform.pendingDirectHeight;
+    pending->shadowName = FrontendPlatform.pendingDirectShadowName;
+    pending->epoch = FrontendPlatform.pendingDirectEpoch;
+    pending->staging = FrontendPlatform.pendingDirectStaging;
+    pending->stagingIsShadow = FrontendPlatform.pendingDirectStagingIsShadow;
+    FrontendPlatform.pendingDirectActive = FALSE;
+}
+
+static void FrontendDirectAbort(ULONG textureName)
+{
+    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+    FrontendPlatform.control.value[0] = textureName;
+    (void)PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_ABORT,
+                       FrontendPlatform.contextId);
+}
+
+/* Copy an already-uploaded tile into the retained shadow of `shadowName`
+ * when that texture owns one and the tile was not written there in the
+ * first place. Mirrors the single-tile path's post-commit shadow staging
+ * (unit-0 keying). The source layout is the caller's upload layout. */
+static void FrontendShadowStageSource(struct MiniGLR200Context *context,
+                                      ULONG shadowName, const UBYTE *source,
+                                      ULONG width, ULONG height,
+                                      GLenum format, GLenum type,
+                                      ULONG sourceBytes, ULONG rowBytes,
+                                      ULONG sourceStride)
+{
+    struct TextureObject *target;
+
+    if (!shadowName || shadowName >= MAX_TEXTURES)
+        return;
+    target = &context->textures[shadowName];
+    if (FrontendShadowEnsure(context, target, width, height))
+        FrontendStageTextureBGRA(target->shadow, source, width, height,
+            format, type, sourceBytes, rowBytes, sourceStride);
+}
+
+/* Ordinary single-tile direct upload of one staged tile: BEGIN, fill the
+ * aperture from the staged BGRA image, COMMIT, mirror. The caller must
+ * have drained the pipeline before this call. */
+static BOOL FrontendPendingUploadCommitStaged(
+    struct MiniGLR200Context *context,
+    const R200PPCPendingDirectUpload *pending)
+{
+    ULONG name = pending->textureName;
+    UBYTE *shadowDestination = NULL;
+    struct TextureObject *shadowTarget = NULL;
+    BOOL fused = FALSE;
+
+    if (!name || name >= MAX_TEXTURES || !context->textures[name].generated)
+        return FALSE;
+    if (!pending->staging)
+        return FALSE;
+    if (pending->stagingIsShadow &&
+        context->textures[name].shadow != pending->staging) {
+        /* The retained shadow that held the staged tile vanished; there is
+         * nothing safe left to upload. */
+        FrontendInvalidateTextureMirror(context, name);
+        SetError(context, GL_INVALID_OPERATION);
+        return FALSE;
+    }
+    if (!pending->stagingIsShadow && pending->shadowName &&
+        pending->shadowName < MAX_TEXTURES) {
+        shadowTarget = &context->textures[pending->shadowName];
+        fused = shadowTarget == &context->textures[name] &&
+                FrontendShadowEnsure(context, shadowTarget, pending->width,
+                                     pending->height);
+        if (fused)
+            shadowDestination = shadowTarget->shadow;
+    }
+    {
+#if MGLPPC_PROFILE
+    ULONG phaseStart = PerfClock();
+#endif
+    if (!FrontendDirectTextureUploadNamed(context, name, pending->width,
+            pending->height, MGL_UBYTE_BGRA, GL_UNSIGNED_BYTE, pending->staging,
+            pending->width * 4UL, shadowDestination)) {
+#if MGLPPC_PROFILE
+        BatchDiagSingleTicks += PerfClock() - phaseStart;
+        ++BatchDiagSingles;
+#endif
+        FrontendInvalidateTextureMirror(context, name);
+        SetError(context, GL_INVALID_OPERATION);
+        return FALSE;
+    }
+    if (!FrontendPlatform.control.value[1] ||
+        FrontendPlatform.control.value[2] != pending->width ||
+        FrontendPlatform.control.value[3] != pending->height ||
+        !FrontendPlatform.control.value[4] ||
+        !FrontendPlatform.control.value[5] ||
+        FrontendPlatform.control.value[7] != context->deviceEpoch) {
+        FrontendInvalidateTextureMirror(context, name);
+        SetError(context, GL_INVALID_OPERATION);
+        return FALSE;
+    }
+#if MGLPPC_PROFILE
+    BatchDiagSingleTicks += PerfClock() - phaseStart;
+    ++BatchDiagSingles;
+#endif
+    }
+    FrontendMirrorTextureValues(context, name,
+        FrontendPlatform.control.value[1], FrontendPlatform.control.value[2],
+        FrontendPlatform.control.value[3], FrontendPlatform.control.value[4],
+        FrontendPlatform.control.value[5], FrontendPlatform.control.value[6],
+        FrontendPlatform.control.value[7]);
+    if (!pending->stagingIsShadow && !shadowDestination)
+        FrontendShadowStageSource(context, pending->shadowName,
+                                  pending->staging, pending->width,
+                                  pending->height, MGL_UBYTE_BGRA,
+                                  GL_UNSIGNED_BYTE, 4UL,
+                                  pending->width * 4UL, pending->width * 4UL);
+    return TRUE;
+}
+
+/* Complete (or discard) a deferred first tile. Safe to call from any
+ * dispatch entry: it re-enters no flush hook, because the pending flag is
+ * cleared before the pipeline is drained. */
+BOOL R200PPCPendingUploadFlush(struct MiniGLR200Context *context)
+{
+    R200PPCPendingDirectUpload pending;
+
+    if (!FrontendPlatform.pendingDirectActive)
+        return TRUE;
+    /* Take ownership before any call below can re-enter a flush hook. */
+    FrontendPendingDirectTake(&pending);
+    if (!context || !FrontendPlatform.opened ||
+        FrontendPlatform.mailboxAbandoned ||
+        !(FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1))
+        return TRUE;
+    if (pending.epoch != context->deviceEpoch)
+        return TRUE;
+    if (!PlatformMailboxReady() ||
+        !FlushScreenVertices(context) || !Submit(context) ||
+        (FrontendPlatform.ring && !R200PPCPlatformBarrier(context, FALSE))) {
+        if (pending.textureName && pending.textureName < MAX_TEXTURES)
+            FrontendInvalidateTextureMirror(context, pending.textureName);
+        SetError(context, GL_INVALID_OPERATION);
+        return FALSE;
+    }
+    return FrontendPendingUploadCommitStaged(context, &pending);
+}
+
+/* Two-tile attempt: the pending first tile plus the current upload, one
+ * BEGIN2 + one COMMIT2. Returns R200_BATCH_NONE when the pair does not
+ * match (the caller's ordinary path then applies). */
+static int FrontendDirectBatchTry(struct MiniGLR200Context *context,
+                                  ULONG width, ULONG height, GLenum format,
+                                  GLenum type, const UBYTE *source,
+                                  ULONG sourceStride)
+{
+    R200PPCPendingDirectUpload pending;
+    ULONG nameB = context->boundTexture[context->activeTexture];
+    ULONG addrA, pitchA, addrB, pitchB, fmtA, fmtB, epoch, mask;
+    ULONG stagingBytes = width * height * 4UL;
+    UBYTE *destA, *destB, *shadowA = NULL, *shadowB = NULL;
+    struct TextureObject *shadowTargetA, *shadowTargetB;
+    BOOL fusedA = FALSE, fusedB = FALSE;
+
+    if (!FrontendPlatform.pendingDirectActive)
+        return R200_BATCH_NONE;
+    if (FrontendPlatform.batchDisabled) {
+        FrontendPlatform.pendingDirectActive = FALSE;
+        return R200_BATCH_NONE;
+    }
+    FrontendPendingDirectTake(&pending);
+    if (pending.epoch != context->deviceEpoch ||
+        format != GL_RGB || type != MGL_UNSIGNED_SHORT_5_6_5 ||
+        !nameB || nameB >= MAX_TEXTURES || nameB == pending.textureName ||
+        !width || !height || !stagingBytes ||
+        stagingBytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES ||
+        !PlatformMailboxReady() || FrontendPlatform.mailboxAbandoned ||
+        context->insideBegin) {
+        FrontendPlatform.pendingDirectActive = TRUE;
+        return R200_BATCH_NONE;
+    }
+    /* The batch owns the pending state from here. */
+    {
+#if MGLPPC_PROFILE
+    ULONG phaseStart = PerfClock();
+#endif
+    if (!FlushScreenVertices(context) || !Submit(context) ||
+        (FrontendPlatform.ring && !R200PPCPlatformBarrier(context, FALSE))) {
+        if (pending.textureName && pending.textureName < MAX_TEXTURES)
+            FrontendInvalidateTextureMirror(context, pending.textureName);
+        SetError(context, GL_INVALID_OPERATION);
+        return R200_BATCH_FALLBACK;
+    }
+#if MGLPPC_PROFILE
+    BatchDiagBarrierTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
+    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+    FrontendPlatform.control.value[0] = pending.textureName;
+    FrontendPlatform.control.value[1] = pending.width;
+    FrontendPlatform.control.value[2] = pending.height;
+    FrontendPlatform.control.value[3] = MGLPPC_TEXDIRECT_FMT_BGRA32;
+    FrontendPlatform.control.value[4] = nameB;
+    FrontendPlatform.control.value[5] = width;
+    FrontendPlatform.control.value[6] = height;
+    FrontendPlatform.control.value[7] = MGLPPC_TEXDIRECT_FMT_BGRA32;
+    if (!PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2,
+                      FrontendPlatform.contextId)) {
+        /* The host aborts a partially begun pair before replying: finish
+         * tile A through the ordinary path so it is not lost, then let the
+         * caller upload the current tile its usual way. */
+        (void)FrontendPendingUploadCommitStaged(context, &pending);
+        return R200_BATCH_FALLBACK;
+    }
+#if MGLPPC_PROFILE
+    BatchDiagBeginTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
+    addrA = FrontendPlatform.control.value[1];
+    pitchA = FrontendPlatform.control.value[2];
+    addrB = FrontendPlatform.control.value[3];
+    pitchB = FrontendPlatform.control.value[4];
+    fmtA = FrontendPlatform.control.value[5];
+    fmtB = FrontendPlatform.control.value[6];
+    epoch = FrontendPlatform.control.value[7];
+    if (!addrA || !pitchA || !addrB || !pitchB ||
+        !pending.width || !pending.height ||
+        pending.width > pitchA / 4UL || width > pitchB / 4UL ||
+        pitchA > (0xffffffffUL - addrA) / pending.height ||
+        pitchB > (0xffffffffUL - addrB) / height ||
+        fmtA != RADEON3D_FORMAT_B8G8R8A8 ||
+        fmtB != RADEON3D_FORMAT_B8G8R8A8 ||
+        epoch != context->deviceEpoch) {
+        FrontendDirectAbort(pending.textureName);
+        FrontendDirectAbort(nameB);
+        (void)FrontendPendingUploadCommitStaged(context, &pending);
+        return R200_BATCH_FALLBACK;
+    }
+    destA = (UBYTE *)addrA;
+    destB = (UBYTE *)addrB;
+    /* Tile A owns its shadow when the staging buffer is that shadow. */
+    if (!pending.stagingIsShadow && pending.shadowName &&
+        pending.shadowName < MAX_TEXTURES) {
+        shadowTargetA = &context->textures[pending.shadowName];
+        fusedA = shadowTargetA == &context->textures[pending.textureName] &&
+                 FrontendShadowEnsure(context, shadowTargetA, pending.width,
+                                      pending.height);
+        if (fusedA)
+            shadowA = shadowTargetA->shadow;
+    }
+    FrontendDirectWritePixels(destA, pitchA, RADEON3D_FORMAT_B8G8R8A8,
+                              pending.staging, pending.width * 4UL,
+                              pending.width, pending.height, MGL_UBYTE_BGRA,
+                              GL_UNSIGNED_BYTE, shadowA);
+    MGLPPCFlushDataRange((APTR)destA, pitchA * pending.height);
+    /* Tile B uses the caller's source layout; fuse its shadow the same way
+     * the single-tile path does. */
+    if (context->boundTexture[0] &&
+        context->boundTexture[0] < MAX_TEXTURES) {
+        shadowTargetB = &context->textures[context->boundTexture[0]];
+        fusedB = shadowTargetB == &context->textures[nameB] &&
+                 FrontendShadowEnsure(context, shadowTargetB, width, height);
+        if (fusedB)
+            shadowB = shadowTargetB->shadow;
+    }
+    FrontendDirectWritePixels(destB, pitchB, RADEON3D_FORMAT_B8G8R8A8,
+                              source, sourceStride, width, height, format,
+                              type, shadowB);
+    MGLPPCFlushDataRange((APTR)destB, pitchB * height);
+#if MGLPPC_PROFILE
+    BatchDiagWriteTicks += PerfClock() - phaseStart;
+    phaseStart = PerfClock();
+#endif
+    memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+    FrontendPlatform.control.value[0] = pending.textureName;
+    FrontendPlatform.control.value[1] = 0UL;
+    FrontendPlatform.control.value[2] = nameB;
+    FrontendPlatform.control.value[3] = 0UL;
+    (void)PlatformCall(MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2,
+                       FrontendPlatform.contextId);
+#if MGLPPC_PROFILE
+    BatchDiagCommitTicks += PerfClock() - phaseStart;
+    ++BatchDiagPairs;
+#endif
+    }
+    /* value[3] is the device epoch in every COMMIT2 reply and 0 in the
+     * request, so a stale/refused reply cannot look committed. A lost
+     * reply must never be treated as a partial success. */
+    mask = (!FrontendPlatform.mailboxAbandoned &&
+            FrontendPlatform.control.value[3] == context->deviceEpoch)
+        ? (FrontendPlatform.control.value[0] & 3UL) : 0UL;
+    if ((mask & 1UL) && FrontendPlatform.control.value[1])
+        FrontendMirrorTextureValues(context, pending.textureName,
+            FrontendPlatform.control.value[1], pending.width, pending.height,
+            FrontendPlatform.control.value[6] & 0xffffUL,
+            FrontendPlatform.control.value[6] >> 16,
+            FrontendPlatform.control.value[4],
+            FrontendPlatform.control.value[3]);
+    else {
+        mask &= ~1UL;
+        FrontendInvalidateTextureMirror(context, pending.textureName);
+    }
+    if ((mask & 2UL) && FrontendPlatform.control.value[2])
+        FrontendMirrorTextureValues(context, nameB,
+            FrontendPlatform.control.value[2], width, height,
+            FrontendPlatform.control.value[7] & 0xffffUL,
+            FrontendPlatform.control.value[7] >> 16,
+            FrontendPlatform.control.value[5],
+            FrontendPlatform.control.value[3]);
+    else {
+        mask &= ~2UL;
+        FrontendInvalidateTextureMirror(context, nameB);
+    }
+    if ((mask & 3UL) != 3UL) {
+        SetError(context, GL_INVALID_OPERATION);
+        return R200_BATCH_FALLBACK;
+    }
+    if (!pending.stagingIsShadow && !shadowA)
+        FrontendShadowStageSource(context, pending.shadowName,
+                                  pending.staging, pending.width,
+                                  pending.height, MGL_UBYTE_BGRA,
+                                  GL_UNSIGNED_BYTE, 4UL,
+                                  pending.width * 4UL, pending.width * 4UL);
+    if (!fusedB)
+        FrontendShadowStageSource(context, context->boundTexture[0], source,
+                                  width, height, format, type,
+                                  MGLPPC_TEXTURE_SOURCE_BYTES(format, type),
+                                  width * 2UL, sourceStride);
+#if MGLPPC_PROFILE
+    ++BatchDiagFrames;
+#endif
+    return R200_BATCH_DONE;
+}
+
+/* Queue the current upload as the first tile of a pair when it is the
+ * 565 shape the batched path was built for; otherwise complete any
+ * deferred tile through the ordinary path. The caller has already
+ * validated the direct-path eligibility of the current upload. */
+static int FrontendDirectBatchOffer(struct MiniGLR200Context *context,
+                                    ULONG width, ULONG height, GLenum format,
+                                    GLenum type, const UBYTE *source,
+                                    ULONG sourceStride)
+{
+    ULONG textureName = context->boundTexture[context->activeTexture];
+    ULONG stagingBytes = width * height * 4UL;
+    struct TextureObject *shadowTarget;
+    UBYTE *staging;
+    BOOL stagingIsShadow = FALSE;
+
+    if (FrontendPlatform.pendingDirectActive) {
+        int result = FrontendDirectBatchTry(context, width, height, format,
+                                            type, source, sourceStride);
+        if (result != R200_BATCH_NONE)
+            return result;
+        /* Incompatible second upload: finish tile A before this call can
+         * invalidate its staging (same-texture redefinition, shadow free,
+         * buffer reuse). */
+        if (!R200PPCPendingUploadFlush(context))
+            return R200_BATCH_FALLBACK;
+    }
+    if (FrontendPlatform.batchDisabled ||
+        !(FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1) ||
+        format != GL_RGB || type != MGL_UNSIGNED_SHORT_5_6_5 ||
+        context->insideBegin || !stagingBytes ||
+        stagingBytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES ||
+        !PlatformMailboxReady() || FrontendPlatform.mailboxAbandoned)
+        return R200_BATCH_NONE;
+    if (!textureName || textureName >= MAX_TEXTURES ||
+        !context->textures[textureName].generated)
+        return R200_BATCH_NONE;
+    /* Stage the converted tile in PPC memory: the texture's own retained
+     * shadow when it owns one (no extra copy), otherwise the shared upload
+     * buffer, whose only other users flush the pending tile first. */
+    shadowTarget = (context->boundTexture[0] &&
+                    context->boundTexture[0] < MAX_TEXTURES)
+        ? &context->textures[context->boundTexture[0]] : NULL;
+    if (shadowTarget == &context->textures[textureName] &&
+        FrontendShadowEnsure(context, shadowTarget, width, height)) {
+        staging = shadowTarget->shadow;
+        stagingIsShadow = TRUE;
+    } else {
+        if (!FrontendEnsureTextureUploadBuffer(stagingBytes))
+            return R200_BATCH_NONE;
+        staging = FrontendPlatform.textureUploadBuffer;
+    }
+    FrontendStageTextureBGRA(staging, source, width, height, GL_RGB,
+                             MGL_UNSIGNED_SHORT_5_6_5, 2UL, width * 2UL,
+                             sourceStride);
+    FrontendPlatform.pendingDirectActive = TRUE;
+    FrontendPlatform.pendingDirectName = textureName;
+    FrontendPlatform.pendingDirectWidth = width;
+    FrontendPlatform.pendingDirectHeight = height;
+    FrontendPlatform.pendingDirectShadowName = context->boundTexture[0];
+    FrontendPlatform.pendingDirectEpoch = context->deviceEpoch;
+    FrontendPlatform.pendingDirectStaging = staging;
+    FrontendPlatform.pendingDirectStagingIsShadow = stagingIsShadow;
+    return R200_BATCH_DEFERRED;
 }
 
 /* EXT_paletted_texture internalformat (Quake gl_draw.c:30). No stack
@@ -4292,6 +4950,23 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
         !(width & (width - 1UL)) && !(height & (height - 1UL))) {
         UBYTE *fusedShadow = NULL;
+        /* Two-tile batching: a 565 upload is either queued as the first
+         * tile of a pair, paired with the deferred first tile, or the
+         * deferred tile is completed before this upload proceeds. */
+        {
+            int batch = FrontendDirectBatchOffer(context, (ULONG)width,
+                                                 (ULONG)height, format, type,
+                                                 source + sourceOffset,
+                                                 sourceStride);
+            if (batch == R200_BATCH_DEFERRED || batch == R200_BATCH_DONE) {
+#if MGLPPC_PROFILE
+                PlatformProfile.textureDirectCalls++;
+                if (batch == R200_BATCH_DONE)
+                    PlatformProfile.textureSuccesses++;
+#endif
+                return;
+            }
+        }
         /* Publish old texture snapshots before BEGIN can replace their handle.
          * Mailbox dispatch precedes RingPoll on the host: consume the ring
          * first, but leave the GPU fence wait to BEGIN's DrainSemanticFence. */
@@ -4392,6 +5067,11 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
             SetError(context, GL_INVALID_OPERATION);
             return;
         }
+    } else if (!R200PPCPendingUploadFlush(context)) {
+        /* Not direct-eligible: complete a deferred first tile before the
+         * shared path can free/replace the staging shadow. */
+        SetError(context, GL_INVALID_OPERATION);
+        return;
     }
     if (!FrontendTextureBarrier(context)) return;
 
@@ -4670,6 +5350,13 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+    /* A deferred direct tile owns the texture's shadow (its staging) and
+     * the shared upload buffer; complete it before either can be patched,
+     * freed, or reused. */
+    if (!R200PPCPendingUploadFlush(context)) {
+        SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
     /* Fast path: a retained direct-eligible shadow lets this subimage
      * patch PPC-side memory and re-commit the WHOLE image through the
      * direct pipeline (fresh BEGIN surface per commit, aperture-rate
@@ -4819,6 +5506,10 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
         return;
     }
     if (!count) return;
+    /* Freeing a texture's retained shadow must not free a deferred tile's
+     * staging; the flush also keeps the native handle mirrored. */
+    if (!R200PPCPendingUploadFlush(context))
+        return;
     FrontendPlatform.nativeBindingKnown = FALSE;
     /* The host resets its shadow binding when a deleted name was bound;
      * force a resync before the next shadow-consuming upload. */

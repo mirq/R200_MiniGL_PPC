@@ -62,7 +62,9 @@ static ULONG IdleActiveTicks, IdleRenderTicks, IdleWakeBacklog;
  * CP path; semantic batches are bounded by the four vertex segments. Without
  * the cap the queue never exceeds one entry and the host drains per
  * dispatch, exactly as before. */
+#ifndef MGLPPC_INFLIGHT_SLOTS
 #define MGLPPC_INFLIGHT_SLOTS MGLPPC_RING_SLOTS
+#endif
 
 typedef struct MGLPPCHostState {
     int backendOpen;
@@ -459,9 +461,13 @@ static BOOL BeginBackendDirectTexture(ULONG textureName, ULONG width,
     }
     if (!bridge->cpuAddress || !bridge->pitch || !bridge->bytes ||
         !bridge->deviceEpoch) {
-        printf("host: dbeg nativefail err=%04lx fmt=%lu\n",
+        printf("host: dbeg nativefail err=%04lx fmt=%lu tex=%lu %lux%lu "
+               "req=%lu\n",
                (unsigned long)glGetError(),
-               (unsigned long)bridge->format);
+               (unsigned long)bridge->format,
+               (unsigned long)textureName,
+               (unsigned long)width, (unsigned long)height,
+               (unsigned long)requestFormat);
         fflush(stdout);
         return FALSE;
     }
@@ -670,6 +676,11 @@ static ULONG HostDirectBeginCount;
 static ULONG HostDirectBeginTicks;
 static ULONG HostDirectCommitCount;
 static ULONG HostDirectCommitTicks;
+/* Batched two-tile rounds: BEGIN2/COMMIT2 message counts, profiled builds. */
+static ULONG HostDirectBegin2Count;
+static ULONG HostDirectBegin2Ticks;
+static ULONG HostDirectCommit2Count;
+static ULONG HostDirectCommit2Ticks;
 static ULONG HostIdleTicks;
 static ULONG HostWallStart;
 static ULONG HostWallTicks;
@@ -841,15 +852,24 @@ static void HostTraceLine(const char *line)
 #define HOST_STAGE(field, stage) do { } while (0)
 #endif
 
-static BOOL DiscardSemantic(MGLPPCHostState *state)
+static BOOL DiscardSemantic(MGLPPCHostState *state, BOOL force)
 {
     /* A lifecycle request is the producer's quiescence handshake. Never
      * release GPU-readable leases after an error or an unconsumed publish. */
+    BOOL ok = TRUE;
     if (state->cpSegmentLeased &&
         (state->cpFailed || (state->ringControl &&
          (state->ringControl->error || state->ringCompleted != state->ringControl->head)) ||
-         !DrainSemanticFence(state)))
-        return FALSE;
+         !DrainSemanticFence(state))) {
+        if (!force)
+            return FALSE;
+        /* Forced teardown (DESTROY_CONTEXT after a dead ring): proceed
+         * best-effort. Bailing here would hold the context -- and with it
+         * the display and the port -- until the next cold boot. The bounded
+         * fence drain in the body below is the best remaining attempt, and
+         * a GPU that ignores fences only recovers by reboot either way. */
+        ok = FALSE;
+    }
     /* Main loop drains published mailbox work before any lifecycle message. */
     state->mailbox = NULL;
     (void)DrainSemanticFence(state);
@@ -907,7 +927,7 @@ static BOOL DiscardSemantic(MGLPPCHostState *state)
         Radeon9200Base = NULL;
         state->semanticDriverOpen = 0;
     }
-    return TRUE;
+    return ok;
 }
 
 static BOOL RegisterSemanticSlots(MGLPPCMessage *message,
@@ -1278,7 +1298,7 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
 failed:
     /* Only reached after this attempt opened the driver. Live registrations
      * are rejected above, before acquiring or releasing any resources. */
-    DiscardSemantic(state);
+    (void)DiscardSemantic(state, FALSE);
     return FALSE;
 }
 
@@ -1403,6 +1423,11 @@ failed:
     return FALSE;
 }
 
+/* Diagnostics: which ExecuteCpEntry check rejected the entry. Set on every
+ * failure path so the caller can print the stage; failure-only, so quiet
+ * runs are unaffected. */
+static const char *CpFailStage;
+
 static BOOL ExecuteCpEntry(MGLPPCHostState *state,
                            const MGLPPCRingEntryV1 *entry, ULONG *payload)
 {
@@ -1412,10 +1437,12 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
 #if MGLPPC_PROFILE
     ULONG cpStage, cpEntryStart;
 #endif
+    CpFailStage = "state";
     if (!state->cpEnabled || state->cpFailed || !state->cpSegmentLeased ||
         entry->flags != MGLPPC_SEMANTIC_FLAG_CP_EMIT || entry->dwords != 3UL ||
         entry->slot != state->ringCompleted % MGLPPC_RING_SLOTS)
         return FALSE;
+    CpFailStage = "payload";
     CacheClearE(payload, 3UL * sizeof(ULONG), CACRF_ClearD);
     memset(&indirect, 0, sizeof(indirect));
     indirect.Size = sizeof(indirect);
@@ -1438,19 +1465,24 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
      * validated single-outstanding-fence model. */
     if (state->fenceCount >= MGLPPC_INFLIGHT_SLOTS ||
         !(state->ringRadeonCaps & RADEON3D_CAP_MULTI_FENCE)) {
+        CpFailStage = "drain";
         if (!DrainSemanticFence(state)) {
             HOST_STAGE(HostCpDrainTicks, cpStage);
             return FALSE;
         }
     }
     HOST_STAGE(HostCpDrainTicks, cpStage);
+    CpFailStage = "bridge";
     if (!QueryBackendBridgeV2(&bridge) ||
         bridge.deviceEpoch != state->ringDeviceEpoch ||
         bridge.deviceToken != state->ringDeviceToken ||
         !Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
-                                  &indirect, &fence) || !fence)
+                                  &indirect, &fence) || !fence) {
+        CpFailStage = "dispatch";
         return FALSE;
+    }
     HOST_STAGE(HostCpDispatchTicks, cpStage);
+    CpFailStage = "record";
     if (!RecordFence(state, state->ringCompleted, fence, mask))
         return FALSE;
     /* Sanity only: the PPC stamped the target it observed through the v6
@@ -1696,6 +1728,16 @@ static ULONG RingPoll(MGLPPCHostState *state)
         }
         if (entry.flags & MGLPPC_SEMANTIC_FLAG_CP_EMIT) {
             if (!ExecuteCpEntry(state, &entry, slotAddr)) {
+                printf("MiniGLPPC host: cp_emit_fail stage=%s slot=%lu "
+                       "dwords=%lu gen=%lu last=%lu fences=%lu disp=%lu\n",
+                       CpFailStage ? CpFailStage : "none",
+                       (unsigned long)entry.slot,
+                       (unsigned long)entry.dwords,
+                       (unsigned long)entry.generation,
+                       (unsigned long)state->ringLastGen[entry.slot],
+                       (unsigned long)state->fenceCount,
+                       (unsigned long)state->cpDispatches);
+                fflush(stdout);
                 state->cpFailed = TRUE;
                 control->error = 1;
                 CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
@@ -1815,11 +1857,28 @@ static ULONG RingPoll(MGLPPCHostState *state)
             batch.DrawCount = draws;
             batch.Flags = RADEON3D_SUBMIT_FENCE;
             HOST_START(stageStart);
+            /* Diagnostic: sentinel so a FALSE return that wrote no stage
+             * (paths that cannot fill fenceOut) is distinguishable from 0. */
+            fence = 0xC0DE0000UL;
             if (!Radeon3DCommitStateBatch(
                     (struct Radeon3DDevice *)bridge.deviceToken,
                     &batch, &fence)) {
                 struct Radeon3DInfo info;
                 BOOL retry = FALSE;
+
+                printf("host: sbcommit_fail fence=%08lx hdr=%lu draws=%lu "
+                       "prim=%lu seg=%lu gen=%lu gen_drv=%lu epoch=%lu "
+                       "token=%08lx\n",
+                       (unsigned long)fence,
+                       (unsigned long)headerDwords,
+                       (unsigned long)draws,
+                       (unsigned long)batch.Primitive,
+                       (unsigned long)segmentIx,
+                       (unsigned long)batch.Generation,
+                       (unsigned long)state->ringDeviceGeneration,
+                       (unsigned long)bridge.deviceEpoch,
+                       (unsigned long)bridge.colorSurfaceToken);
+                fflush(stdout);
 
                 bridgeValid = FALSE;
                 memset(&info, 0, sizeof(info));
@@ -2778,7 +2837,9 @@ static void HandleMessage(MGLPPCMessage *message,
                             | MGLPPC_CAP_INDIRECT | MGLPPC_CAP_CP_EMIT
                             | (state->mailboxDisabled ? 0UL :
                                (MGLPPC_CAP_MAILBOX_V1 |
-                                MGLPPC_CAP_MAILBOX_UPLOAD_SHARED))
+                                MGLPPC_CAP_MAILBOX_UPLOAD_SHARED |
+                                (state->directDisabled ? 0UL :
+                                 MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1)))
 #endif
 #ifdef MGLPPC_HOST_VERIFY_CRC
                             ;
@@ -2794,7 +2855,7 @@ static void HandleMessage(MGLPPCMessage *message,
 #if MGLPPC_PROFILE
         HostNativeProfileCapture(state);
 #endif
-        if (!DiscardSemantic(state)) {
+        if (!DiscardSemantic(state, FALSE)) {
             message->status = MGLPPC_STATUS_GL_ERROR;
             break;
         }
@@ -2924,10 +2985,11 @@ static void HandleMessage(MGLPPCMessage *message,
 #if MGLPPC_PROFILE
         HostNativeProfileCapture(state);
 #endif
-        if (!DiscardSemantic(state)) {
+        /* Force the release: a dead ring must not hold the context (and the
+         * display) until reboot. An error status is reported but the
+         * context is released regardless. */
+        if (!DiscardSemantic(state, TRUE))
             message->status = MGLPPC_STATUS_GL_ERROR;
-            break;
-        }
         mglDeleteContext();
         DiscardUpload(state);
         state->context = NULL;
@@ -3176,6 +3238,127 @@ static void HandleMessage(MGLPPCMessage *message,
             break;
         }
         AbortBackendDirectTexture(message->value[0]);
+        }
+        break;
+    case MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2:
+        {
+        MGLR200PrivateTexDirectBeginV2 bridgeA, bridgeB;
+        BOOL okA, okB;
+        if (state->context == NULL || message->contextId != state->contextId) {
+            message->status = MGLPPC_STATUS_NO_CONTEXT;
+            break;
+        }
+        if (message->value[0] == message->value[4] || !message->value[0] ||
+            !message->value[4]) {
+            /* Two distinct named textures are required: the second Begin
+             * would release the first tile's pending allocation. */
+            message->status = MGLPPC_STATUS_BAD_PAYLOAD;
+            break;
+        }
+        if (!DrainSemanticFence(state)) {
+            message->status = MGLPPC_STATUS_GL_ERROR;
+            break;
+        }
+        {
+        ULONG t0 = state->verboseUploads ? ProbeTicks() : 0;
+        okA = BeginBackendDirectTexture(message->value[0], message->value[1],
+                                        message->value[2], message->value[3],
+                                        &bridgeA);
+        okB = okA ? BeginBackendDirectTexture(message->value[4],
+                                              message->value[5],
+                                              message->value[6],
+                                              message->value[7], &bridgeB)
+                  : FALSE;
+        if (okA)
+            ++state->uploadCount;
+        if (okB)
+            ++state->uploadCount;
+        if (!okA || !okB)
+            ++state->uploadFails;
+        if (state->verboseUploads) {
+            printf("host: dbeg2 n=%lu tex=%lu %lux%lu tex=%lu %lux%lu ok=%d ticks=%lu "
+                   "hz=%lu addr=%08lx/%08lx pitch=%lu/%lu\n",
+                   (unsigned long)state->uploadCount,
+                   (unsigned long)message->value[0],
+                   (unsigned long)message->value[1],
+                   (unsigned long)message->value[2],
+                   (unsigned long)message->value[4],
+                   (unsigned long)message->value[5],
+                   (unsigned long)message->value[6],
+                   okA && okB ? 1 : 0,
+                   (unsigned long)(ProbeTicks() - t0),
+                   (unsigned long)TimerClockRate,
+                   (unsigned long)bridgeA.cpuAddress,
+                   (unsigned long)bridgeB.cpuAddress,
+                   (unsigned long)bridgeA.pitch,
+                   (unsigned long)bridgeB.pitch);
+            fflush(stdout);
+        }
+        }
+        if (!okA || !okB) {
+            /* Transactional: never leave a half-begun pair behind. */
+            if (okA)
+                AbortBackendDirectTexture(message->value[0]);
+            if (okB)
+                AbortBackendDirectTexture(message->value[4]);
+            message->status = MGLPPC_STATUS_GL_ERROR;
+            break;
+        }
+        message->value[0] = 0;
+        message->value[1] = bridgeA.cpuAddress;
+        message->value[2] = bridgeA.pitch;
+        message->value[3] = bridgeB.cpuAddress;
+        message->value[4] = bridgeB.pitch;
+        message->value[5] = bridgeA.format;
+        message->value[6] = bridgeB.format;
+        message->value[7] = bridgeA.deviceEpoch;
+        }
+        break;
+    case MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2:
+        {
+        MGLR200PrivateTexDirectCommitV2 bridgeA, bridgeB;
+        BOOL okA, okB;
+        if (state->context == NULL || message->contextId != state->contextId) {
+            message->status = MGLPPC_STATUS_NO_CONTEXT;
+            break;
+        }
+        if (message->value[0] == message->value[2] || !message->value[0] ||
+            !message->value[2]) {
+            message->status = MGLPPC_STATUS_BAD_PAYLOAD;
+            break;
+        }
+        /* Deliberately no DrainSemanticFence: both filled surfaces are
+         * fresh, so installing them must not wait for the pipeline. */
+        {
+        ULONG t0 = state->verboseUploads ? ProbeTicks() : 0;
+        okA = CommitBackendDirectTexture(message->value[0], message->value[1],
+                                         &bridgeA);
+        okB = CommitBackendDirectTexture(message->value[2], message->value[3],
+                                         &bridgeB);
+        if (state->verboseUploads) {
+            printf("host: dcom2 tex=%lu ok=%d token=%08lx tex=%lu ok=%d token=%08lx "
+                   "ticks=%lu hz=%lu\n",
+                   (unsigned long)message->value[0], okA ? 1 : 0,
+                   (unsigned long)bridgeA.surfaceToken,
+                   (unsigned long)message->value[2], okB ? 1 : 0,
+                   (unsigned long)bridgeB.surfaceToken,
+                   (unsigned long)(ProbeTicks() - t0),
+                   (unsigned long)TimerClockRate);
+            fflush(stdout);
+        }
+        }
+        message->value[0] = (okA ? 1UL : 0UL) | (okB ? 2UL : 0UL);
+        message->value[1] = bridgeA.surfaceToken;
+        message->value[2] = bridgeB.surfaceToken;
+        message->value[3] = bridgeA.deviceEpoch;
+        message->value[4] = bridgeA.contentSerial;
+        message->value[5] = bridgeB.contentSerial;
+        message->value[6] = bridgeA.definedLevels |
+                            (bridgeA.levelCount << 16);
+        message->value[7] = bridgeB.definedLevels |
+                            (bridgeB.levelCount << 16);
+        if (!okA || !okB)
+            message->status = MGLPPC_STATUS_GL_ERROR;
         }
         break;
     case MGLPPC_CMD_READ_PIXELS_SHARED:
@@ -3558,7 +3741,7 @@ static void HandleMessage(MGLPPCMessage *message,
             break;
         }
         message->value[0] = state->semanticExecutes;
-        if (!DiscardSemantic(state))
+        if (!DiscardSemantic(state, FALSE))
             message->status = MGLPPC_STATUS_GL_ERROR;
         break;
     case MGLPPC_CMD_CP_SURFACE:
@@ -3664,6 +3847,12 @@ static BOOL PollMailbox(MGLPPCHostState *state)
         } else if (message.command == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT) {
             HostDirectCommitCount++;
             HostDirectCommitTicks += mailboxElapsed;
+        } else if (message.command == MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2) {
+            HostDirectBegin2Count++;
+            HostDirectBegin2Ticks += mailboxElapsed;
+        } else if (message.command == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2) {
+            HostDirectCommit2Count++;
+            HostDirectCommit2Ticks += mailboxElapsed;
         }
     }
 #endif
@@ -3923,7 +4112,7 @@ int main(int argc, char **argv)
 #if MGLPPC_PROFILE
     HostNativeProfileCapture(&state);
 #endif
-    if (!DiscardSemantic(&state))
+    if (!DiscardSemantic(&state, FALSE))
         return 20; /* Normal SHUTDOWN cannot reach here with a live CP context. */
     if (state.cpDispatches)
         printf("CP_RUN dispatches=%lu dwords=%lu failed=%lu\n",
@@ -3989,6 +4178,12 @@ int main(int argc, char **argv)
                (unsigned long)ProbeMicros(0, HostDirectBeginTicks),
                (unsigned long)HostDirectCommitCount,
                (unsigned long)ProbeMicros(0, HostDirectCommitTicks));
+        printf("MiniGLPPC host: direct_begin2=%lu direct_begin2_us=%lu "
+               "direct_commit2=%lu direct_commit2_us=%lu\n",
+               (unsigned long)HostDirectBegin2Count,
+               (unsigned long)ProbeMicros(0, HostDirectBegin2Ticks),
+               (unsigned long)HostDirectCommit2Count,
+               (unsigned long)ProbeMicros(0, HostDirectCommit2Ticks));
         printf("MiniGLPPC host: uploads=%lu upload_fails=%lu\n",
                (unsigned long)state.uploadCount,
                (unsigned long)state.uploadFails);

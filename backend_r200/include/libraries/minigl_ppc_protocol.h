@@ -63,6 +63,21 @@ typedef uint32_t ULONG;
 #define MGLPPC_CMD_TEXTURE_UPLOAD_SHARED 22UL
 #define MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED 26UL
 #define MGLPPC_CMD_READ_PIXELS_SHARED 27UL
+/* Batched two-tile direct fill, negotiated by TEXTURE_DIRECT_BATCH_V1.
+ * The Silent Hill intro/FMV uploads a 16-bit frame as a 256x256 plus a
+ * 64x256 tile back to back; the frontend stages the first tile and folds
+ * both tiles' BEGIN / COMMIT into one mailbox round trip each. Layout:
+ * BEGIN2 request 0..3 = tile A name/width/height/requestFormat,
+ * 4..7 = tile B (same fields). Reply 1/2 = A cpuAddress/pitch,
+ * 3/4 = B cpuAddress/pitch, 5/6 = A/B granted format, 7 = device epoch.
+ * COMMIT2 request 0/2 = A/B texture name, 1/3 = A/B srcAddress.
+ * Reply 0 = committed mask (bit0 A, bit1 B), 1/2 = A/B surface token,
+ * 3 = device epoch, 4/5 = A/B contentSerial,
+ * 6/7 = A/B definedLevels | (levelCount << 16).
+ * The host aborts a partially begun BEGIN2 before replying, so a failed
+ * BEGIN2 leaves no host-side pending allocation. */
+#define MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2 29UL
+#define MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2 30UL
 /* CP-emitter metadata, negotiated at registration. Input value[0]=surface
  * token; reply: GL error, CPU/GPU address, pitch, width, height, format, epoch.
  * Read-only: no recovery, residency allocation, or native context mutation. */
@@ -105,6 +120,11 @@ typedef uint32_t ULONG;
  * whitelist. Without this bit the client must send it over the Exec
  * transport: an old host would reject it with UNKNOWN_COMMAND. */
 #define MGLPPC_CAP_MAILBOX_UPLOAD_SHARED (1UL << 13)
+/* The host implements MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2/COMMIT2, the
+ * batched two-tile direct fill. Advertised only with the mailbox and the
+ * single-tile direct path enabled; the client falls back to the existing
+ * BEGIN/COMMIT pair when absent. */
+#define MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1 (1UL << 14)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL
@@ -340,6 +360,8 @@ typedef char MGLPPCMailboxLayoutCheck[
      (cmd) == MGLPPC_CMD_GET_INTEGER || \
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_BEGIN || \
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT || \
+     (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2 || \
+     (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2 || \
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_ABORT || \
      (cmd) == MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED || \
      (cmd) == MGLPPC_CMD_READ_PIXELS_SHARED || \

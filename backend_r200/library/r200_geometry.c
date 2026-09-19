@@ -47,6 +47,14 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
     struct PendingDrawState *state;
     ULONG normalizedCommand = command ? command : RADEON3D_EXEC_DRAW_TRIANGLES;
 
+#if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
+    /* The draw header bakes in the current texture surface handles. A
+     * deferred direct-texture tile must be installed (and its mirror
+     * serialized) before this capture reads them, or the record would
+     * name the surface the upload is replacing. */
+    if (!R200PPCPendingUploadFlush(context))
+        return FALSE;
+#endif
     if (context->screenVertexCount && context->pendingDrawValid &&
         context->pendingSemanticStateSerial == context->semanticStateSerial &&
         context->screenCommand == normalizedCommand &&
@@ -206,6 +214,14 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         return TRUE;
     if (!context->pendingDrawValid)
         return FALSE;
+#if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
+    /* Geometry being flushed is the last chance to install a deferred
+     * direct-texture tile before the records naming the texture are
+     * published. The staging buffer is PPC memory, so the client's texels
+     * were already consumed at the upload call. */
+    if (!R200PPCPendingUploadFlush(context))
+        return FALSE;
+#endif
     headerDwords = state->headerDwords;
     vertexDwords = state->vertexDwords;
     extendedVertex = headerDwords == RADEON3D_EXEC_DRAW_EXTENDED_HEADER_DWORDS;
