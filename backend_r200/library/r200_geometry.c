@@ -1,4 +1,5 @@
 #include "minigl_r200_internal.h"
+#include "r200_batch_budget.h"
 #include <math.h>
 #include "debug_output.h"
 
@@ -40,6 +41,28 @@ typedef char ScreenVertexSerializeLayoutCheck[
  * state-batch shape; the threshold sits above them and below the world-scene
  * split rates (~13/frame) it exists for. Reset per present. */
 #define R200_EXPAND_MISMATCH_MIN 4UL
+
+static BOOL CanExpandStateBatch(struct MiniGLR200Context *context,
+                               struct SubmitSlot *slot, ULONG nextHeader,
+                               ULONG nextGenerated, ULONG *expandedGenerated)
+{
+    ULONG expandedRecords;
+    if (!slot->drawCount ||
+        slot->recordCount > context->batchDwords / slot->drawCount ||
+        nextGenerated > context->batchDwords)
+        return FALSE;
+    expandedRecords = slot->drawCount * slot->recordCount;
+    if (nextHeader > context->batchDwords - expandedRecords ||
+        !R200SlotPayloadFits(context->batchDwords,
+                            expandedRecords + nextHeader,
+                            slot->drawCount + 1UL, FALSE, R200_PPC_FRONTEND))
+        return FALSE;
+    return R200ExpandedBatchCost(slot->generatedDwordCount, slot->drawCount,
+                                COMMIT_FETCH_DWORDS,
+                                context->batchDwords - nextGenerated,
+                                (slot->records[5] & RADEON3D_DRAW_LIGHTING) != 0,
+                                expandedGenerated);
+}
 
 static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
                                 ULONG command)
@@ -191,7 +214,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
 #endif
     const struct PendingDrawState *stateUnused = state;
     (void)stateUnused;
-    BOOL extendedVertex, hardwareTransform;
+    BOOL extendedVertex, hardwareTransform, texgen;
     ULONG headerDwords, vertexDwords;
     ULONG required, generatedRequired, growthRequired, generatedGrowth;
     ULONG *header = state->header;
@@ -226,6 +249,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
     vertexDwords = state->vertexDwords;
     extendedVertex = headerDwords == RADEON3D_EXEC_DRAW_EXTENDED_HEADER_DWORDS;
     hardwareTransform = state->hardwareTransform;
+    texgen = (header[5] & RADEON3D_DRAW_TEXGEN) != 0;
     if (context->perfEnabled) {
         context->perf.flushCalls++;
         context->perf.lastBoundTexture0 = state->textureName[0];
@@ -330,7 +354,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                                                 : context->screenVertexCount,
                                        state->depth, state->textured[0],
                                        state->textured[1], state->fog,
-                                       state->normalVertex,
+                                       texgen, state->normalVertex,
                                        state->enabledLights) +
               (useCommit ? COMMIT_FETCH_DWORDS : 0UL)
         : GeneratedDrawDwords(context->screenVertexCount, state->depth,
@@ -351,6 +375,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
     if (stateBatch && slot->recordCount) {
         BOOL sameState = slot->stateBatch &&
                          slot->recordCount == headerDwords;
+        ULONG expandedGenerated = 0;
 
         for (index = 0; sameState && index < headerDwords; ++index)
             if (index != 10 && slot->records[index] != header[index])
@@ -358,7 +383,8 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         if (!sameState &&
             slot->stateBatch &&
             context->mismatchSubmits >= R200_EXPAND_MISMATCH_MIN &&
-            (slot->drawCount + 1UL) * headerDwords <= context->batchDwords) {
+            CanExpandStateBatch(context, slot, headerDwords,
+                                generatedRequired, &expandedGenerated)) {
             /* A differing header no longer forces a submit: expand the
              * pending same-header batch into per-draw full records -- each
              * carries its own texture/matrix state -- and keep filling this
@@ -366,18 +392,20 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
              * entry and the service already consume. Backward copy: record
              * zero is the shared header every expansion copies from. */
             ULONG draws = slot->drawCount;
+            ULONG oldHeaderDwords = slot->recordCount;
             index = draws;
             while (index-- > 1UL) {
-                ULONG *destination = slot->records + index * headerDwords;
+                ULONG *destination = slot->records + index * oldHeaderDwords;
                 ULONG source;
-                for (source = 0; source < headerDwords; ++source)
+                for (source = 0; source < oldHeaderDwords; ++source)
                     destination[source] = slot->records[source];
                 destination[10] = slot->stateBatchDraws[index].VertexCount;
             }
             slot->records[10] = slot->stateBatchDraws[0].VertexCount;
-            slot->recordCount = draws * headerDwords;
-            slot->lastDrawOffset = (draws - 1UL) * headerDwords;
-            slot->lastDrawHeaderDwords = headerDwords;
+            slot->recordCount = draws * oldHeaderDwords;
+            slot->generatedDwordCount = expandedGenerated;
+            slot->lastDrawOffset = (draws - 1UL) * oldHeaderDwords;
+            slot->lastDrawHeaderDwords = oldHeaderDwords;
             slot->lastDrawValid = TRUE;
             slot->stateBatch = FALSE;
             slot->expanded = TRUE;
@@ -404,7 +432,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                 generatedRequired = GeneratedHardwareDrawDwords(
                     context->screenVertexCount, state->depth,
                     state->textured[0], state->textured[1], state->fog,
-                    state->normalVertex, state->enabledLights);
+                    texgen, state->normalVertex, state->enabledLights);
             }
             slot->commitMode = useCommit;
             slot->modeDecided = TRUE;
@@ -416,14 +444,13 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
             ? COMMIT_FETCH_DWORDS
             : GeneratedHardwareDrawDwords(
                   0UL, state->depth, state->textured[0], state->textured[1],
-                  state->fog, state->normalVertex, state->enabledLights) +
+                  state->fog, texgen, state->normalVertex, state->enabledLights) +
                   COMMIT_FETCH_DWORDS;
         growthRequired = required;
         generatedGrowth = generatedRequired;
         if (slot->drawCount >= MAX_SLOT_DRAWS ||
-            headerDwords + (slot->drawCount + 1UL) *
-                               (RADEON3D_STATE_BATCH_DRAW_V1_SIZE /
-                                sizeof(ULONG)) > context->batchDwords ||
+            !R200SlotPayloadFits(context->batchDwords, headerDwords,
+                                 slot->drawCount + 1UL, TRUE, R200_PPC_FRONTEND) ||
             slot->generatedDwordCount + generatedGrowth >
                 context->batchDwords) {
             if (!Submit(context))
@@ -441,7 +468,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                 growthRequired = headerDwords;
                 generatedRequired = GeneratedHardwareDrawDwords(
                     0UL, state->depth, state->textured[0],
-                    state->textured[1], state->fog, state->normalVertex,
+                    state->textured[1], state->fog, texgen, state->normalVertex,
                     state->enabledLights) + COMMIT_FETCH_DWORDS;
                 generatedGrowth = generatedRequired;
             }
@@ -472,7 +499,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                    context->screenVertexCount * vertexDwords;
         generatedRequired = GeneratedHardwareDrawDwords(
             context->screenVertexCount, state->depth, state->textured[0],
-            state->textured[1], state->fog, state->normalVertex,
+            state->textured[1], state->fog, texgen, state->normalVertex,
             state->enabledLights);
     }
     header[1] = required;
@@ -504,7 +531,10 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                      : context->screenVertexCount *
                            state->generatedVertexDwords)
         : generatedRequired;
-    if (slot->recordCount + growthRequired > context->batchDwords ||
+    if (!R200SlotPayloadFits(context->batchDwords,
+                            slot->recordCount + growthRequired,
+                            useCommit ? slot->drawCount + (merge ? 0UL : 1UL) : 0UL,
+                            FALSE, R200_PPC_FRONTEND) ||
         slot->generatedDwordCount + generatedGrowth >
             context->batchDwords ||
         (useCommit && slot->drawCount >= MAX_SLOT_DRAWS)) {
@@ -529,7 +559,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
             ? GeneratedHardwareDrawDwords(
                   useCommit ? 0UL : context->screenVertexCount,
                   state->depth, state->textured[0], state->textured[1],
-                  state->fog, state->normalVertex, state->enabledLights) +
+                  state->fog, texgen, state->normalVertex, state->enabledLights) +
                   (useCommit ? COMMIT_FETCH_DWORDS : 0UL)
             : GeneratedDrawDwords(context->screenVertexCount, state->depth,
                                   state->textured[0], state->textured[1],
@@ -1249,7 +1279,7 @@ static ULONG ClipScreenPolygon(const struct MiniGLR200Context *context,
                                BOOL perspective)
 {
     struct ScreenVertex temporary[12];
-    ULONG plane;
+    ULONG plane, vertexIndex;
     for (plane = 0; plane < 4 && count; ++plane) {
         ULONG outputCount = 0, index;
         struct ScreenVertex previous = vertices[count - 1];
@@ -1267,6 +1297,15 @@ static ULONG ClipScreenPolygon(const struct MiniGLR200Context *context,
                 temporary[outputCount++] =
                     InterpolateScreenVertex(&previous, &current,
                                             amount, perspective);
+                /* Intersections lie exactly on the clipping plane. PPC
+                 * fmadds can otherwise produce -1.430511e-5 for the console
+                 * top edge: 510 + (-600 * 0.85f). */
+                switch (plane) {
+                case 0: temporary[outputCount - 1].x = 0.0f; break;
+                case 1: temporary[outputCount - 1].x = (GLfloat)context->width; break;
+                case 2: temporary[outputCount - 1].y = 0.0f; break;
+                default: temporary[outputCount - 1].y = (GLfloat)context->height; break;
+                }
             }
             if (currentInside)
                 temporary[outputCount++] = current;
@@ -1276,6 +1315,17 @@ static ULONG ClipScreenPolygon(const struct MiniGLR200Context *context,
         count = outputCount;
         for (index = 0; index < count; ++index)
             vertices[index] = temporary[index];
+    }
+    /* A later plane's interpolation can drift off an earlier plane by an
+     * ULP. Only positions are bounded; interpolated attributes are unchanged.
+     * NaNs remain NaNs and are still rejected by the service. */
+    for (vertexIndex = 0; vertexIndex < count; ++vertexIndex) {
+        if (vertices[vertexIndex].x < 0.0f) vertices[vertexIndex].x = 0.0f;
+        if (vertices[vertexIndex].x > (GLfloat)context->width)
+            vertices[vertexIndex].x = (GLfloat)context->width;
+        if (vertices[vertexIndex].y < 0.0f) vertices[vertexIndex].y = 0.0f;
+        if (vertices[vertexIndex].y > (GLfloat)context->height)
+            vertices[vertexIndex].y = (GLfloat)context->height;
     }
     return count;
 }
@@ -1491,6 +1541,27 @@ static BOOL AppendScreenTriangleEdges(struct MiniGLR200Context *context,
            AppendScreenSegment(context,c,a);
 }
 
+/* Whole quads fit one QUADS record: four vertices per sized point instead
+ * of the six of the two-triangle decomposition. Edge points keep the
+ * clipped triangle path because non-TCL records must stay inside the
+ * render target. */
+static BOOL AppendScreenQuad(struct MiniGLR200Context *context,
+                             const struct ScreenVertex *a,
+                             const struct ScreenVertex *b,
+                             const struct ScreenVertex *c,
+                             const struct ScreenVertex *d)
+{
+    if (context->screenVertexCount+4>SCREEN_VERTEX_CAPACITY &&
+        !FlushScreenVertices(context)) return FALSE;
+    if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_QUADS))
+        return FALSE;
+    context->screenVertices[context->screenVertexCount++]=*a;
+    context->screenVertices[context->screenVertexCount++]=*b;
+    context->screenVertices[context->screenVertexCount++]=*c;
+    context->screenVertices[context->screenVertexCount++]=*d;
+    return TRUE;
+}
+
 static BOOL AppendScreenPoint(struct MiniGLR200Context *context,
                               const struct ScreenVertex *p)
 {
@@ -1498,6 +1569,15 @@ static BOOL AppendScreenPoint(struct MiniGLR200Context *context,
     GLfloat half=context->pointSize*0.5f;
     a.x-=half; a.y-=half; b.x+=half; b.y-=half;
     c.x+=half; c.y+=half; d.x-=half; d.y+=half;
+    if (a.x>=0.0f && a.x<=(GLfloat)context->width &&
+        b.x>=0.0f && b.x<=(GLfloat)context->width &&
+        c.x>=0.0f && c.x<=(GLfloat)context->width &&
+        d.x>=0.0f && d.x<=(GLfloat)context->width &&
+        a.y>=0.0f && a.y<=(GLfloat)context->height &&
+        b.y>=0.0f && b.y<=(GLfloat)context->height &&
+        c.y>=0.0f && c.y<=(GLfloat)context->height &&
+        d.y>=0.0f && d.y<=(GLfloat)context->height)
+        return AppendScreenQuad(context,&a,&b,&c,&d);
     return EmitClippedScreenTriangle(context,&a,&b,&c,FALSE) &&
            EmitClippedScreenTriangle(context,&a,&c,&d,FALSE);
 }

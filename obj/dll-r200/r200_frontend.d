@@ -14,6 +14,7 @@ obj/dll-r200/r200_frontend.o: \
  backend_r200/include/libraries/minigl_ppc_trace.h \
  backend_r200/library/minigl_r200_base.h \
  backend_r200/library/debug_output.h backend_r200/library/r200_geometry.c \
+ backend_r200/library/r200_batch_budget.h \
  backend_r200/library/r200_submit.c backend_r200/library/r200_math.c \
  backend_r200/library/r200_texture.c backend_r200/library/r200_surface.c \
  backend_r200/library/r200_state.c \
@@ -57,6 +58,8 @@ backend_r200/library/minigl_r200_base.h:
 backend_r200/library/debug_output.h:
 
 backend_r200/library/r200_geometry.c:
+
+backend_r200/library/r200_batch_budget.h:
 
 backend_r200/library/r200_submit.c:
 

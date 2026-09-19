@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 /* Diagnostic clocks/stage reports are separate from protocol probe timing. */
 #ifndef MGLPPC_PROFILE
@@ -52,6 +53,58 @@ static ULONG IdleActiveTicks, IdleRenderTicks, IdleWakeBacklog;
 #include <proto/minigl.h>
 #include <clib/minigl_open_protos.h>
 #include <libraries/minigl_ppc_ib_trace.h>
+
+#if defined(MGLPPC_REJECT_DUMP) && MGLPPC_REJECT_DUMP
+/* Preserve failure reports even while stdout is exclusively locked by DOS.
+ * Native direct-upload refusal has a normal fallback, so do not let those
+ * messages consume the bounded ring/presentation-failure log. */
+static int HostFailurePrintf(const char *format, ...)
+{
+    static unsigned reports;
+    va_list args;
+    int result;
+    if (reports < 32 && !strstr(format, "dbeg nativefail") &&
+        (strstr(format, "fail") || strstr(format, "error") ||
+         strstr(format, "bad"))) {
+        char line[512];
+        BPTR file;
+        va_start(args, format);
+        vsnprintf(line, sizeof(line), format, args);
+        va_end(args);
+        file = Open((CONST_STRPTR)"DH2:wosbuild/qhosterr.log",
+                    reports ? MODE_OLDFILE : MODE_NEWFILE);
+        if (file) {
+            Seek(file, 0, OFFSET_END);
+            Write(file, line, strlen(line));
+            Close(file);
+        }
+        ++reports;
+    }
+    va_start(args, format);
+    result = vprintf(format, args);
+    va_end(args);
+    return result;
+}
+#define printf HostFailurePrintf
+
+static void WriteRejectWords(BPTR file, const ULONG *words, ULONG count)
+{
+    UBYTE bytes[128];
+    while (count) {
+        ULONG i, n = count > 32UL ? 32UL : count;
+        for (i = 0; i < n; ++i) {
+            ULONG value = words[i];
+            bytes[i*4] = value >> 24;
+            bytes[i*4+1] = value >> 16;
+            bytes[i*4+2] = value >> 8;
+            bytes[i*4+3] = value;
+        }
+        Write(file, bytes, n * 4UL);
+        words += n;
+        count -= n;
+    }
+}
+#endif
 
 #if MGLPPC_PROFILE
 #include <libraries/minigl_perf.h>
@@ -461,14 +514,22 @@ static BOOL BeginBackendDirectTexture(ULONG textureName, ULONG width,
     }
     if (!bridge->cpuAddress || !bridge->pitch || !bridge->bytes ||
         !bridge->deviceEpoch) {
+        /* A refused direct upload falls back to the ordinary upload path.
+         * Always drain the probe error, but do not log this routine fallback
+         * in a release/performance host. */
+        GLenum nativeError = glGetError();
+#if MGLPPC_HOST_TRACE || (defined(MGLPPC_REJECT_DUMP) && MGLPPC_REJECT_DUMP)
         printf("host: dbeg nativefail err=%04lx fmt=%lu tex=%lu %lux%lu "
                "req=%lu\n",
-               (unsigned long)glGetError(),
+               (unsigned long)nativeError,
                (unsigned long)bridge->format,
                (unsigned long)textureName,
                (unsigned long)width, (unsigned long)height,
                (unsigned long)requestFormat);
         fflush(stdout);
+#else
+        (void)nativeError;
+#endif
         return FALSE;
     }
     return TRUE;
@@ -1866,6 +1927,42 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 struct Radeon3DInfo info;
                 BOOL retry = FALSE;
 
+#if defined(MGLPPC_REJECT_DUMP) && MGLPPC_REJECT_DUMP
+                /* Failure-only diagnostic, flushed independently of stdout.
+                 * Bounded text avoids host-endian binary dump assumptions.
+                 * Never enabled in normal/performance hosts. */
+                {
+                    BPTR dump = Open((CONST_STRPTR)"DH2:wosbuild/qreject.log",
+                                     MODE_NEWFILE);
+                    if (dump) {
+                        ULONG hi;
+                        char line[160];
+                        int length = snprintf(line, sizeof(line),
+                            "fence=%08lx hdr=%lu draws=%lu prim=%lu gen=%lu\n",
+                            (unsigned long)fence,
+                            (unsigned long)batch.HeaderDwords,
+                            (unsigned long)batch.DrawCount,
+                            (unsigned long)batch.Primitive,
+                            (unsigned long)batch.Generation);
+                        Write(dump, line, length);
+                        for (hi = 0; hi < batch.HeaderDwords && hi < 256UL; ++hi) {
+                            length = snprintf(line, sizeof(line), "H %lu %08lx\n",
+                                (unsigned long)hi,
+                                (unsigned long)batch.Header[hi]);
+                            Write(dump, line, length);
+                        }
+                        for (hi = 0; hi < batch.DrawCount && hi < 16UL; ++hi) {
+                            length = snprintf(line, sizeof(line), "D %lu %lu %lu\n",
+                                (unsigned long)hi,
+                                (unsigned long)batch.Draws[hi].OffsetBytes,
+                                (unsigned long)batch.Draws[hi].VertexCount);
+                            Write(dump, line, length);
+                        }
+                        Close(dump);
+                    }
+                }
+#endif
+
                 printf("host: sbcommit_fail fence=%08lx hdr=%lu draws=%lu "
                        "prim=%lu seg=%lu gen=%lu gen_drv=%lu epoch=%lu "
                        "token=%08lx\n",
@@ -2026,6 +2123,10 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 crc = entry.crc;
 #endif
             if (crc != entry.crc) {
+#if defined(MGLPPC_REJECT_DUMP) && MGLPPC_REJECT_DUMP
+                printf("inline crc_fail expected=%08lx actual=%08lx\n",
+                       (unsigned long)entry.crc, (unsigned long)crc);
+#endif
                 control->error = 1;
                 break;
             }
@@ -2057,6 +2158,21 @@ static ULONG RingPoll(MGLPPCHostState *state)
             if (!Radeon3DExecute((struct Radeon3DDevice *)bridge.deviceToken,
                                   slotAddr, entry.dwords,
                                   RADEON3D_SUBMIT_FENCE, &fence)) {
+#if defined(MGLPPC_REJECT_DUMP) && MGLPPC_REJECT_DUMP
+                BPTR dump = Open((CONST_STRPTR)"DH2:wosbuild/qinline.bin", MODE_NEWFILE);
+                printf("inline execute_fail words=%lu completed=%lu flags=%08lx\n",
+                       (unsigned long)entry.dwords,
+                       (unsigned long)state->ringCompleted,
+                       (unsigned long)entry.flags);
+                if (dump) {
+                    ULONG header[4] = {0x51494e31UL, entry.dwords,
+                                       entry.flags, state->ringCompleted};
+                    WriteRejectWords(dump, header, 4);
+                    if (entry.dwords <= MGLPPC_SEMANTIC_SLOT_DWORDS)
+                        WriteRejectWords(dump, slotAddr, entry.dwords);
+                    Close(dump);
+                }
+#endif
                 mglUnlockDisplay();
                 state->displayLocked = 0;
                 control->error = 1;

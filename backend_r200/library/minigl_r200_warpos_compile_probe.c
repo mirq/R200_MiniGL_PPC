@@ -101,6 +101,30 @@ typedef char ProbeLockInfo24[sizeof(MGLLockInfo) == 24 ? 1 : -1];
 #endif
 #endif
 
+#if defined(MGLPPC_ERROR_ORIGIN)
+/* Failure-only origins, independent of console redirection/perf counters.
+ * No open handle survives a call; cap disk use at 64 small records. */
+void R200PPCErrorAt(const char *file, ULONG line, GLenum error)
+{
+    static ULONG reports;
+    char text[224];
+    BPTR handle;
+    if (reports >= 64UL)
+        return;
+    snprintf(text, sizeof(text), "%lu %s:%lu value=%lu\n",
+             (unsigned long)reports, file, (unsigned long)line,
+             (unsigned long)error);
+    handle = Open((STRPTR)"DH2:wosbuild/qorigin.log",
+                  reports ? MODE_OLDFILE : MODE_NEWFILE);
+    if (handle) {
+        Seek(handle, 0, OFFSET_END);
+        Write(handle, text, strlen(text));
+        Close(handle);
+    }
+    ++reports;
+}
+#endif
+
 /* ---- Unbuffered file trace --------------------------------------------
  * The DLL's stdio is a separate libc instance from the client's, so its
  * printf output never reaches the client's redirect while the process is
@@ -1412,16 +1436,18 @@ static BOOL PlatformMailboxWait(void)
                            FrontendPlatform.mailboxSerial);
             return FALSE;
         }
-        /* Yield rarely, on the same bounded budget as the ring wait
+        /* Yield VERY rarely, on the same bounded budget as the ring wait
          * rework in HOST_LOADER_REGRESSION.md: a 68k-side sleep
          * (Delay(1), WaitTime(0,100)) quantizes to a 50 Hz tick, about
-         * 20 ms of actual latency on this kernel, so yielding every 256
-         * spins added 1-4 of those to every control round-trip. The 68k
-         * host runs on a separate physical CPU and is never starved by
-         * a PPC spin; the 100 us check interval already bounds the
-         * mailbox register reads, and the eventual yield only trips for
-         * a host that is genuinely not answering. */
-        if (!(++relax & (MGLPPC_RING_YIELD_SPINS - 1UL)))
+         * 20 ms of actual latency on this kernel, so yielding added 1-4 of
+         * those to every control round-trip. The 68k host runs on a
+         * separate physical CPU and is never starved by a PPC spin; the
+         * 100 us check interval already bounds the mailbox register reads.
+         * CP_SURF evidence (2026-09-20): every yield actually parked a full
+         * 20 ms tick (avg=max=20.0 ms over 2526 calls), so the budget is
+         * now 32x the old one -- the 5 s deadline below still bounds a dead
+         * host. */
+        if (!(++relax & (MGLPPC_RING_YIELD_SPINS * 32UL - 1UL)))
             MGLPPCYield();
     }
 }
@@ -1446,6 +1472,13 @@ static BOOL PlatformCallFail(ULONG command, const char *why)
     return FALSE;
 }
 
+/* CP surface-descriptor cache attribution (plan 2026-09-20). Counters are
+ * plain increments on the emit path; the one-line summary prints at context
+ * teardown only when CP is enabled, so quiet benchmarks gain one shutdown
+ * console line, exactly like the host's CP_RUN report. */
+static ULONG CpSurfHits, CpSurfMissQueries, CpSurfCapResets,
+             CpSurfInvalidate, CpSurfEpochStale, CpSurfCursor;
+
 static BOOL PlatformCall(ULONG command, ULONG contextId)
 {
 #if MGLPPC_PROFILE
@@ -1453,9 +1486,24 @@ static BOOL PlatformCall(ULONG command, ULONG contextId)
 #endif
     BOOL result;
 
-    if (command != MGLPPC_CMD_CP_SURFACE && command != MGLPPC_CMD_GET_INTEGER &&
-        command != MGLPPC_CMD_BIND_TEXTURE && command != MGLPPC_CMD_SEMANTIC_BARRIER)
+    /* Descriptor-cache lifetime (plan 2026-09-20, CP_SURF evidence): texture
+     * upload/commit and other ordinary controls never change the screen
+     * color-surface descriptors this cache resolves, so they must not wipe
+     * it. The old blanket clear caused 2321 wipes -> 37551 synchronous
+     * mailbox queries in one timedemo (~2.5 resets per present). The cache
+     * remains safe: every entry is re-validated against deviceEpoch at
+     * lookup, and epoch bumps or true lifecycle commands still clear. */
+    switch (command) {
+    case MGLPPC_CMD_UNREGISTER_SEMANTIC_SLOTS:
+    case MGLPPC_CMD_DESTROY_CONTEXT:
+    case MGLPPC_CMD_SHUTDOWN:
+        if (FrontendPlatform.cpSurfaceCount)
+            ++CpSurfInvalidate;
         FrontendPlatform.cpSurfaceCount = 0;
+        break;
+    default:
+        break;
+    }
 
     FrontendPlatform.control.command = command;
     FrontendPlatform.control.contextId = contextId;
@@ -1774,11 +1822,16 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
     if (!token || !FrontendPlatform.cpEnabled || FrontendPlatform.cpFailed)
         return FALSE;
     for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index)
-        if (FrontendPlatform.cpSurfaces[index].token == token &&
-            FrontendPlatform.cpSurfaces[index].epoch == context->deviceEpoch) {
-            *out = FrontendPlatform.cpSurfaces[index].surface;
-            return TRUE;
+        if (FrontendPlatform.cpSurfaces[index].token == token) {
+            if (FrontendPlatform.cpSurfaces[index].epoch == context->deviceEpoch) {
+                ++CpSurfHits;
+                *out = FrontendPlatform.cpSurfaces[index].surface;
+                return TRUE;
+            }
+            ++CpSurfEpochStale;
+            break;
         }
+    ++CpSurfMissQueries;
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = token;
     if (!PlatformCall(MGLPPC_CMD_CP_SURFACE, FrontendPlatform.contextId) ||
@@ -1791,9 +1844,17 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
     out->width = FrontendPlatform.control.value[4];
     out->height = FrontendPlatform.control.value[5];
     out->format = FrontendPlatform.control.value[6];
-    if (FrontendPlatform.cpSurfaceCount == 16UL)
-        FrontendPlatform.cpSurfaceCount = 0;
-    index = FrontendPlatform.cpSurfaceCount++;
+    if (FrontendPlatform.cpSurfaceCount == 16UL) {
+        /* Capacity: overwrite the oldest entry (ring) instead of wiping the
+         * whole cache. Wiping forced the next 16 lookups through synchronous
+         * mailbox queries (the CP_SURF miss storm of 2026-09-20). Screen
+         * color-surface tokens are stable for the context lifetime, so the
+         * overwritten entry is the least likely to be queried again. */
+        ++CpSurfCapResets;
+        index = CpSurfCursor++ % 16UL;
+    } else {
+        index = FrontendPlatform.cpSurfaceCount++;
+    }
     FrontendPlatform.cpSurfaces[index].token = token;
     FrontendPlatform.cpSurfaces[index].epoch = context->deviceEpoch;
     FrontendPlatform.cpSurfaces[index].surface = *out;
@@ -1845,6 +1906,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     volatile ULONG *destination;
     struct MGLPPCEmitVertices vertices;
     ULONG head, ringSlot, count, index, segmentIx = 0xffffffffUL;
+    ULONG cpRetiredSeen = 0;
     ULONG *staging, start = PerfClock(), spin = 0;
     const char *failure = "ring";
     if (!control || !FrontendPlatform.cpAddress ||
@@ -1856,6 +1918,17 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
         if (!(spin & 255UL)) {
             MGLPPCInvalidateLine32((APTR)&control->head);
             MGLPPCInvalidateLine32((APTR)&control->retired);
+            /* Progress-aware yield budget (same policy as the validated
+             * drain loop): as long as GPU retirement keeps moving, keep
+             * spinning -- every yield parks a full ~20 ms tick on this
+             * kernel (PPC_YIELD avg=max=20.0 ms, CP_SURF session). Only a
+             * full budget with NO retirement progress earns a park. */
+            if (spin && control->retired != cpRetiredSeen) {
+                cpRetiredSeen = control->retired;
+                spin = 0;
+            } else if (!spin) {
+                cpRetiredSeen = control->retired;
+            }
         }
         if (control->error || control->epoch != FrontendPlatform.epoch)
             goto failed;
@@ -1950,11 +2023,19 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
 
     if (FrontendPlatform.ibSmokeFailed || FrontendPlatform.cpFailed || FrontendPlatform.mailboxAbandoned || !PlatformMailboxReady() ||
         context != &proofContext || !FrontendPlatform.registered ||
-        slotIndex >= SUBMIT_SLOT_COUNT || FrontendPlatform.pending[slotIndex])
+        slotIndex >= SUBMIT_SLOT_COUNT || FrontendPlatform.pending[slotIndex]) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+        R200PPCErrorAt("publish guard", slotIndex, GL_INVALID_OPERATION);
+#endif
         return FALSE;
+    }
     slot = &context->submitSlots[slotIndex];
-    if (!slot->recordCount || slot->recordCount > MGLPPC_SEMANTIC_SLOT_DWORDS)
+    if (!slot->recordCount || slot->recordCount > MGLPPC_SEMANTIC_SLOT_DWORDS) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+        R200PPCErrorAt("publish record count", slot->recordCount, GL_INVALID_OPERATION);
+#endif
         return FALSE;
+    }
     if (FrontendPlatform.cpEnabled)
         return PublishCpSlot(context, slot);
 #if defined(R200_FRONTEND_LIBRARY)
@@ -1985,6 +2066,10 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
                 }
             }
             if (segmentIx == 0xFFFFFFFFUL) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+                R200PPCErrorAt("publish missing segment", context->segment.info.Id,
+                              GL_INVALID_OPERATION);
+#endif
 #if MGLPPC_PROFILE
                 PlatformProfile.publishSendTicks +=
                     PerfClock() - profileStart;
@@ -2045,6 +2130,10 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
                 MGLPPCYield();
             }
             if (control->error || ++spin > 5000000UL) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+                R200PPCErrorAt("publish ring stall", control->head, control->error);
+                R200PPCErrorAt("publish ring completed", control->completed, spin);
+#endif
                 R200PPCConsolePrintf("RING publish=FAIL stall head=%lu completed=%lu "
                        "err=%lu spin=%lu\n",
                        (unsigned long)control->head,
@@ -2071,6 +2160,17 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
         }
 #endif
         ringSlot = control->head % control->slotCount;
+        /* Validate the complete wire packet BEFORE copying any dwords.
+         * A commit adds a two-word prefix and a draw-descriptor tail. */
+        if (!R200SlotPayloadFits(MGLPPC_SEMANTIC_SLOT_DWORDS, slot->recordCount,
+                                 draws, slot->stateBatch, TRUE) ||
+            !R200SlotPayloadFits(control->slotDwords, slot->recordCount,
+                                 draws, slot->stateBatch, TRUE)) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+            R200PPCErrorAt("ring packet overflow records", slot->recordCount, draws);
+#endif
+            return FALSE;
+        }
         if (draws) {
             FrontendPlatform.ringSlots[ringSlot][0] = draws;
             FrontendPlatform.ringSlots[ringSlot][1] = segmentIx;
@@ -2180,8 +2280,12 @@ BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
     message->value[2] = slot->recordCount;
     message->value[4] = crc;
     message->value[5] = FrontendPlatform.epoch;
-    if (!MGLPPCTransportSend(&FrontendPlatform.transport, message))
+    if (!MGLPPCTransportSend(&FrontendPlatform.transport, message)) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+        R200PPCErrorAt("execute send failed", slotIndex, slot->recordCount);
+#endif
         return FALSE;
+    }
     FrontendPlatform.pending[slotIndex] = TRUE;
 #if MGLPPC_PROFILE
     PlatformProfile.publishSendTicks += PerfClock() - profileStart;
@@ -2221,6 +2325,10 @@ BOOL R200PPCPlatformWaitSlot(struct MiniGLR200Context *context,
         PlatformProfile.replyWaitMaxTicks = waitElapsed;
 #endif
     FrontendPlatform.pending[slotIndex] = FALSE;
+#if defined(MGLPPC_ERROR_ORIGIN)
+    if (!ok || message->status != MGLPPC_STATUS_OK)
+        R200PPCErrorAt("execute reply status", slotIndex, message->status);
+#endif
     return ok && message->status == MGLPPC_STATUS_OK;
 }
 
@@ -2232,6 +2340,7 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
 #endif
     ULONG spin;
     ULONG drainSeen = 0;
+    ULONG cpCompletedSeen = 0;
     volatile MGLPPCRingControlV1 *control;
     BOOL result = TRUE;
     /* A deferred direct tile must be installed before this frame's work is
@@ -2283,6 +2392,14 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
                    control->slotCount) {
                 if (!(spin & 255UL)) {
                     MGLPPCInvalidateLine32((APTR)&control->head);
+                    /* Progress-aware budget: consumption moving means keep
+                     * spinning (each yield parks ~20 ms on this kernel). */
+                    if (spin && control->completed != cpCompletedSeen) {
+                        cpCompletedSeen = control->completed;
+                        spin = 0;
+                    } else if (!spin) {
+                        cpCompletedSeen = control->completed;
+                    }
                     if (!control->error &&
                         (control->head - control->completed) < control->slotCount)
                         break;
@@ -3076,6 +3193,36 @@ void R200PPCDispatchDeleteContext(void)
                         (ULONG)PlatformProfile.rotateStallTicks);
     }
 #endif
+    /* Descriptor-cache attribution: one line at teardown (quiet builds
+     * included), independent of MGLPPC_PROFILE. The DLL console is lost
+     * under Run >NIL:, so profiled builds also append it to a file. */
+    if (FrontendPlatform.cpEnabled &&
+        (CpSurfMissQueries || CpSurfInvalidate || CpSurfCapResets ||
+         CpSurfEpochStale)) {
+        printf("CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu stale=%lu\n",
+               (unsigned long)CpSurfHits,
+               (unsigned long)CpSurfMissQueries,
+               (unsigned long)CpSurfCapResets,
+               (unsigned long)CpSurfInvalidate,
+               (unsigned long)CpSurfEpochStale);
+        fflush(stdout);
+#if MGLPPC_PROFILE
+        {
+            FILE *cpSurfLog = fopen("DH2:mglprof/cp_surf.log", "a");
+            if (cpSurfLog) {
+                fprintf(cpSurfLog,
+                        "CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu "
+                        "stale=%lu\n",
+                        (unsigned long)CpSurfHits,
+                        (unsigned long)CpSurfMissQueries,
+                        (unsigned long)CpSurfCapResets,
+                        (unsigned long)CpSurfInvalidate,
+                        (unsigned long)CpSurfEpochStale);
+                fclose(cpSurfLog);
+            }
+        }
+#endif
+    }
 #if defined(R200_FRONTEND_LIBRARY)
     MGLPPCSemanticReplayFree();
 #endif

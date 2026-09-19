@@ -936,8 +936,8 @@ ULONG GeneratedVertexDwords(BOOL depth, BOOL textured, BOOL textured1,
 ULONG GeneratedHardwareVertexDwords(BOOL textured, BOOL textured1,
                                     BOOL fog, BOOL normals);
 ULONG GeneratedHardwareDrawDwords(ULONG vertexCount, BOOL depth,
-                                  BOOL textured, BOOL textured1, BOOL fog,
-                                  BOOL normals, ULONG enabledLights);
+                                   BOOL textured, BOOL textured1, BOOL fog,
+                                   BOOL texgen, BOOL normals, ULONG enabledLights);
 ULONG GeneratedClearDwords(BOOL depth);
 
 /* ------------------------------------------------------------------ */
@@ -1073,6 +1073,11 @@ void MGLPPCSwapTCL7Vector(ULONG *destination, const ULONG *source,
                           ULONG count, ULONG unit0Mask);
 #endif
 void SetError(struct MiniGLR200Context *context, GLenum error);
+#if R200_PPC_FRONTEND && defined(MGLPPC_ERROR_ORIGIN)
+void R200PPCErrorAt(const char *file, ULONG line, GLenum error);
+#define SetError(context, error) \
+    (R200PPCErrorAt(__FILE__, __LINE__, (error)), (SetError)((context), (error)))
+#endif
 void BumpSemanticStateSerial(struct MiniGLR200Context *context);
 BOOL StateChangeAllowed(struct MiniGLR200Context *context);
 BOOL ValidPrimitive(GLenum primitive);

@@ -858,19 +858,21 @@ ULONG GeneratedHardwareVertexDwords(BOOL textured, BOOL textured1,
 }
 
 ULONG GeneratedHardwareDrawDwords(ULONG vertexCount, BOOL depth,
-                                  BOOL textured, BOOL textured1, BOOL fog,
-                                  BOOL normals, ULONG enabledLights)
+                                   BOOL textured, BOOL textured1, BOOL fog,
+                                   BOOL texgen, BOOL normals, ULONG enabledLights)
 {
     /* Keep this in step with the TCL expansion in the service: the base
      * register block (48), viewport scalars since TCL is always
      * perspective (12), point and line sizing (4), the TCL input/output
          * register group (40), guard-clip scalars (7), and the MVP upload
-         * (21). Lighting adds light-model and per-light control registers
+          * (21). A content-serial transition can add two HDP register writes
+          * (4 dwords). Texgen uploads two texture matrices (21 dwords each).
+          * Lighting adds light-model and per-light control registers
          * plus global-ambient/eye/material vector uploads (~100 fixed)
          * and roughly 40 dwords per enabled light block. */
-    return 132UL + (depth ? 6UL : 0UL) +
+    return 136UL + (depth ? 6UL : 0UL) +
            (textured ? 14UL : 0UL) + (textured1 ? 22UL : 0UL) +
-           (fog ? 2UL : 0UL) +
+            (fog ? 2UL : 0UL) + (texgen ? 42UL : 0UL) +
            (normals ? 100UL + enabledLights * 40UL : 0UL) +
            vertexCount * GeneratedHardwareVertexDwords(textured, textured1,
                                                        fog, normals);

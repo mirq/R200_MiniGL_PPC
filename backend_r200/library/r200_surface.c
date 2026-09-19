@@ -2,6 +2,7 @@
 #include <stdio.h>
 #endif
 #include "minigl_r200_internal.h"
+#include "r200_batch_budget.h"
 #include "debug_output.h"
 
 ULONG SurfaceFormatForDepth(ULONG depth)
@@ -481,8 +482,9 @@ void Lib_glClear(GLbitfield mask)
     target = TargetSurface(context);
     clearDepth = (mask & GL_DEPTH_BUFFER_BIT) && context->depthMask;
     generatedRequired = GeneratedClearDwords(clearDepth);
-    if ((slot->recordCount + RADEON3D_EXEC_CLEAR_DWORDS >
-             context->batchDwords ||
+    if ((!R200SlotPayloadFits(context->batchDwords,
+                             slot->recordCount + RADEON3D_EXEC_CLEAR_DWORDS,
+                             slot->drawCount, FALSE, R200_PPC_FRONTEND) ||
          slot->generatedDwordCount + generatedRequired >
              context->batchDwords) &&
         !Submit(context)) {
@@ -1432,6 +1434,13 @@ void Lib_mglSwitchDisplay(void)
         barrierOk = (flushOk && submitOk) ?
             R200PPCPlatformBarrier(context, TRUE) : FALSE;
         if (!barrierOk) {
+#if defined(MGLPPC_ERROR_ORIGIN)
+            R200PPCErrorAt("swap stages (flush/submit/barrier bits)",
+                          (flushOk ? 1UL : 0UL) | (submitOk ? 2UL : 0UL) |
+                          (barrierOk ? 4UL : 0UL), GL_INVALID_OPERATION);
+            R200PPCErrorAt("swap pending vertices", context->screenVertexCount,
+                          context->pendingDrawValid);
+#endif
 #if MGLPPC_CLIENT_TRACE
             static ULONG sdFails;
             ++sdFails;

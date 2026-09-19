@@ -288,7 +288,7 @@ struct Radeon3DSurface *ReadSourceSurface(
     return &context->surfaces[context->fullscreen ? buffer : 0];
 }
 
-void SetError(struct MiniGLR200Context *context, GLenum error)
+void (SetError)(struct MiniGLR200Context *context, GLenum error)
 {
     if (context && context->error == GL_NO_ERROR)
         context->error = error;

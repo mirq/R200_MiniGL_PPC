@@ -144,7 +144,7 @@ static ULONG NativeQuadVertexLimit(const struct MiniGLR200Context *context)
                                          : R200_TCL_VERTEX_DWORDS;
         generatedFixed = GeneratedHardwareDrawDwords(
             0, context->depthTest, textured, textured1,
-            context->fogEnabled, normalVertex, enabledLights);
+            context->fogEnabled, sphereMap, normalVertex, enabledLights);
         generatedVertexDwords = GeneratedHardwareVertexDwords(
             textured, textured1, context->fogEnabled,
             normalVertex);
