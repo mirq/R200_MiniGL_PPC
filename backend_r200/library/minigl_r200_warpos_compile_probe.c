@@ -1309,6 +1309,104 @@ static unsigned long long PlatformProfileClock64(void)
 }
 #endif
 
+#if MGLPPC_PROFILE
+#include <libraries/minigl_subimage_timing.h>
+enum {
+    PPC_LM_VALIDATE, PPC_LM_PENDING, PPC_LM_DIRECT_PATCH, PPC_LM_DIRECT_BARRIER,
+    PPC_LM_DIRECT, PPC_LM_DIRECT_REPLY, PPC_LM_ABORT, PPC_LM_BARRIER,
+    PPC_LM_STAGE, PPC_LM_CACHE, PPC_LM_REQUEST, PPC_LM_CALL, PPC_LM_MIRROR
+};
+static const char *const PpcLmPhases[] = {
+    "validate", "pending_flush", "direct_patch", "direct_barrier",
+    "direct_unclassified", "direct_reply", "direct_abort", "old_work_barrier",
+    "bgra_stage", "cache_flush", "request_invalidate", "platform_call", "mirror"
+};
+static struct PpcLmRecord {
+    MGLLmTiming time;
+    ULONG serial, contextId, name, sharedOrder, path, result;
+    GLint level, x, y, w, h;
+    GLenum format, type, errorBefore, errorAfter;
+    ULONG sourceBytes, wireBytes, mailbox;
+} PpcLmRecords[MGL_LM_CAPACITY];
+static ULONG PpcLmCount, PpcLmDropped, PpcLmSerial, PpcLmSharedOrder;
+static BOOL PpcLmDumped;
+
+static struct PpcLmRecord *PpcLmBegin(struct MiniGLR200Context *context,
+    GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type)
+{
+    struct PpcLmRecord *r;
+    ULONG start = PerfClock();
+    ++PpcLmSerial;
+    if (PpcLmCount == MGL_LM_CAPACITY) {
+        ++PpcLmDropped;
+        return NULL;
+    }
+    r = &PpcLmRecords[PpcLmCount++];
+    memset(r, 0, sizeof(*r));
+    MGLLmBegin(&r->time, start);
+    r->serial = PpcLmSerial;
+    r->contextId = FrontendPlatform.contextId;
+    r->name = context ? context->boundTexture[context->activeTexture] : 0;
+    r->errorBefore = context ? context->error : GL_NO_ERROR;
+    r->level = level; r->x = x; r->y = y; r->w = w; r->h = h;
+    r->format = format; r->type = type;
+    return r;
+}
+
+/* At most four small varargs per call: no floats or %llu on WarpOS. */
+static void PpcLmDump(void)
+{
+    FILE *file;
+    ULONG i, phase;
+    if (PpcLmDumped) return;
+    PpcLmDumped = TRUE; /* An I/O failure must not cause repeated teardown I/O. */
+    file = fopen("DH2:wosbuild/q260deep/ppc_lm.txt", "w");
+    if (!file) return;
+    fprintf(file, "PPC_LM capacity=%lu records=%lu dropped=%lu calls=%lu\n",
+        (unsigned long)MGL_LM_CAPACITY, (unsigned long)PpcLmCount,
+        (unsigned long)PpcLmDropped, (unsigned long)PpcLmSerial);
+    fprintf(file, "PPC_LM clock_hz_legacy=%lu shared_attempts=%lu\n",
+        (unsigned long)PlatformClockRate, (unsigned long)PpcLmSharedOrder);
+    fprintf(file, "PPC_LM ticks=raw_timebase_low32 clock_hz_legacy_trusted=0 "
+        "conversion=client_measured_tb_hz output=after_platform_cleanup "
+        "overflow=drop_new phases=exclusive durations=uint32(end-start)\n");
+    fprintf(file, "PPC_LM path=0:unselected,1:shared,2:direct_unclassified,3:direct_fallback_shared "
+        "result=0:early_exit,1:success,2:empty "
+        "old_work_barrier=ready+flush+SubmitAndWait+Barrier_FALSE "
+        "direct_barrier=ready+flush+Submit+conditional_Barrier_FALSE "
+        "native_host_stages_nested_in_platform_call=1\n");
+    for (i = 0; i < PpcLmCount; ++i) {
+        const struct PpcLmRecord *r = &PpcLmRecords[i];
+#define PPC_LM_UL(v) ((unsigned long)(v))
+        fprintf(file, "PPC_LM_ID seq=%lu context=%lu name=%lu shared_order=%lu\n",
+            PPC_LM_UL(r->serial), PPC_LM_UL(r->contextId), PPC_LM_UL(r->name), PPC_LM_UL(r->sharedOrder));
+        fprintf(file, "PPC_LM_RECT seq=%lu level=%ld x=%ld y=%ld\n",
+            PPC_LM_UL(r->serial), (long)r->level, (long)r->x, (long)r->y);
+        fprintf(file, "PPC_LM_SIZE seq=%lu w=%ld h=%ld\n",
+            PPC_LM_UL(r->serial), (long)r->w, (long)r->h);
+        fprintf(file, "PPC_LM_SOURCE seq=%lu format=%lu type=%lu bytes=%lu\n",
+            PPC_LM_UL(r->serial), PPC_LM_UL(r->format), PPC_LM_UL(r->type), PPC_LM_UL(r->sourceBytes));
+        fprintf(file, "PPC_LM_PATH seq=%lu path=%lu bgra_rect_bytes=%lu mailbox=%lu\n",
+            PPC_LM_UL(r->serial), PPC_LM_UL(r->path), PPC_LM_UL(r->wireBytes), PPC_LM_UL(r->mailbox));
+        fprintf(file, "PPC_LM_RESULT seq=%lu result=%lu error_before=%lu error_after=%lu\n",
+            PPC_LM_UL(r->serial), PPC_LM_UL(r->result), PPC_LM_UL(r->errorBefore), PPC_LM_UL(r->errorAfter));
+        fprintf(file, "PPC_LM_TOTAL seq=%lu start=%lu end=%lu ticks=%lu\n",
+            PPC_LM_UL(r->serial), PPC_LM_UL(r->time.start), PPC_LM_UL(r->time.end),
+            PPC_LM_UL((ULONG)(r->time.end - r->time.start)));
+        for (phase = 0; phase < sizeof(PpcLmPhases)/sizeof(PpcLmPhases[0]); ++phase)
+            if (r->time.seen & (1UL << phase))
+                fprintf(file, "PPC_LM_PHASE seq=%lu stage=%s start=%lu end=%lu\n",
+                    PPC_LM_UL(r->serial), PpcLmPhases[phase],
+                    PPC_LM_UL(r->time.begin[phase]), PPC_LM_UL(r->time.finish[phase]));
+#undef PPC_LM_UL
+    }
+    fclose(file);
+}
+#define PPC_LM_NEXT(phase) do { if (lm) MGLLmNext(&lm->time, (phase), PerfClock()); } while (0)
+#else
+#define PPC_LM_NEXT(phase) ((void)0)
+#endif
+
 void R200PPCTimelineMark(ULONG ev, ULONG a, ULONG b)
 {
 #if MGLPPC_PROFILE
@@ -1813,6 +1911,8 @@ BOOL R200PPCPlatformOpen(void)
 #if MGLPPC_PROFILE
     memset(&PlatformProfile, 0, sizeof(PlatformProfile));
     PlatformProfileStart = PlatformProfileClock64();
+    PpcLmCount = PpcLmDropped = PpcLmSerial = PpcLmSharedOrder = 0;
+    PpcLmDumped = FALSE;
 #endif
     R200PPCPlatformResetClientDefaults();
     FrontendPlatform.peerProtocol = 15UL;
@@ -3310,6 +3410,96 @@ static BOOL FrontendShadowEnsure(struct MiniGLR200Context *context,
                                  struct TextureObject *texture,
                                  ULONG width, ULONG height);
 
+/* Existing aggregate diagnostics also belong after the final destroy, not
+ * ahead of a drain that can fail and leave the context alive. */
+static void FrontendContextProfileDump(void)
+{
+#if MGLPPC_PROFILE
+    BatchDiagDump();
+#endif
+    if (FrontendPlatform.cpEnabled &&
+        (CpSurfMissQueries || CpSurfInvalidate || CpSurfCapResets ||
+         CpSurfEpochStale || CpSurfDropped)) {
+        printf("CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu stale=%lu "
+               "drop=%lu\n",
+               (unsigned long)CpSurfHits,
+               (unsigned long)CpSurfMissQueries,
+               (unsigned long)CpSurfCapResets,
+               (unsigned long)CpSurfInvalidate,
+               (unsigned long)CpSurfEpochStale,
+               (unsigned long)CpSurfDropped);
+        fflush(stdout);
+#if MGLPPC_PROFILE
+        {
+            FILE *cpSurfLog = fopen("DH2:mglprof/cp_surf.log", "a");
+            if (cpSurfLog) {
+                fprintf(cpSurfLog,
+                        "CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu "
+                        "stale=%lu drop=%lu\n",
+                        (unsigned long)CpSurfHits,
+                        (unsigned long)CpSurfMissQueries,
+                        (unsigned long)CpSurfCapResets,
+                        (unsigned long)CpSurfInvalidate,
+                        (unsigned long)CpSurfEpochStale,
+                        (unsigned long)CpSurfDropped);
+                fclose(cpSurfLog);
+            }
+        }
+#endif
+    }
+    /* Raw mftb ticks, whole-context exclusive CP publish buckets (resolve
+     * subtracted from emit); the legacy calibration is not a conversion.
+     * Session-4 reporter fix: the previous printf/fprintf had stray format
+     * strings after the call (parsed as comma expressions, harmless) and
+     * the file variant carried nine conversions for six values (undefined
+     * vararg reads: the file's commit/records/draws/rot/tex/clear/replay/
+     * present fields were garbage). Both now print exactly the six
+     * maintained phase counters, plus CP_WAIT. */
+    if (FrontendPlatform.cpEnabled && CpPhasePublishes) {
+        printf("CP_PHASE publishes=%lu "
+               "wait=%lu resolve=%lu emit=%lu copy=%lu publish=%lu\n",
+               (unsigned long)CpPhasePublishes,
+               (unsigned long)CpPhaseWaitTicks,
+               (unsigned long)CpPhaseResolveTicks,
+               (unsigned long)CpPhaseEmitTicks,
+               (unsigned long)CpPhaseCopyTicks,
+               (unsigned long)CpPhasePublishTicks);
+        printf("CP_WAIT host=%lu fence=%lu other=%lu "
+               "maxhost=%lu maxpend=%lu\n",
+               (unsigned long)CpWaitHostTicks,
+               (unsigned long)CpWaitFenceTicks,
+               (unsigned long)CpWaitOtherTicks,
+               (unsigned long)CpWaitMaxBacklog,
+               (unsigned long)CpWaitMaxPending);
+        fflush(stdout);
+#if MGLPPC_PROFILE
+        {
+            FILE *cpPhaseLog = fopen("DH2:mglprof/cp_phase.log", "a");
+            if (cpPhaseLog) {
+                fprintf(cpPhaseLog,
+                        "CP_PHASE publishes=%lu wait=%lu resolve=%lu emit=%lu copy=%lu "
+                        "publish=%lu\n",
+                        (unsigned long)CpPhasePublishes,
+                        (unsigned long)CpPhaseWaitTicks,
+                        (unsigned long)CpPhaseResolveTicks,
+                        (unsigned long)CpPhaseEmitTicks,
+                        (unsigned long)CpPhaseCopyTicks,
+                        (unsigned long)CpPhasePublishTicks);
+                fprintf(cpPhaseLog,
+                        "CP_WAIT host=%lu fence=%lu other=%lu "
+                        "maxhost=%lu maxpend=%lu\n",
+                        (unsigned long)CpWaitHostTicks,
+                        (unsigned long)CpWaitFenceTicks,
+                        (unsigned long)CpWaitOtherTicks,
+                        (unsigned long)CpWaitMaxBacklog,
+                        (unsigned long)CpWaitMaxPending);
+                fclose(cpPhaseLog);
+            }
+        }
+#endif
+    }
+}
+
 void R200PPCDispatchDeleteContext(void)
 {
     ULONG index;
@@ -3327,9 +3517,6 @@ void R200PPCDispatchDeleteContext(void)
     /* A deferred tile cannot outlive its context; the host-side pending
      * direct allocation (if any BEGIN had run) dies with the context. */
     FrontendPlatform.pendingDirectActive = FALSE;
-#if MGLPPC_PROFILE
-    BatchDiagDump();
-#endif
     R200PPCTraceUL("delctx call ctx", (ULONG)R200PPCContext);
     if (!R200PPCContext) {
         R200PPCTraceStr("delctx skip (no ctx)");
@@ -3457,93 +3644,6 @@ void R200PPCDispatchDeleteContext(void)
                         (ULONG)PlatformProfile.rotateStallTicks);
     }
 #endif
-    /* Descriptor-cache attribution: one line at teardown (quiet builds
-     * included), independent of MGLPPC_PROFILE. The DLL console is lost
-     * under Run >NIL:, so profiled builds also append it to a file. */
-    if (FrontendPlatform.cpEnabled &&
-        (CpSurfMissQueries || CpSurfInvalidate || CpSurfCapResets ||
-         CpSurfEpochStale || CpSurfDropped)) {
-        printf("CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu stale=%lu "
-               "drop=%lu\n",
-               (unsigned long)CpSurfHits,
-               (unsigned long)CpSurfMissQueries,
-               (unsigned long)CpSurfCapResets,
-               (unsigned long)CpSurfInvalidate,
-               (unsigned long)CpSurfEpochStale,
-               (unsigned long)CpSurfDropped);
-        fflush(stdout);
-#if MGLPPC_PROFILE
-        {
-            FILE *cpSurfLog = fopen("DH2:mglprof/cp_surf.log", "a");
-            if (cpSurfLog) {
-                fprintf(cpSurfLog,
-                        "CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu "
-                        "stale=%lu drop=%lu\n",
-                        (unsigned long)CpSurfHits,
-                        (unsigned long)CpSurfMissQueries,
-                        (unsigned long)CpSurfCapResets,
-                        (unsigned long)CpSurfInvalidate,
-                        (unsigned long)CpSurfEpochStale,
-                        (unsigned long)CpSurfDropped);
-                fclose(cpSurfLog);
-            }
-        }
-#endif
-    }
-    /* CP publish sub-phase attribution (plan 2026-09-20 W-10): raw mftb
-     * ticks, exclusive buckets (resolve is subtracted from emit), cumulative
-     * whole-context. Quiet builds print to the lost DLL console; profiled
-     * builds also append to a file. */
-    if (FrontendPlatform.cpEnabled && CpPhasePublishes) {
-        /* Session-4 fix: the previous printf/fprintf had stray format
-         * strings after the call (parsed as comma expressions, harmless)
-         * and the file variant carried nine conversions for six values
-         * (undefined vararg reads: the file's commit/records/draws/rot/
-         * tex/clear/replay/present fields were garbage). Both now print
-         * exactly the six maintained phase counters, plus CP_WAIT. */
-        printf("CP_PHASE publishes=%lu "
-               "wait=%lu resolve=%lu emit=%lu copy=%lu publish=%lu\n",
-               (unsigned long)CpPhasePublishes,
-               (unsigned long)CpPhaseWaitTicks,
-               (unsigned long)CpPhaseResolveTicks,
-               (unsigned long)CpPhaseEmitTicks,
-               (unsigned long)CpPhaseCopyTicks,
-               (unsigned long)CpPhasePublishTicks);
-        printf("CP_WAIT host=%lu fence=%lu other=%lu "
-               "maxhost=%lu maxpend=%lu\n",
-               (unsigned long)CpWaitHostTicks,
-               (unsigned long)CpWaitFenceTicks,
-               (unsigned long)CpWaitOtherTicks,
-               (unsigned long)CpWaitMaxBacklog,
-               (unsigned long)CpWaitMaxPending);
-        fflush(stdout);
-#if MGLPPC_PROFILE
-        {
-            FILE *cpPhaseLog = fopen("DH2:mglprof/cp_phase.log", "a");
-            if (cpPhaseLog) {
-                fprintf(cpPhaseLog,
-                        "CP_PHASE publishes=%lu "
-                        "wait=%lu resolve=%lu emit=%lu copy=%lu "
-                        "publish=%lu\n",
-                        (unsigned long)CpPhasePublishes,
-                        (unsigned long)CpPhaseWaitTicks,
-                        (unsigned long)CpPhaseResolveTicks,
-                        (unsigned long)CpPhaseEmitTicks,
-                        (unsigned long)CpPhaseCopyTicks,
-                        (unsigned long)CpPhasePublishTicks);
-                fprintf(cpPhaseLog,
-                        "CP_WAIT host=%lu fence=%lu other=%lu "
-                        "maxhost=%lu maxpend=%lu\n",
-                        (unsigned long)CpWaitHostTicks,
-                        (unsigned long)CpWaitFenceTicks,
-                        (unsigned long)CpWaitOtherTicks,
-                        (unsigned long)CpWaitMaxBacklog,
-                        (unsigned long)CpWaitMaxPending);
-                fclose(cpPhaseLog);
-            }
-        }
-#endif
-    }
 #if defined(R200_FRONTEND_LIBRARY)
     MGLPPCSemanticReplayFree();
 #endif
@@ -3614,6 +3714,7 @@ void R200PPCDispatchDeleteContext(void)
             FrontendPlatform.ringSlots[index] = NULL;
         }
     }
+    FrontendContextProfileDump();
 #if MGLPPC_PROFILE
     {
         const MGLPPCSemanticPlatformProfile *profile = R200PPCPlatformProfile();
@@ -3762,6 +3863,9 @@ void R200PPCPlatformClose(void)
         CloseLibrary((struct Library *)IntuitionBase);
         IntuitionBase = NULL;
     }
+#if MGLPPC_PROFILE
+    PpcLmDump();
+#endif
     R200PPCTraceStr("platclose done");
 }
 
@@ -4532,8 +4636,9 @@ static void FrontendStageTextureBGRA(UBYTE *destination,
  * the direct path -- the whole residency/redraw stays on the proven
  * direct-pipeline rails with no 68k copyback and no new residency
  * churn. Bounded by R200_SHADOW_TOTAL_MAX so a pathological client
- * cannot balloon PPC memory; overflow frees only the new shadow. */
-#define R200_SHADOW_TOTAL_MAX (2UL * 1024UL * 1024UL)
+ * cannot exhaust PPC memory: 4 MiB holds every 128x128 lightmap atlas
+ * of a full Quake map (35 x 64 KiB) with headroom. */
+#define R200_SHADOW_TOTAL_MAX (4UL * 1024UL * 1024UL)
 
 static void FrontendShadowFree(struct TextureObject *texture)
 {
@@ -5312,6 +5417,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #endif
     BOOL chunkOk;
     BOOL sharedUpload = FALSE;
+    BOOL directAllowed;
     /* Paletted sources: Quake's GL_Upload8_EXT path (gl_draw.c:30,
      * GL_COLOR_INDEX8_EXT internalformat with GL_COLOR_INDEX indices).
      * Indices always expand through the frontend palette mirror into
@@ -5419,7 +5525,22 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         return;
     }
     texture = &context->textures[context->boundTexture[context->activeTexture]];
+    /* Mip safety: a direct texture carries exactly ONE level (native
+     * BeginDirectTexture sets levelCount=1) and a later level>0 upload on
+     * it is rejected by the native TexImage2D. Quake uploads level 0
+     * first and mips after, so the ONLY safe predictor is the source
+     * class: single-channel uploads (GL_LUMINANCE/ALPHA/LUMINANCE_ALPHA -
+     * the lightmap class) never carry mips. Do NOT gate on
+     * texture->generated (the frontend BindTexture wrapper calls the
+     * in-DLL Lib_glBindTexture, which marks EVERY bound name generated)
+     * nor on mirror minFilter (its default GL_NEAREST is non-mip, and
+     * Quake sets world-texture filters only AFTER uploading - both
+     * verified by the 2026-09-20 trace: 267/267 direct uploads including
+     * all world textures, their level>0 uploads then lost). */
+    directAllowed = (format == GL_LUMINANCE || format == GL_ALPHA ||
+                     format == GL_LUMINANCE_ALPHA);
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
+        directAllowed &&
         !paletted &&
         level == 0 && width <= 2048 && height <= 2048 &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
@@ -5467,12 +5588,18 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         /* Fuse the canonical-shadow fill into the direct conversion pass:
          * the loop already computes each BGRA dword, so the shadow costs one
          * extra cached store per texel instead of a second conversion pass
-         * (~6 ms per 256x256 upload, U0 attribution). Only when the upload
-         * target owns the shadow, which is keyed to texture unit 0 (see the
-         * subimage patch path). */
-        if (&context->textures[context->boundTexture[0]] == texture &&
-            FrontendShadowEnsure(context, texture, (ULONG)width,
-                                 (ULONG)height))
+         * (~6 ms per 256x256 upload, U0 attribution). The shadow belongs to
+         * the UPLOAD TARGET regardless of unit: GLQuake uploads its
+         * lightmaps while a world texture sits on unit 0, and the subimage
+         * patch-and-recommit path needs the TARGET's own shadow.
+         * Retain shadows ONLY for the directAllowed (lightmap) class: every
+         * direct-uploaded texture would exhaust R200_SHADOW_TOTAL_MAX before
+         * the last-loaded lightmaps (n=261-266 of 267) ever got one, and
+         * their subimages silently fell back to the shared path (2026-09-20
+         * trace evidence: 267 dbeg, no subimage recommissions). */
+        if (directAllowed && FrontendShadowEnsure(context, texture,
+                                                  (ULONG)width,
+                                                  (ULONG)height))
             fusedShadow = texture->shadow;
         if (FrontendDirectTextureUpload(context, (ULONG)width,
                                         (ULONG)height, format, type,
@@ -5491,23 +5618,23 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                 return;
             }
             FrontendMirrorTextureReply(context);
-            /* The fused pass above fills the canonical shadow whenever the
-             * upload target owns it. Stage it separately only when the
-             * target does not own the shadow (unit-0 keying) or Ensure
-             * failed, so a following TexSubImage can patch-and-recommit. */
+            /* The fused pass above fills the canonical shadow whenever
+             * Ensure succeeded. Stage it separately only when Ensure
+             * failed (or the fused write was skipped), so a following
+             * TexSubImage can patch-and-recommit. The shadow belongs to
+             * the upload target - see the fused-stage comment above. */
             if (!fusedShadow) {
 #if MGLPPC_PROFILE
                 chunkStart = PerfClock();
 #endif
                 {
-                    struct TextureObject *shadowTarget =
-                        &context->textures[context->boundTexture[0]];
                     ULONG shadowSourceBytes =
                         MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
-                    if (FrontendShadowEnsure(context, shadowTarget,
+                    if (directAllowed &&
+                        FrontendShadowEnsure(context, texture,
                                              (ULONG)width, (ULONG)height))
                         FrontendStageTextureBGRA(
-                            shadowTarget->shadow, source + sourceOffset,
+                            texture->shadow, source + sourceOffset,
                             width, height, format, type, shadowSourceBytes,
                             rowBytes, sourceStride);
                 }
@@ -5747,10 +5874,17 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #endif
 }
 
+#if MGLPPC_PROFILE
+static void FrontendProfiledTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                                  GLint yoffset, GLsizei width, GLsizei height,
+                                  GLenum format, GLenum type,
+                                  const GLvoid *pixels, struct PpcLmRecord *lm)
+#else
 void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                                   GLint yoffset, GLsizei width, GLsizei height,
                                   GLenum format, GLenum type,
                                   const GLvoid *pixels)
+#endif
 {
     struct MiniGLR200Context *context = CurrentContext();
     struct TextureObject *texture;
@@ -5804,7 +5938,12 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         SetError(context, GL_INVALID_VALUE);
         return;
     }
-    if (!width || !height) return;
+    if (!width || !height) {
+#if MGLPPC_PROFILE
+        if (lm) lm->result = 2;
+#endif
+        return;
+    }
     if (!pixels || !MGLPPCTextureSpan(width, height, bpp,
             context->unpackAlignment, context->unpackRowLength,
             context->unpackSkipRows, context->unpackSkipPixels, (ULONG)pixels,
@@ -5819,6 +5958,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
 #if MGLPPC_PROFILE
     textureStart = PerfClock();
 
+    if (lm) lm->sourceBytes = (ULONG)width * (ULONG)height * bpp;
     PlatformProfile.textureCalls++;
     PlatformProfile.textureBytes += bytes;
     PlatformProfile.textureSharedCalls++;
@@ -5827,6 +5967,9 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
      * the shared cap applies to the canonical size (the host validates
      * the staging span at bpp 4). */
     bytes = (ULONG)width * (ULONG)height * 4UL;
+#if MGLPPC_PROFILE
+    if (lm) lm->wireBytes = bytes;
+#endif
     if (bytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES) {
         SetError(context, GL_INVALID_OPERATION);
         return;
@@ -5834,6 +5977,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     /* A deferred direct tile owns the texture's shadow (its staging) and
      * the shared upload buffer; complete it before either can be patched,
      * freed, or reused. */
+    PPC_LM_NEXT(PPC_LM_PENDING);
     if (!R200PPCPendingUploadFlush(context)) {
         SetError(context, GL_INVALID_OPERATION);
         return;
@@ -5859,12 +6003,15 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
 #if MGLPPC_PROFILE
         subChunkStart = PerfClock();
         PlatformProfile.textureBarrierCalls++;
+        if (lm) lm->path = 2;
 #endif
+        PPC_LM_NEXT(PPC_LM_DIRECT_PATCH);
         /* The shadow patch precedes publishing: the client's texels are
          * the truth until the commit completes. */
         FrontendShadowPatch(texture, (const UBYTE *)pixels + offset,
                             width, height, format, type,
                             bpp, stride, xoffset, yoffset);
+        PPC_LM_NEXT(PPC_LM_DIRECT_BARRIER);
         if (!PlatformMailboxReady() ||
             !FlushScreenVertices(context) || !Submit(context) ||
             (FrontendPlatform.ring &&
@@ -5880,6 +6027,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         subChunkStart = PerfClock();
         PlatformProfile.textureDirectCalls++;
 #endif
+        PPC_LM_NEXT(PPC_LM_DIRECT);
         if (FrontendDirectTextureUpload(context, texture->shadowWidth,
                                         texture->shadowHeight,
                                         MGL_UBYTE_BGRA, GL_UNSIGNED_BYTE,
@@ -5889,6 +6037,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
 #if MGLPPC_PROFILE
             PlatformProfile.textureDirectTicks += PerfClock() - subChunkStart;
 #endif
+            PPC_LM_NEXT(PPC_LM_DIRECT_REPLY);
             if (!FrontendPlatform.control.value[1] ||
                 !FrontendPlatform.control.value[2] ||
                 !FrontendPlatform.control.value[3] ||
@@ -5902,6 +6051,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
 #if MGLPPC_PROFILE
             PlatformProfile.textureSuccesses++;
             PlatformProfile.textureTicks += PerfClock() - textureStart;
+            if (lm) lm->result = 1;
 #endif
             return;
         }
@@ -5914,6 +6064,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
             SetError(context, GL_INVALID_OPERATION);
             return;
         }
+        PPC_LM_NEXT(PPC_LM_ABORT);
         memset(&FrontendPlatform.control, 0,
                sizeof(FrontendPlatform.control));
         FrontendPlatform.control.value[0] = name;
@@ -5926,7 +6077,12 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
          * stays the committed PPC-side truth for the next attempt. */
     }
     /* Old snapshots must be published and fenced before native invalidation. */
+#if MGLPPC_PROFILE
+    if (lm) lm->path = lm->path == 2 ? 3 : 1;
+#endif
+    PPC_LM_NEXT(PPC_LM_BARRIER);
     if (!FrontendTextureBarrier(context)) return;
+    PPC_LM_NEXT(PPC_LM_STAGE);
     if (!FrontendEnsureTextureUploadBuffer(bytes)) {
         SetError(context, GL_OUT_OF_MEMORY);
         return;
@@ -5936,7 +6092,9 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     FrontendStageTextureBGRA(FrontendPlatform.textureUploadBuffer,
         (const UBYTE *)pixels + offset, width, height, format, type,
         bpp, rowBytes, stride);
+    PPC_LM_NEXT(PPC_LM_CACHE);
     MGLPPCFlushDataRange(FrontendPlatform.textureUploadBuffer, bytes);
+    PPC_LM_NEXT(PPC_LM_REQUEST);
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = name;
     FrontendPlatform.control.value[1] = level;
@@ -5959,11 +6117,20 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     texture->surface.Handle = NULL;
     texture->residentGeneration = 0;
     BumpSemanticStateSerial(context);
+#if MGLPPC_PROFILE
+    ++PpcLmSharedOrder; /* Attempts, not a new protocol field or native-call count. */
+    if (lm) {
+        lm->sharedOrder = PpcLmSharedOrder;
+        lm->mailbox = FrontendPlatform.mailbox != NULL;
+    }
+#endif
+    PPC_LM_NEXT(PPC_LM_CALL);
     if (!PlatformCall(MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED,
                       FrontendPlatform.contextId)) {
         FrontendSetTransportError(context);
         return;
     }
+    PPC_LM_NEXT(PPC_LM_MIRROR);
     if (!FrontendPlatform.control.value[1] ||
         FrontendPlatform.control.value[2] != texture->width ||
         FrontendPlatform.control.value[3] != texture->height ||
@@ -5977,8 +6144,28 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
 #if MGLPPC_PROFILE
     PlatformProfile.textureSuccesses++;
     PlatformProfile.textureTicks += PerfClock() - textureStart;
+    if (lm) lm->result = 1;
 #endif
 }
+
+#if MGLPPC_PROFILE
+/* One exit snapshot even for validation, barrier, allocation or transport
+ * failure. Peek the sticky GL error; never consume or replace it. */
+void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                                  GLint yoffset, GLsizei width, GLsizei height,
+                                  GLenum format, GLenum type, const GLvoid *pixels)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    struct PpcLmRecord *lm = PpcLmBegin(context, level, xoffset, yoffset,
+                                       width, height, format, type);
+    FrontendProfiledTexSubImage2D(target, level, xoffset, yoffset, width, height,
+                                 format, type, pixels, lm);
+    if (lm) {
+        lm->errorAfter = context ? context->error : GL_NO_ERROR;
+        MGLLmNext(&lm->time, MGL_LM_PHASES, PerfClock());
+    }
+}
+#endif
 
 void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
 {
