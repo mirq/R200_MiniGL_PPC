@@ -580,6 +580,12 @@ void Lib_glHint(GLenum target, GLenum mode)
         }
         if (mode == GL_NICEST) {
             ResetPerf(context);
+#if R200_PPC_FRONTEND
+            /* Start CP attribution at the same measurement boundary as
+             * the client's perf counters (the timedemo calls this hint
+             * exactly when its frame timer starts). */
+            R200PPCResetCpAttribution();
+#endif
             context->perfEnabled = TRUE;
         } else if (mode == GL_FASTEST) {
             context->perfEnabled = FALSE;

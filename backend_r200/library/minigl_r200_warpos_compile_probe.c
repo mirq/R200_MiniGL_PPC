@@ -1497,6 +1497,36 @@ static ULONG CpPhasePublishes;
 static ULONG CpPhaseWaitTicks, CpPhaseResolveTicks, CpPhaseEmitTicks,
              CpPhaseCopyTicks, CpPhasePublishTicks;
 
+/* Wait-classification attribution (plan 2026-09-20 session 4). While the
+ * publish wait loop stalls, sample the ring every 256 spins and attribute
+ * the interval since the previous sample to the observed blocking state:
+ *   host  - consumption backlog full (head - completed >= slots): the 68k
+ *           host is not consuming entries fast enough;
+ *   fence - consumption caught up but retirement lagging (completed >
+ *           retired): GPU fences still pending (execution + observation);
+ *   other - neither (sampling race or a momentarily stale line).
+ * maxhost/maxpend record the deepest backlog / pending depth seen. The
+ * final partial interval (<256 spins) is not attributed. Plain ULONG
+ * counters; 32-bit wrap, like every other tick counter here. */
+static ULONG CpWaitHostTicks, CpWaitFenceTicks, CpWaitOtherTicks;
+static ULONG CpWaitMaxBacklog, CpWaitMaxPending;
+
+/* Reset every CP attribution counter (descriptor cache, publish phases,
+ * wait classification) without touching the cache itself. Called from
+ * Lib_glHint(MGL_PERF_COUNTERS_HINT, GL_NICEST) so a timedemo's counters
+ * start at the demo boundary instead of covering context setup and map
+ * load (plan 2026-09-20 W-11). */
+void R200PPCResetCpAttribution(void)
+{
+    CpSurfHits = CpSurfMissQueries = CpSurfCapResets = 0;
+    CpSurfInvalidate = CpSurfEpochStale = CpSurfDropped = 0;
+    CpPhasePublishes = 0;
+    CpPhaseWaitTicks = CpPhaseResolveTicks = CpPhaseEmitTicks = 0;
+    CpPhaseCopyTicks = CpPhasePublishTicks = 0;
+    CpWaitHostTicks = CpWaitFenceTicks = CpWaitOtherTicks = 0;
+    CpWaitMaxBacklog = CpWaitMaxPending = 0;
+}
+
 /* Remove one token from the descriptor cache (swap-remove). Tokens are
  * unique among live surfaces, so the first match is the only match. */
 static void FrontendDropCachedSurface(ULONG token)
@@ -2039,6 +2069,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     struct MGLPPCEmitVertices vertices;
     ULONG head, ringSlot, count, index, segmentIx = 0xffffffffUL;
     ULONG cpRetiredSeen = 0;
+    ULONG waitSamples = 0, waitSampleTime = 0, waitClass = 0;
     ULONG *staging, start = PerfClock(), spin = 0;
     ULONG waitStart, emitStart, copyStart, publishStart;
     ULONG resolveBefore, emitElapsed, resolveDelta;
@@ -2053,6 +2084,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
         if (!(spin & 255UL)) {
             MGLPPCInvalidateLine32((APTR)&control->head);
             MGLPPCInvalidateLine32((APTR)&control->retired);
+            MGLPPCInvalidateLine32((APTR)&control->completed);
             /* Progress-aware yield budget (same policy as the validated
              * drain loop): as long as GPU retirement keeps moving, keep
              * spinning -- every yield parks a full ~20 ms tick on this
@@ -2071,6 +2103,32 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
             break;
         if (PerfClock() - start >= PlatformClockRate * 5UL || ++spin > 5000000UL)
             goto failed;
+        if (!(++waitSamples & 255UL)) {
+            /* Genuinely stalling here (the break/timeout checks ran
+             * first): sample the blocking state and attribute the time
+             * since the previous sample to it. */
+            ULONG now = PerfClock();
+            ULONG backlog = head - control->completed;
+            ULONG pending = control->completed - control->retired;
+            ULONG cls = backlog >= MGLPPC_RING_SLOTS ? 1UL :
+                        pending ? 2UL : 3UL;
+            ULONG delta = now - waitSampleTime;
+
+            if (waitClass) {
+                if (waitClass == 1UL)
+                    CpWaitHostTicks += delta;
+                else if (waitClass == 2UL)
+                    CpWaitFenceTicks += delta;
+                else
+                    CpWaitOtherTicks += delta;
+            }
+            waitClass = cls;
+            waitSampleTime = now;
+            if (backlog > CpWaitMaxBacklog)
+                CpWaitMaxBacklog = backlog;
+            if (pending > CpWaitMaxPending)
+                CpWaitMaxPending = pending;
+        }
         if (!(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
             MGLPPCYield();
     }
@@ -2480,6 +2538,54 @@ BOOL R200PPCPlatformWaitSlot(struct MiniGLR200Context *context,
     return ok && message->status == MGLPPC_STATUS_OK;
 }
 
+/* W-80: publish a zero-payload drain request. The host closes any open
+ * fence-coalescing run (interface-19 Radeon3DSubmitFence) and drains, so a
+ * retirement spin that follows can complete even when the newest dispatch
+ * was published without a fence. Only published when CP emit is active and
+ * the host advertised MGLPPC_CAP_FENCE_DRAIN; otherwise retirement already
+ * advances on its own and an unknown flag must not reach an older host. */
+static BOOL PublishDrainEntry(volatile MGLPPCRingControlV1 *control)
+{
+    ULONG spin = 0;
+
+    if (!FrontendPlatform.cpEnabled ||
+        !(FrontendPlatform.capabilities & MGLPPC_CAP_FENCE_DRAIN))
+        return TRUE;
+    while ((control->head - control->completed) >= control->slotCount) {
+        if (!(spin & 255UL)) {
+            MGLPPCInvalidateLine32((APTR)&control->head);
+            MGLPPCInvalidateLine32((APTR)&control->completed);
+            if (!control->error &&
+                (control->head - control->completed) < control->slotCount)
+                break;
+        }
+        if (control->error || ++spin > 5000000UL) {
+            R200PPCConsolePrintf("RING drain_publish_fail head=%lu "
+                   "completed=%lu err=%lu\n",
+                   (unsigned long)control->head,
+                   (unsigned long)control->completed,
+                   (unsigned long)control->error);
+            return FALSE;
+        }
+    }
+    {
+        ULONG ringSlot = control->head % control->slotCount;
+        volatile MGLPPCRingEntryV1 *entry = &control->entries[ringSlot];
+
+        entry->slot = ringSlot;
+        entry->dwords = 0;
+        entry->generation = ++FrontendPlatform.ringPostSerial;
+        if (!entry->generation)
+            entry->generation = ++FrontendPlatform.ringPostSerial;
+        entry->flags = MGLPPC_SEMANTIC_FLAG_DRAIN;
+        entry->crc = 0;
+        MGLPPCFlushDataRange((APTR)entry, sizeof(*entry));
+        control->head = control->head + 1;
+        MGLPPCFlushDataRange((APTR)&control->head, sizeof(control->head));
+    }
+    return TRUE;
+}
+
 BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
 {
 #if MGLPPC_PROFILE
@@ -2606,6 +2712,10 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
          * next frame's submits. Let the PPC build ahead while the host drains
          * the fence and blits; explicit barriers still wait below. */
         if (result && !present) {
+            /* W-80: request a fence close + drain so retirement can reach
+             * head even when the newest dispatch was published fence-less. */
+            if (!PublishDrainEntry(control))
+                result = FALSE;
 #if MGLPPC_CLIENT_TRACE
             static ULONG drainWaits;
             ++drainWaits;
@@ -2748,6 +2858,12 @@ BOOL R200PPCPlatformRotateSegment(struct MiniGLR200Context *context,
         }
     }
     next = (context->segmentPoolNext + 1UL) % context->segmentPoolCount;
+    /* W-80: the wait below needs a fence covering this segment; the newest
+     * dispatch may be fence-less, so ask the host to close the run first. */
+    if (!PublishDrainEntry(control)) {
+        R200PPCConsolePrintf("RING rotate drain_publish failed\n");
+        return FALSE;
+    }
     /* Host consumption releases ring slots, but only a completed later fence
      * retires the GPU's ordered reads from a vertex segment. */
 #if MGLPPC_CLIENT_TRACE
@@ -3379,6 +3495,12 @@ void R200PPCDispatchDeleteContext(void)
      * whole-context. Quiet builds print to the lost DLL console; profiled
      * builds also append to a file. */
     if (FrontendPlatform.cpEnabled && CpPhasePublishes) {
+        /* Session-4 fix: the previous printf/fprintf had stray format
+         * strings after the call (parsed as comma expressions, harmless)
+         * and the file variant carried nine conversions for six values
+         * (undefined vararg reads: the file's commit/records/draws/rot/
+         * tex/clear/replay/present fields were garbage). Both now print
+         * exactly the six maintained phase counters, plus CP_WAIT. */
         printf("CP_PHASE publishes=%lu "
                "wait=%lu resolve=%lu emit=%lu copy=%lu publish=%lu\n",
                (unsigned long)CpPhasePublishes,
@@ -3387,15 +3509,21 @@ void R200PPCDispatchDeleteContext(void)
                (unsigned long)CpPhaseEmitTicks,
                (unsigned long)CpPhaseCopyTicks,
                (unsigned long)CpPhasePublishTicks);
-               "tex=%lu clear=%lu replay=%lu present=%lu\n",
+        printf("CP_WAIT host=%lu fence=%lu other=%lu "
+               "maxhost=%lu maxpend=%lu\n",
+               (unsigned long)CpWaitHostTicks,
+               (unsigned long)CpWaitFenceTicks,
+               (unsigned long)CpWaitOtherTicks,
+               (unsigned long)CpWaitMaxBacklog,
+               (unsigned long)CpWaitMaxPending);
         fflush(stdout);
 #if MGLPPC_PROFILE
         {
             FILE *cpPhaseLog = fopen("DH2:mglprof/cp_phase.log", "a");
             if (cpPhaseLog) {
                 fprintf(cpPhaseLog,
-                        "CP_PHASE publishes=%lu commit=%lu records=%lu "
-                        "draws=%lu wait=%lu resolve=%lu emit=%lu copy=%lu "
+                        "CP_PHASE publishes=%lu "
+                        "wait=%lu resolve=%lu emit=%lu copy=%lu "
                         "publish=%lu\n",
                         (unsigned long)CpPhasePublishes,
                         (unsigned long)CpPhaseWaitTicks,
@@ -3403,7 +3531,14 @@ void R200PPCDispatchDeleteContext(void)
                         (unsigned long)CpPhaseEmitTicks,
                         (unsigned long)CpPhaseCopyTicks,
                         (unsigned long)CpPhasePublishTicks);
-                        "rot=%lu tex=%lu clear=%lu replay=%lu present=%lu\n",
+                fprintf(cpPhaseLog,
+                        "CP_WAIT host=%lu fence=%lu other=%lu "
+                        "maxhost=%lu maxpend=%lu\n",
+                        (unsigned long)CpWaitHostTicks,
+                        (unsigned long)CpWaitFenceTicks,
+                        (unsigned long)CpWaitOtherTicks,
+                        (unsigned long)CpWaitMaxBacklog,
+                        (unsigned long)CpWaitMaxPending);
                 fclose(cpPhaseLog);
             }
         }

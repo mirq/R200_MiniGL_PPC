@@ -1041,6 +1041,11 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present);
  * invalidate its staging buffer. */
 BOOL R200PPCPendingUploadFlush(struct MiniGLR200Context *context);
 ULONG R200PPCPlatformStallTicks(void);
+/* Clear the CP attribution counters (descriptor cache stats, publish
+ * phases, wait classification) at a measurement boundary - called from
+ * Lib_glHint(MGL_PERF_COUNTERS_HINT, GL_NICEST) so timedemo reports cover
+ * only the demo interval. The descriptor cache itself is untouched. */
+void R200PPCResetCpAttribution(void);
 /* PPC serialization kernels (client/minigl_ppc_serial.s): byte-reversing
  * block copies from the ScreenVertex array into a streaming vertex
  * segment, mirroring the m68k movem serializers in r200_geometry.c.

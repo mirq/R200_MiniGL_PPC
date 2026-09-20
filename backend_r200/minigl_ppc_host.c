@@ -157,6 +157,17 @@ typedef struct MGLPPCHostState {
     ULONG fenceSerial[MGLPPC_INFLIGHT_SLOTS];
     ULONG fenceMask[MGLPPC_INFLIGHT_SLOTS];
     ULONG fenceCount;
+    /* W-80 fence coalescing (driver interface 19): fence every Nth CP
+     * dispatch instead of every dispatch, then close the run with
+     * Radeon3DSubmitFence() before any drain. In-order CP execution makes
+     * the closing fence cover every earlier dispatch, so retirement keeps
+     * its exact meaning while the GPU stops draining once per dispatch.
+     * fenceGroupSize 1 disables coalescing (legacy behaviour). */
+    ULONG fenceGroupSize;
+    ULONG fenceGroupCount;
+    ULONG pendingSegMask;
+    ULONG pendingUnfenced;
+    BOOL fenceCoalesce;
     ULONG semanticExecutes;
     ULONG semanticBoundTexture;
     int semanticRegistered;
@@ -573,13 +584,17 @@ static void PublishRetired(MGLPPCHostState *state, ULONG retired)
 }
 
 /* Everything before the oldest in-flight submission is retired; with none
- * outstanding, every consumed entry is. */
+ * outstanding, every consumed entry is. W-80: a pending fence-less run makes
+ * "no queued fence" mean "nothing provably finished" rather than "everything
+ * consumed is done", so retirement must hold still until the run is closed. */
 static void AdvanceRetired(MGLPPCHostState *state)
 {
     if (!state->ringControl)
         return;
     if (state->fenceCount)
         PublishRetired(state, state->fenceSerial[0]);
+    else if (state->pendingUnfenced)
+        return;
     else
         PublishRetired(state, state->ringCompleted);
 }
@@ -634,6 +649,31 @@ static void ClearFences(MGLPPCHostState *state)
     state->semanticFence = 0;
 }
 
+/* W-80: close an open fence-coalescing run. Every drain needs a fence that
+ * covers all submitted dispatches, including the fence-less tail, so submit
+ * a fence-only kick when something is pending. In-order CP execution makes
+ * that fence cover every earlier dispatch. */
+static BOOL CloseFenceGroup(MGLPPCHostState *state)
+{
+    ULONG fence = 0;
+
+    if (!state->fenceCoalesce || !state->pendingUnfenced)
+        return TRUE;
+    if (!state->ringDeviceToken ||
+        !Radeon3DSubmitFence((struct Radeon3DDevice *)state->ringDeviceToken,
+                             &fence) || !fence)
+        return FALSE;
+    if (!RecordFence(state, state->ringCompleted, fence,
+                     state->pendingSegMask)) {
+        state->cpFailed = TRUE;
+        return FALSE;
+    }
+    state->pendingSegMask = 0;
+    state->pendingUnfenced = 0;
+    state->fenceGroupCount = 0;
+    return TRUE;
+}
+
 /* Blocking drain of every in-flight submission, oldest first. PRESENT,
  * teardown and every path that needs GPU quiescence (texture BEGIN, readback,
  * inline semantic execute) uses this. */
@@ -641,6 +681,10 @@ static BOOL DrainSemanticFence(MGLPPCHostState *state)
 {
     MGLR200PrivateBridgeV1 bridge;
 
+    /* A pending fence-less run must be closed before the queue can be
+     * considered complete. */
+    if (!CloseFenceGroup(state))
+        return FALSE;
     if (!state->fenceCount) {
         state->queuedSegmentMask = 0;
         AdvanceRetired(state);
@@ -662,6 +706,10 @@ static BOOL DrainForSegment(MGLPPCHostState *state, ULONG segmentIx)
 {
     ULONG bit = 1UL << segmentIx;
 
+    /* A fence-less run may still reference this segment even though no
+     * queued fence names it; draining closes the run first. */
+    if (state->pendingUnfenced && (state->pendingSegMask & bit))
+        return DrainSemanticFence(state);
     if (!(state->ringRadeonCaps & RADEON3D_CAP_ORDERED_COMMITS) ||
         (state->queuedSegmentMask & bit))
         return DrainSemanticFence(state);
@@ -981,6 +1029,10 @@ static BOOL DiscardSemantic(MGLPPCHostState *state, BOOL force)
     state->ringDeviceToken = 0;
     state->ringDeviceGeneration = 0;
     state->ringRadeonCaps = 0;
+    state->fenceCoalesce = FALSE;
+    state->fenceGroupCount = 0;
+    state->pendingSegMask = 0;
+    state->pendingUnfenced = 0;
     state->queuedSegmentMask = 0;
     state->vertexSegmentCount = 0;
     if (state->semanticDriverOpen) {
@@ -1139,6 +1191,11 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
     state->ringDeviceGeneration = info.Generation;
     state->ringDeviceToken = bridge.deviceToken;
     state->ringRadeonCaps = info.Caps;
+    /* W-80: coalescing needs the new driver capability AND an explicit
+     * group size above 1. Default is 1 (fence every dispatch). */
+    state->fenceCoalesce =
+        (state->fenceGroupSize > 1UL &&
+         (info.Caps & RADEON3D_CAP_FENCE_COALESCE) != 0) ? TRUE : FALSE;
     state->queuedSegmentMask = 0;
     state->indirectProbeOk =
         (message->value[3] & MGLPPC_RING_REGISTER_INDIRECT) &&
@@ -1495,6 +1552,7 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
     struct Radeon3DIndirect indirect;
     MGLR200PrivateBridgeV2 bridge;
     ULONG mask, fence = 0;
+    BOOL wantFence = TRUE;
 #if MGLPPC_PROFILE
     ULONG cpStage, cpEntryStart;
 #endif
@@ -1533,19 +1591,41 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
         }
     }
     HOST_STAGE(HostCpDrainTicks, cpStage);
+    /* W-80 fence decision, after any drain (which may have closed a run and
+     * reset the counter): a dispatch fences when coalescing is off or this
+     * dispatch would complete a group. */
+    wantFence = (!state->fenceCoalesce ||
+                 state->fenceGroupCount + 1UL >= state->fenceGroupSize) ?
+                TRUE : FALSE;
     CpFailStage = "bridge";
     if (!QueryBackendBridgeV2(&bridge) ||
         bridge.deviceEpoch != state->ringDeviceEpoch ||
-        bridge.deviceToken != state->ringDeviceToken ||
-        !Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
-                                  &indirect, &fence) || !fence) {
+        bridge.deviceToken != state->ringDeviceToken) {
+        CpFailStage = "dispatch";
+        return FALSE;
+    }
+    if (!wantFence)
+        indirect.Flags = RADEON3D_INDIRECT_NO_FENCE;
+    if (!Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
+                                  &indirect, &fence) ||
+        (wantFence && !fence)) {
         CpFailStage = "dispatch";
         return FALSE;
     }
     HOST_STAGE(HostCpDispatchTicks, cpStage);
     CpFailStage = "record";
-    if (!RecordFence(state, state->ringCompleted, fence, mask))
-        return FALSE;
+    if (wantFence) {
+        mask |= state->pendingSegMask;
+        state->pendingSegMask = 0;
+        state->pendingUnfenced = 0;
+        state->fenceGroupCount = 0;
+        if (!RecordFence(state, state->ringCompleted, fence, mask))
+            return FALSE;
+    } else {
+        state->pendingSegMask |= mask;
+        ++state->pendingUnfenced;
+        ++state->fenceGroupCount;
+    }
     /* Sanity only: the PPC stamped the target it observed through the v6
      * publication. A mismatch means the native drawing buffer moved between
      * the PPC's last read and this dispatch (for example an out-of-band
@@ -1663,14 +1743,25 @@ static BOOL FlushCommitAccumulator(MGLPPCHostState *state,
         return FALSE;
     }
     HOST_STAGE(HostSubmitTicks, stageStart);
-    if (!RecordFence(state,
-                     state->ringCompleted ? state->ringCompleted - 1UL : 0UL,
-                     fence, 1UL << RingAccSegmentIx)) {
-        mglUnlockDisplay();
-        state->displayLocked = 0;
-        RingAccValid = FALSE;
-        return FALSE;
+    /* This fenced submission also covers any fence-less dispatches of an
+     * open W-80 run: fold their segment mask into the record and close the
+     * run, or the group counter and pending mask would describe a run that
+     * no longer exists. No-op when coalescing is off (pending are zero). */
+    {
+        ULONG folded = (1UL << RingAccSegmentIx) | state->pendingSegMask;
+
+        if (!RecordFence(state,
+                         state->ringCompleted ? state->ringCompleted - 1UL : 0UL,
+                         fence, folded)) {
+            mglUnlockDisplay();
+            state->displayLocked = 0;
+            RingAccValid = FALSE;
+            return FALSE;
+        }
     }
+    state->pendingSegMask = 0;
+    state->pendingUnfenced = 0;
+    state->fenceGroupCount = 0;
     RingAccValid = FALSE;
     return TRUE;
 }
@@ -1787,7 +1878,26 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
         }
-        if (entry.flags & MGLPPC_SEMANTIC_FLAG_CP_EMIT) {
+        if (entry.flags & MGLPPC_SEMANTIC_FLAG_DRAIN) {
+            /* W-80: the publisher wants every submitted dispatch retired, so
+             * close the fence-coalescing run and drain. The zero-payload
+             * entry consumed no slot data. */
+            if (!DrainSemanticFence(state)) {
+                printf("MiniGLPPC host: drain_entry_fail fence=%lu "
+                       "completed=%lu head=%lu\n",
+                       (unsigned long)state->semanticFence,
+                       (unsigned long)state->ringCompleted,
+                       (unsigned long)control->head);
+                fflush(stdout);
+                control->error = 1;
+                CacheClearE((APTR)&control->error, sizeof(control->error), CACRF_ClearD);
+                break;
+            }
+            /* Keep the slot-generation invariant true for this slot even
+             * though the entry carried no payload. */
+            state->ringLastGen[entry.slot] = entry.generation;
+            bridgeValid = FALSE;
+        } else if (entry.flags & MGLPPC_SEMANTIC_FLAG_CP_EMIT) {
             if (!ExecuteCpEntry(state, &entry, slotAddr)) {
                 printf("MiniGLPPC host: cp_emit_fail stage=%s slot=%lu "
                        "dwords=%lu gen=%lu last=%lu fences=%lu disp=%lu\n",
@@ -2962,6 +3072,12 @@ static void HandleMessage(MGLPPCMessage *message,
 #else
                             | MGLPPC_CAP_CRC_FIRST_ONLY;
 #endif
+        /* W-80: the drain-entry protocol is offered from the moment a group
+         * size is configured. Actual coalescing additionally requires the
+         * driver capability, but a DRAIN entry with coalescing off is a
+         * harmless extra drain, so the intent bit can be advertised here. */
+        if (state->fenceGroupSize > 1UL)
+            message->value[3] |= MGLPPC_CAP_FENCE_DRAIN;
         break;
     case MGLPPC_CMD_SHUTDOWN:
         if (state->cpSegmentLeased && state->context) {
@@ -3977,6 +4093,38 @@ static BOOL PollMailbox(MGLPPCHostState *state)
 
 /* Startup only. A busy host must never turn an ASCII digit/sign into a
  * priority above input.device. Unset/empty preserves the inherited priority. */
+/* W-80: MGLPPC_FENCE_GROUP selects how many CP dispatches share one fence.
+ * Unset/1 keeps the legacy fence-every-dispatch behaviour. Values are
+ * clamped to the ring slot count so every retirement window still contains
+ * a fence; the value only takes effect when the driver advertises
+ * RADEON3D_CAP_FENCE_COALESCE at registration. */
+static ULONG ReadFenceGroupSize(void)
+{
+    char value[16], *end;
+    LONG length;
+    long parsed;
+    ULONG index;
+
+    length = GetVar((CONST_STRPTR)"MGLPPC_FENCE_GROUP", (UBYTE *)value,
+                    sizeof(value), GVF_GLOBAL_ONLY);
+    if (length <= 0)
+        return 1;
+    if ((ULONG)length >= sizeof(value) - 1UL)
+        return 1;
+    /* Digits only: strtol would accept leading space or signs, and anything
+     * unusual must fall back to the safe legacy group of one. */
+    for (index = 0; index < (ULONG)length; ++index)
+        if (value[index] < '0' || value[index] > '9')
+            return 1;
+    value[length] = '\0';
+    parsed = strtol(value, &end, 10);
+    if (end == value || *end || parsed < 2L)
+        return 1;
+    if (parsed > (long)MGLPPC_RING_SLOTS)
+        parsed = (long)MGLPPC_RING_SLOTS;
+    return (ULONG)parsed;
+}
+
 static BOOL ReadHostPriority(LONG *priority, BOOL *specified)
 {
     char value[16], *end;
@@ -4031,6 +4179,12 @@ int main(int argc, char **argv)
     if (!ReadHostPriority(&hostPriority, &prioritySpecified)) {
         printf("MiniGLPPC host: MGLPPC_HOSTPRI must be an integer from -20 to 2\n");
         return 20;
+    }
+    state.fenceGroupSize = ReadFenceGroupSize();
+    if (state.fenceGroupSize > 1UL) {
+        printf("MiniGLPPC host: fence group=%lu (driver capability gated)\n",
+               (unsigned long)state.fenceGroupSize);
+        fflush(stdout);
     }
     if (argc > 1 && strcmp(argv[1], "--probe-only") == 0) {
         printf("MiniGLPPC host: probe-only mode\n");

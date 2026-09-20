@@ -125,6 +125,12 @@ typedef uint32_t ULONG;
  * single-tile direct path enabled; the client falls back to the existing
  * BEGIN/COMMIT pair when absent. */
 #define MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1 (1UL << 14)
+/* W-80: the host understands zero-payload MGLPPC_SEMANTIC_FLAG_DRAIN ring
+ * entries (close a fence-coalescing run, then drain). Advertised in HELLO
+ * when the host was started with a fence group above 1; publication is
+ * further gated on CP emit. A host without this bit never sees a DRAIN
+ * entry, and a client without it never publishes one. */
+#define MGLPPC_CAP_FENCE_DRAIN (1UL << 15)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL
@@ -163,6 +169,13 @@ typedef uint32_t ULONG;
  * A slice is reusable only after retired, NOT after completed. No PRESENT
  * flag is accepted here; ordinary zero-payload barriers present/drain. */
 #define MGLPPC_SEMANTIC_FLAG_CP_EMIT (1UL << 5)
+/* Zero-payload drain request: the host must close any open fence-coalescing
+ * run (interface-19 Radeon3DSubmitFence) before it may publish retirement,
+ * then drain. The publisher spins on retired==head afterwards; without this
+ * entry a trailing unfenced dispatch could never retire. Only published when
+ * the client negotiated CP emit AND the host advertised fence coalescing;
+ * a host without that support never sets entry.flags from this bit. */
+#define MGLPPC_SEMANTIC_FLAG_DRAIN (1UL << 6)
 #define MGLPPC_CP_SLICE_BYTES (8192UL * 4UL)
 #define MGLPPC_CP_SEGMENT_BYTES (8UL * MGLPPC_CP_SLICE_BYTES)
 /* ~64 KB chunks: the 65535-byte Exec message limit leaves 16363 payload
