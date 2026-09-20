@@ -9,6 +9,7 @@
 #endif
 #include <dos/dos.h>
 #include <dos/dostags.h>
+#include <dos/var.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include "dll.h"
@@ -130,9 +131,27 @@ void *dllInternalLoadLibrary(char *filename,char *portname,int raiseusecount)
 	}
 	if(!(dllport=FindPort(portname)))
 	{
-		BPTR output = Open("CON:0/0/800/600/DLL_OUTPUT/AUTO/CLOSE/WAIT", MODE_NEWFILE);
+		/* The DLL console window is a diagnostic. Only give the DLL process
+		 * a console when MGLPPC_VERBOSE is set; otherwise send its stdout
+		 * to NIL:. The always-on window was pure noise (and the DLL's
+		 * shutdown CP_* profile dumps are plain printf()s that bypass their
+		 * own R200PPCConsolePrintf gate). */
+		UBYTE verbose[8];
+		BPTR output;
 		char commandline[256];
 		int i;
+
+		verbose[0] = 0;
+		GetVar((CONST_STRPTR)"MGLPPC_VERBOSE", verbose, (LONG)sizeof(verbose),
+		       GVF_GLOBAL_ONLY);
+		/* NB: do not pass a ?: expression into Open(): the LP macro casts
+		 * its argument as (ULONG) arg without parentheses, so a ternary
+		 * binds to the cast instead of the whole expression. */
+		if (verbose[0])
+			output = Open("CON:0/0/800/600/DLL_OUTPUT/AUTO/CLOSE/WAIT",
+			              MODE_NEWFILE);
+		else
+			output = Open("NIL:", MODE_NEWFILE);
 
 		strcpy(commandline,filename);
 		strcat(commandline," ");
