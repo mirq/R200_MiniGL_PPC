@@ -482,14 +482,15 @@ void Lib_glClear(GLbitfield mask)
     target = TargetSurface(context);
     clearDepth = (mask & GL_DEPTH_BUFFER_BIT) && context->depthMask;
     generatedRequired = GeneratedClearDwords(clearDepth);
-    if ((!R200SlotPayloadFits(context->batchDwords,
+    if (!R200SlotPayloadFits(context->batchDwords,
                              slot->recordCount + RADEON3D_EXEC_CLEAR_DWORDS,
                              slot->drawCount, FALSE, R200_PPC_FRONTEND) ||
-         slot->generatedDwordCount + generatedRequired >
-             context->batchDwords) &&
-        !Submit(context)) {
-        SetError(context, GL_INVALID_OPERATION);
-        return;
+        slot->generatedDwordCount + generatedRequired >
+            context->batchDwords) {
+        if (!Submit(context)) {
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
     }
     slot = BuildSubmitSlot(context);
     record = slot->records + slot->recordCount;

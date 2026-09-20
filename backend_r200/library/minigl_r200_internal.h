@@ -1084,4 +1084,5 @@ BOOL ValidPrimitive(GLenum primitive);
 struct Radeon3DSurface *TargetSurface(struct MiniGLR200Context *context);
 struct Radeon3DSurface *ReadSourceSurface(struct MiniGLR200Context *context);
 
+
 #endif /* MINIGL_R200_INTERNAL_H */

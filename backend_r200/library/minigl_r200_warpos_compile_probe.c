@@ -737,6 +737,17 @@ extern void MGLPPCBlit565Swap(UBYTE *destination, const UBYTE *source,
                               ULONG bytes);
 extern void MGLPPCStoreBarrier(void);
 extern void MGLPPCInvalidateLine32(APTR address);
+/* CP surface-descriptor cache capacity. The cache holds every surface token
+ * the emitter can resolve: colour target, depth, texture unit 0 and texture
+ * unit 1. Resident textures dominate the working set, so the old 16 entries
+ * caused a capacity miss every few draws (CP_SURF evidence 2026-09-20: ~36k
+ * synchronous mailbox queries per timedemo). 128 entries cost 4 KiB.
+ * Overridable at build time (Makefile MGLPPC_CP_SLOTS) for the 16/64/128
+ * A/B; the safe invalidation rules do not depend on the capacity. */
+#ifndef MGLPPC_CP_SURFACE_SLOTS
+#define MGLPPC_CP_SURFACE_SLOTS 128UL
+#endif
+
 typedef struct R200PPCFrontendPlatform {
     MGLPPCTransport transport;
     MGLPPCMessage control;
@@ -775,7 +786,7 @@ typedef struct R200PPCFrontendPlatform {
     struct {
         ULONG token, epoch;
         struct MGLPPCEmitSurface surface;
-    } cpSurfaces[16];
+    } cpSurfaces[MGLPPC_CP_SURFACE_SLOTS];
     GLuint nativeBoundTexture;
     /* Deferred host shadow-bind tracking: render binds do not sync the
      * 68k shadow (texture state travels in each draw record header); the
@@ -1477,22 +1488,84 @@ static BOOL PlatformCallFail(ULONG command, const char *why)
  * teardown only when CP is enabled, so quiet benchmarks gain one shutdown
  * console line, exactly like the host's CP_RUN report. */
 static ULONG CpSurfHits, CpSurfMissQueries, CpSurfCapResets,
-             CpSurfInvalidate, CpSurfEpochStale, CpSurfCursor;
+             CpSurfInvalidate, CpSurfEpochStale, CpSurfDropped, CpSurfCursor;
 
-static BOOL PlatformCall(ULONG command, ULONG contextId)
+/* CP publish sub-phase attribution (plan 2026-09-20 W-10). Raw mftb ticks,
+ * exclusive: descriptor-resolve time is subtracted from emit. Cumulative
+ * whole-context (setup + load + demo); reported once at teardown. */
+static ULONG CpPhasePublishes;
+static ULONG CpPhaseWaitTicks, CpPhaseResolveTicks, CpPhaseEmitTicks,
+             CpPhaseCopyTicks, CpPhasePublishTicks;
+
+/* Remove one token from the descriptor cache (swap-remove). Tokens are
+ * unique among live surfaces, so the first match is the only match. */
+static void FrontendDropCachedSurface(ULONG token)
 {
-#if MGLPPC_PROFILE
-    ULONG profileStart = PerfClock();
-#endif
-    BOOL result;
+    ULONG index;
 
-    /* Descriptor-cache lifetime (plan 2026-09-20, CP_SURF evidence): texture
-     * upload/commit and other ordinary controls never change the screen
-     * color-surface descriptors this cache resolves, so they must not wipe
-     * it. The old blanket clear caused 2321 wipes -> 37551 synchronous
-     * mailbox queries in one timedemo (~2.5 resets per present). The cache
-     * remains safe: every entry is re-validated against deviceEpoch at
-     * lookup, and epoch bumps or true lifecycle commands still clear. */
+    if (!token)
+        return;
+    for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index) {
+        if (FrontendPlatform.cpSurfaces[index].token == token) {
+            ULONG last = --FrontendPlatform.cpSurfaceCount;
+
+            FrontendPlatform.cpSurfaces[index] =
+                FrontendPlatform.cpSurfaces[last];
+            ++CpSurfDropped;
+            return;
+        }
+    }
+}
+
+/* Pre-command invalidation: the named texture's mirrored native surface is
+ * about to be released or replaced. A released token is a raw handle address
+ * the service can reallocate for a different surface within the same device
+ * epoch (radeon3d_service.c: alloc/free handle), so a cached descriptor must
+ * never survive its surface. Out-of-range names are ignored. */
+static void FrontendDropCachedTextureSurface(ULONG textureName)
+{
+    if (!textureName || textureName >= MAX_TEXTURES)
+        return;
+    FrontendDropCachedSurface(
+        (ULONG)proofContext.textures[textureName].surface.Handle);
+}
+
+/* Legacy chunked uploads (TEXTURE_UPLOAD_BEGIN/CHUNK/END) name the target
+ * enum, not a texture; the native side acts on the currently bound texture.
+ * Drop that texture's cached token before the command can replace it. */
+static void FrontendDropCachedActiveTextureSurface(void)
+{
+    ULONG unit = proofContext.activeTexture;
+
+    if (unit > 1UL)
+        unit = 0;
+    FrontendDropCachedTextureSurface(proofContext.boundTexture[unit]);
+}
+
+/* Descriptor-cache lifetime (plan 2026-09-20 §7 P0/W-01). Ordinary controls
+ * no longer wipe the cache (the old blanket clear forced ~37k synchronous
+ * mailbox queries in one timedemo), but every command that can release or
+ * replace a texture surface drops the affected texture's cached token BEFORE
+ * the native side can free it. A token is a raw handle address the service
+ * can reallocate for a different surface in the same device epoch, so a
+ * surviving entry could return a wrong address/pitch/format for a reused
+ * token. Lifetime commands clear the whole cache; capacity overwrites the
+ * oldest entry.
+ *
+ * Value layout matters: SUBIMAGE_SHARED and the DIRECT_* commands carry a
+ * texture name in value[0]; UPLOAD_SHARED/UPLOAD_BEGIN/UPLOAD_END carry the
+ * TARGET ENUM there (the native side acts on the currently bound texture).
+ * Reading value[0] for those would drop the wrong texture (GL_TEXTURE_2D is
+ * 174, a valid texture index) and leave the real target exposed.
+ *
+ * Residual risk (documented, W-06): native residency eviction during a
+ * shared upload can free a DIFFERENT texture's surface without a reply field
+ * naming it; the host reports texture_evictions, which was 0 on the
+ * validated runs. Closing it needs an eviction counter in the shared-upload
+ * reply (fold into the P1 host work); a blanket clear per shared upload is
+ * too expensive during gameplay. */
+static void FrontendDropCachedSurfacesForCommand(ULONG command)
+{
     switch (command) {
     case MGLPPC_CMD_UNREGISTER_SEMANTIC_SLOTS:
     case MGLPPC_CMD_DESTROY_CONTEXT:
@@ -1501,9 +1574,49 @@ static BOOL PlatformCall(ULONG command, ULONG contextId)
             ++CpSurfInvalidate;
         FrontendPlatform.cpSurfaceCount = 0;
         break;
+    case MGLPPC_CMD_TEXTURE_UPLOAD_SHARED:
+    case MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN:
+    case MGLPPC_CMD_TEXTURE_UPLOAD_END:
+        FrontendDropCachedActiveTextureSurface();
+        break;
+    case MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED:
+    case MGLPPC_CMD_TEXTURE_DIRECT_BEGIN:
+    case MGLPPC_CMD_TEXTURE_DIRECT_COMMIT:
+    case MGLPPC_CMD_TEXTURE_DIRECT_ABORT:
+        FrontendDropCachedTextureSurface(FrontendPlatform.control.value[0]);
+        break;
+    case MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2:
+        FrontendDropCachedTextureSurface(FrontendPlatform.control.value[0]);
+        FrontendDropCachedTextureSurface(FrontendPlatform.control.value[4]);
+        break;
+    case MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2:
+        FrontendDropCachedTextureSurface(FrontendPlatform.control.value[0]);
+        FrontendDropCachedTextureSurface(FrontendPlatform.control.value[2]);
+        break;
+    case MGLPPC_CMD_DELETE_TEXTURES:
+        {
+            ULONG dropIndex, dropCount = FrontendPlatform.control.value[0];
+
+            if (dropCount > 7UL)
+                dropCount = 7UL;
+            for (dropIndex = 0; dropIndex < dropCount; ++dropIndex)
+                FrontendDropCachedTextureSurface(
+                    FrontendPlatform.control.value[dropIndex + 1UL]);
+        }
+        break;
     default:
         break;
     }
+}
+
+static BOOL PlatformCall(ULONG command, ULONG contextId)
+{
+#if MGLPPC_PROFILE
+    ULONG profileStart = PerfClock();
+#endif
+    BOOL result;
+
+    FrontendDropCachedSurfacesForCommand(command);
 
     FrontendPlatform.control.command = command;
     FrontendPlatform.control.contextId = contextId;
@@ -1815,10 +1928,12 @@ failed:
     return FALSE;
 }
 
-static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *out)
+static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
+                                  struct MGLPPCEmitSurface *out)
 {
     struct MiniGLR200Context *context = user;
     ULONG index;
+    ULONG insertIndex = MGLPPC_CP_SURFACE_SLOTS; /* sentinel: append/ring */
     if (!token || !FrontendPlatform.cpEnabled || FrontendPlatform.cpFailed)
         return FALSE;
     for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index)
@@ -1829,6 +1944,7 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
                 return TRUE;
             }
             ++CpSurfEpochStale;
+            insertIndex = index;
             break;
         }
     ++CpSurfMissQueries;
@@ -1844,14 +1960,17 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
     out->width = FrontendPlatform.control.value[4];
     out->height = FrontendPlatform.control.value[5];
     out->format = FrontendPlatform.control.value[6];
-    if (FrontendPlatform.cpSurfaceCount == 16UL) {
+    if (insertIndex < MGLPPC_CP_SURFACE_SLOTS) {
+        /* An epoch-stale entry for this same token: replace it in place.
+         * Appending would leave the stale entry to shadow the fresh one and
+         * force a mailbox query on every resolve until the ring wraps. */
+        index = insertIndex;
+    } else if (FrontendPlatform.cpSurfaceCount == MGLPPC_CP_SURFACE_SLOTS) {
         /* Capacity: overwrite the oldest entry (ring) instead of wiping the
          * whole cache. Wiping forced the next 16 lookups through synchronous
-         * mailbox queries (the CP_SURF miss storm of 2026-09-20). Screen
-         * color-surface tokens are stable for the context lifetime, so the
-         * overwritten entry is the least likely to be queried again. */
+         * mailbox queries (the CP_SURF miss storm of 2026-09-20). */
         ++CpSurfCapResets;
-        index = CpSurfCursor++ % 16UL;
+        index = CpSurfCursor++ % MGLPPC_CP_SURFACE_SLOTS;
     } else {
         index = FrontendPlatform.cpSurfaceCount++;
     }
@@ -1861,6 +1980,19 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
     return TRUE;
 }
 
+/* Timing wrapper: the emitter calls this per resolved surface, so the
+ * descriptor work (cache lookup + rare mailbox query) is attributed
+ * separately from command construction in PublishCpSlot. */
+static BOOL ResolveCpSurface(void *user, ULONG token,
+                             struct MGLPPCEmitSurface *out)
+{
+    ULONG t0 = PerfClock();
+    BOOL ok = ResolveCpSurfaceInner(user, token, out);
+
+    CpPhaseResolveTicks += PerfClock() - t0;
+    return ok;
+}
+
 /* Ring control v6 live color target. The host owns the native display
  * rotation, so fullscreen CP records cannot bake a token the PPC derives
  * locally (its surfaces mirror only exposes surface 0 at create). The host
@@ -1868,8 +2000,8 @@ static BOOL ResolveCpSurface(void *user, ULONG token, struct MGLPPCEmitSurface *
  * display switch; a sequence change re-stamps every record target dword
  * (the same walk as the host's PatchRecordTargets) before the emitter
  * resolves them into CP words. ResolveCpSurface then fetches the matching
- * descriptor through MGLPPC_CMD_CP_SURFACE; the 16-entry cache holds the
- * two or three rotating screen-buffer tokens after the first cycle. */
+ * descriptor through MGLPPC_CMD_CP_SURFACE; the descriptor cache holds the
+ * rotating screen-buffer and texture tokens (see MGLPPC_CP_SURFACE_SLOTS). */
 static void RefreshCpColorTarget(volatile MGLPPCRingControlV1 *control,
                                  ULONG *records, ULONG recordDwords)
 {
@@ -1908,11 +2040,14 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     ULONG head, ringSlot, count, index, segmentIx = 0xffffffffUL;
     ULONG cpRetiredSeen = 0;
     ULONG *staging, start = PerfClock(), spin = 0;
+    ULONG waitStart, emitStart, copyStart, publishStart;
+    ULONG resolveBefore, emitElapsed, resolveDelta;
     const char *failure = "ring";
     if (!control || !FrontendPlatform.cpAddress ||
         FrontendPlatform.cpBytes < MGLPPC_CP_SEGMENT_BYTES)
         goto failed;
     head = control->head;
+    waitStart = PerfClock();
     /* Completion releases CPU metadata, retirement releases GPU-read slices. */
     for (;;) {
         if (!(spin & 255UL)) {
@@ -1939,6 +2074,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
         if (!(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
             MGLPPCYield();
     }
+    CpPhaseWaitTicks += PerfClock() - waitStart;
     ringSlot = head % MGLPPC_RING_SLOTS;
     staging = FrontendPlatform.ringSlots[ringSlot];
     if (!staging || control->slotAddrs[ringSlot] != (ULONG)staging)
@@ -1963,10 +2099,17 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     /* v6: the host may have rotated the fullscreen drawing buffer since the
      * last batch; make the record targets match before the emitter bakes
      * address/pitch/format into the CP stream. */
+    emitStart = PerfClock();
+    resolveBefore = CpPhaseResolveTicks;
     RefreshCpColorTarget(control, slot->records, slot->recordCount);
     count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
                             vertices.drawCount ? &vertices : NULL,
                             ResolveCpSurface, context);
+    /* Emit excludes the nested descriptor-resolve time measured by the
+     * wrapper, so the two buckets are additive. */
+    emitElapsed = PerfClock() - emitStart;
+    resolveDelta = CpPhaseResolveTicks - resolveBefore;
+    CpPhaseEmitTicks += emitElapsed >= resolveDelta ? emitElapsed - resolveDelta : 0;
     if (!count || count > MGLPPC_CP_DWORDS)
         goto failed;
     /* Classic Radeon CP dispatch requires an even dword count (Linux
@@ -1978,6 +2121,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
             context->buildSlot * SEGMENT_HALF_BYTES), slot->segmentCursor);
     destination = (volatile ULONG *)((UBYTE *)FrontendPlatform.cpAddress +
                                      ringSlot * MGLPPC_CP_SLICE_BYTES);
+    copyStart = PerfClock();
     for (index = 0; index < count; ++index)
         destination[index] = __builtin_bswap32(staging[index]);
     MGLPPCFlushDataRange((APTR)destination, count * sizeof(ULONG));
@@ -1986,6 +2130,8 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     staging[1] = count;
     staging[2] = vertices.drawCount ? 1UL << segmentIx : 0;
     MGLPPCFlushDataRange(staging, 3UL * sizeof(ULONG));
+    CpPhaseCopyTicks += PerfClock() - copyStart;
+    publishStart = PerfClock();
     entry = &control->entries[ringSlot];
     entry->slot = ringSlot;
     entry->dwords = 3UL;
@@ -1998,6 +2144,8 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     MGLPPCFlushDataRange((APTR)&control->syncEnabled, 2UL * sizeof(ULONG));
     control->head = head + 1UL;
     MGLPPCFlushDataRange((APTR)&control->head, sizeof(control->head));
+    CpPhasePublishTicks += PerfClock() - publishStart;
+    ++CpPhasePublishes;
     if (vertices.drawCount)
         FrontendPlatform.segmentLastEntry[segmentIx] = FrontendPlatform.ringPostSerial;
     return TRUE;
@@ -3198,13 +3346,15 @@ void R200PPCDispatchDeleteContext(void)
      * under Run >NIL:, so profiled builds also append it to a file. */
     if (FrontendPlatform.cpEnabled &&
         (CpSurfMissQueries || CpSurfInvalidate || CpSurfCapResets ||
-         CpSurfEpochStale)) {
-        printf("CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu stale=%lu\n",
+         CpSurfEpochStale || CpSurfDropped)) {
+        printf("CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu stale=%lu "
+               "drop=%lu\n",
                (unsigned long)CpSurfHits,
                (unsigned long)CpSurfMissQueries,
                (unsigned long)CpSurfCapResets,
                (unsigned long)CpSurfInvalidate,
-               (unsigned long)CpSurfEpochStale);
+               (unsigned long)CpSurfEpochStale,
+               (unsigned long)CpSurfDropped);
         fflush(stdout);
 #if MGLPPC_PROFILE
         {
@@ -3212,13 +3362,49 @@ void R200PPCDispatchDeleteContext(void)
             if (cpSurfLog) {
                 fprintf(cpSurfLog,
                         "CP_SURF hit=%lu miss=%lu reset=%lu inval=%lu "
-                        "stale=%lu\n",
+                        "stale=%lu drop=%lu\n",
                         (unsigned long)CpSurfHits,
                         (unsigned long)CpSurfMissQueries,
                         (unsigned long)CpSurfCapResets,
                         (unsigned long)CpSurfInvalidate,
-                        (unsigned long)CpSurfEpochStale);
+                        (unsigned long)CpSurfEpochStale,
+                        (unsigned long)CpSurfDropped);
                 fclose(cpSurfLog);
+            }
+        }
+#endif
+    }
+    /* CP publish sub-phase attribution (plan 2026-09-20 W-10): raw mftb
+     * ticks, exclusive buckets (resolve is subtracted from emit), cumulative
+     * whole-context. Quiet builds print to the lost DLL console; profiled
+     * builds also append to a file. */
+    if (FrontendPlatform.cpEnabled && CpPhasePublishes) {
+        printf("CP_PHASE publishes=%lu "
+               "wait=%lu resolve=%lu emit=%lu copy=%lu publish=%lu\n",
+               (unsigned long)CpPhasePublishes,
+               (unsigned long)CpPhaseWaitTicks,
+               (unsigned long)CpPhaseResolveTicks,
+               (unsigned long)CpPhaseEmitTicks,
+               (unsigned long)CpPhaseCopyTicks,
+               (unsigned long)CpPhasePublishTicks);
+               "tex=%lu clear=%lu replay=%lu present=%lu\n",
+        fflush(stdout);
+#if MGLPPC_PROFILE
+        {
+            FILE *cpPhaseLog = fopen("DH2:mglprof/cp_phase.log", "a");
+            if (cpPhaseLog) {
+                fprintf(cpPhaseLog,
+                        "CP_PHASE publishes=%lu commit=%lu records=%lu "
+                        "draws=%lu wait=%lu resolve=%lu emit=%lu copy=%lu "
+                        "publish=%lu\n",
+                        (unsigned long)CpPhasePublishes,
+                        (unsigned long)CpPhaseWaitTicks,
+                        (unsigned long)CpPhaseResolveTicks,
+                        (unsigned long)CpPhaseEmitTicks,
+                        (unsigned long)CpPhaseCopyTicks,
+                        (unsigned long)CpPhasePublishTicks);
+                        "rot=%lu tex=%lu clear=%lu replay=%lu present=%lu\n",
+                fclose(cpPhaseLog);
             }
         }
 #endif
@@ -3991,6 +4177,10 @@ static void FrontendMirrorTextureValues(struct MiniGLR200Context *context,
     ULONG generation;
 
     texture = &context->textures[textureName];
+    /* The texture's previous surface token stops being valid here; drop any
+     * cached descriptor so a later reallocation of the same handle address
+     * cannot resolve to it (plan 2026-09-20 §7 P0/W-01). */
+    FrontendDropCachedSurface((ULONG)texture->surface.Handle);
     generation = texture->imageGeneration + 1UL;
     if (!generation) generation = 1;
     texture->generated = TRUE;
@@ -4029,6 +4219,9 @@ static void FrontendInvalidateTextureMirror(struct MiniGLR200Context *context,
 {
     struct TextureObject *texture = &context->textures[textureName];
 
+    /* A failed update may have released the native surface without a
+     * replacement: drop its cached descriptor before clearing the mirror. */
+    FrontendDropCachedSurface((ULONG)texture->surface.Handle);
     texture->resident = FALSE;
     texture->surface.Handle = NULL;
     texture->residentGeneration = 0;
@@ -5392,6 +5585,12 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
      * retained direct shadow: subimages of image-backed textures must go
      * through the native canonical path. */
     FrontendShadowFree(texture);
+    /* The native TexImage2D released this texture's previous surface during
+     * the command; drop its cached descriptor before the inline mirror
+     * update hides the old handle (same-epoch reuse hazard, P0/W-01). The
+     * pre-command drop already covers the normal path; this is the
+     * belt-and-braces copy for any future caller ordering. */
+    FrontendDropCachedSurface((ULONG)texture->surface.Handle);
     generation = texture->imageGeneration + 1UL;
     if (!generation) generation = 1;
     texture->generated = TRUE;
@@ -5616,7 +5815,11 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     FrontendPlatform.control.value[7] = (ULONG)FrontendPlatform.textureUploadBuffer;
     /* Native may fail AFTER replacing residency. Never keep a stale handle,
      * even when transport completion is lost. A later successful update or
-     * TexImage can restore this mirror; old draws are already published. */
+     * TexImage can restore this mirror; old draws are already published.
+     * Drop the cached descriptor BEFORE the mirror is cleared: the platform
+     * pre-command drop reads this mirror, and a cleared handle would leave
+     * the old token cached for a later reuse (plan 2026-09-20 §7 P0/W-01). */
+    FrontendDropCachedSurface((ULONG)texture->surface.Handle);
     texture->resident = FALSE;
     texture->surface.Handle = NULL;
     texture->residentGeneration = 0;
@@ -5682,6 +5885,9 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
             struct TextureObject *texture;
             if (!name || name >= MAX_TEXTURES) continue;
             texture = &context->textures[name];
+            /* The native surface is released with this name; drop its cached
+             * descriptor before the handle can be reallocated elsewhere. */
+            FrontendDropCachedSurface((ULONG)texture->surface.Handle);
             /* Free the retained shadow before the struct is zeroed or
              * the PPC allocation leaks. */
             FrontendShadowFree(texture);

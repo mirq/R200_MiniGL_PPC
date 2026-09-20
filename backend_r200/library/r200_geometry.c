@@ -3,6 +3,7 @@
 #include <math.h>
 #include "debug_output.h"
 
+
 /* The VAP fetches vertex records from the segment in little-endian, while
  * the CPU builds them big-endian. Inline Execute vertices are swapped by
  * the CP ring writer; streaming vertices bypass the ring, so the frontend
@@ -39,8 +40,12 @@ typedef char ScreenVertexSerializeLayoutCheck[
 /* Mismatch submits a frame must burn before expanding slots into per-draw
  * records. Gears-level workloads mismatch ~3x per frame and keep the compact
  * state-batch shape; the threshold sits above them and below the world-scene
- * split rates (~13/frame) it exists for. Reset per present. */
+ * split rates (~13/frame) it exists for. Reset per present.
+ * Build-time override (Makefile MGLPPC_EXPAND_MIN) for the Quake A/B:
+ * 2026-09-20 CP_TRIG evidence shows ~8 mismatch submits/frame at 4. */
+#ifndef R200_EXPAND_MISMATCH_MIN
 #define R200_EXPAND_MISMATCH_MIN 4UL
+#endif
 
 static BOOL CanExpandStateBatch(struct MiniGLR200Context *context,
                                struct SubmitSlot *slot, ULONG nextHeader,
@@ -62,6 +67,37 @@ static BOOL CanExpandStateBatch(struct MiniGLR200Context *context,
                                 context->batchDwords - nextGenerated,
                                 (slot->records[5] & RADEON3D_DRAW_LIGHTING) != 0,
                                 expandedGenerated);
+}
+
+/* Expand a compact state batch into one full record per draw. The caller has
+ * already validated capacity with CanExpandStateBatch(). The copy must run
+ * backwards: every destination record sits at or above the shared header it
+ * copies from. Kept as a pure helper so the accounting invariants (record
+ * count, per-draw vertex counts, last-draw cursor) are CPU-testable; the
+ * 2026-09-20 grey-screen incident makes this path hardware-sensitive. */
+static void R200ExpandStateBatch(struct SubmitSlot *slot,
+                                 ULONG expandedGenerated)
+{
+    ULONG draws = slot->drawCount;
+    ULONG headerDwords = slot->recordCount;
+    ULONG index = draws;
+
+    while (index-- > 1UL) {
+        ULONG *destination = slot->records + index * headerDwords;
+        ULONG source;
+
+        for (source = 0; source < headerDwords; ++source)
+            destination[source] = slot->records[source];
+        destination[10] = slot->stateBatchDraws[index].VertexCount;
+    }
+    slot->records[10] = slot->stateBatchDraws[0].VertexCount;
+    slot->recordCount = draws * headerDwords;
+    slot->generatedDwordCount = expandedGenerated;
+    slot->lastDrawOffset = (draws - 1UL) * headerDwords;
+    slot->lastDrawHeaderDwords = headerDwords;
+    slot->lastDrawValid = TRUE;
+    slot->stateBatch = FALSE;
+    slot->expanded = TRUE;
 }
 
 static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
@@ -389,26 +425,8 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
              * pending same-header batch into per-draw full records -- each
              * carries its own texture/matrix state -- and keep filling this
              * slot in the plain commit-record shape that the host COMMIT
-             * entry and the service already consume. Backward copy: record
-             * zero is the shared header every expansion copies from. */
-            ULONG draws = slot->drawCount;
-            ULONG oldHeaderDwords = slot->recordCount;
-            index = draws;
-            while (index-- > 1UL) {
-                ULONG *destination = slot->records + index * oldHeaderDwords;
-                ULONG source;
-                for (source = 0; source < oldHeaderDwords; ++source)
-                    destination[source] = slot->records[source];
-                destination[10] = slot->stateBatchDraws[index].VertexCount;
-            }
-            slot->records[10] = slot->stateBatchDraws[0].VertexCount;
-            slot->recordCount = draws * oldHeaderDwords;
-            slot->generatedDwordCount = expandedGenerated;
-            slot->lastDrawOffset = (draws - 1UL) * oldHeaderDwords;
-            slot->lastDrawHeaderDwords = oldHeaderDwords;
-            slot->lastDrawValid = TRUE;
-            slot->stateBatch = FALSE;
-            slot->expanded = TRUE;
+             * entry and the service already consume. */
+            R200ExpandStateBatch(slot, expandedGenerated);
             stateBatch = FALSE;
         } else if (!sameState) {
             /* A clear may precede the first draw without deciding slot mode.
