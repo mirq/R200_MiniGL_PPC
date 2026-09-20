@@ -183,6 +183,7 @@ $(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
 
 $(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
               tools/check_68k_host.py \
+              $(R200_INCLUDE)/libraries/minigl_subimage_timing.h \
               $(R200_INCLUDE)/libraries/minigl_ppc_protocol.h \
               $(R200_INCLUDE)/libraries/minigl_r200_bridge.h \
               $(R200_INCLUDE)/libraries/minigl_ppc_ib_trace.h \

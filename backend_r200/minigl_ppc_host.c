@@ -874,6 +874,161 @@ static void HostNativeProfileReport(void)
 }
 #endif
 
+#if MGLPPC_PROFILE
+#include <libraries/minigl_subimage_timing.h>
+enum {
+    HOST_LM_ENVELOPE, HOST_LM_HANDLER, HOST_LM_VALIDATE, HOST_LM_DRAIN,
+    HOST_LM_PREFLIGHT_PREP, HOST_LM_PREFLIGHT, HOST_LM_SETUP,
+    HOST_LM_PERF_BEFORE, HOST_LM_NATIVE, HOST_LM_PERF_AFTER,
+    HOST_LM_RESTORE, HOST_LM_BRIDGE, HOST_LM_RESULT, HOST_LM_REPLY
+};
+static const char *const HostLmPhases[] = {
+    "envelope", "handler_validation", "source_validation", "fence_drain",
+    "preflight_prep", "preflight", "bind_cache_unpack",
+    "perf_query_before", "native_texsub", "perf_query_after",
+    "restore", "bridge_query", "result", "reply"
+};
+static const struct { GLenum name; const char *label; } HostLmCounters[] = {
+    { MGL_PERF_CLOCK_RATE, "clock_hz" },
+    { MGL_PERF_TEXTURE_RESIDENCY_TICKS, "residency_ticks" },
+    { MGL_PERF_TEXTURE_UPLOAD_TICKS, "upload_ticks" },
+    { MGL_PERF_TEXTURE_UPLOAD_BYTES, "upload_bytes" },
+    { MGL_PERF_TEXTURE_EVICTIONS, "evictions" }
+};
+#define HOST_LM_COUNTERS (sizeof(HostLmCounters)/sizeof(HostLmCounters[0]))
+static struct HostLmRecord {
+    MGLLmTiming time;
+    ULONG serial, contextId, args[7], mailbox, requestSerial;
+    ULONG handlerStart, handlerEnd, handlerEntered, fenceCount;
+    LONG status;
+    ULONG error, nativeSamples, hintError;
+    GLint nativeBefore[HOST_LM_COUNTERS], nativeAfter[HOST_LM_COUNTERS];
+} HostLmRecords[MGL_LM_CAPACITY];
+static struct HostLmRecord *HostLmActive;
+static ULONG HostLmCount, HostLmDropped, HostLmSerial;
+static BOOL HostLmDumped;
+
+/* Single host task; mailbox recursion is already excluded by
+ * HostRingMailboxActive. Exec and mailbox entry sites both close the record,
+ * even when validation rejects a request before the subimage case is entered. */
+static void HostLmBegin(const MGLPPCMessage *message, ULONG start, BOOL mailbox)
+{
+    struct HostLmRecord *r;
+    HostLmActive = NULL;
+    if (message->command != MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED) return;
+    ++HostLmSerial;
+    if (HostLmCount == MGL_LM_CAPACITY) {
+        ++HostLmDropped;
+        return;
+    }
+    r = &HostLmRecords[HostLmCount++];
+    memset(r, 0, sizeof(*r));
+    MGLLmBegin(&r->time, start);
+    r->serial = HostLmSerial;
+    r->contextId = message->contextId;
+    memcpy(r->args, message->value, sizeof(r->args));
+    r->mailbox = mailbox;
+    r->requestSerial = message->sequence;
+    r->hintError = HostNativeEnableError;
+    HostLmActive = r;
+}
+
+static void HostLmEnd(const MGLPPCMessage *message, ULONG now)
+{
+    struct HostLmRecord *r = HostLmActive;
+    if (!r) return;
+    MGLLmNext(&r->time, MGL_LM_PHASES, now);
+    r->status = message->status;
+    /* Early envelope/handler rejection leaves request words untouched. */
+    if ((r->time.seen & (1UL << HOST_LM_VALIDATE)) &&
+        message->status == MGLPPC_STATUS_GL_ERROR)
+        r->error = message->value[0];
+    HostLmActive = NULL;
+}
+
+static void HostLmSnapshot(BOOL after)
+{
+    struct HostLmRecord *r = HostLmActive;
+    ULONG i;
+    if (!r) return;
+    /* These five supported native selectors are scalar counter reads, not
+     * flushes/waits. No extra glGetError: preserve the existing error stream.
+     * Bracket query overhead separately; never charge it to native_texsub. */
+    for (i = 0; i < HOST_LM_COUNTERS; ++i)
+        glGetIntegerv(HostLmCounters[i].name,
+                      after ? &r->nativeAfter[i] : &r->nativeBefore[i]);
+    r->nativeSamples |= after ? 2UL : 1UL;
+}
+
+static void HostLmDump(void)
+{
+    ULONG i, phase, counter;
+    if (HostLmDumped) return;
+    HostLmDumped = TRUE;
+    printf("HOST_LM capacity=%lu records=%lu dropped=%lu calls=%lu\n",
+        (unsigned long)MGL_LM_CAPACITY, (unsigned long)HostLmCount,
+        (unsigned long)HostLmDropped, (unsigned long)HostLmSerial);
+    printf("HOST_LM eclock_hz=%lu last_context_hint_error=%lu\n",
+        (unsigned long)HostClockHz, (unsigned long)HostNativeEnableError);
+    printf("HOST_LM ticks=raw_eclock_low32 output=after_cleanup overflow=drop_new "
+        "scope=shared_requests phases=exclusive durations=uint32(end-start) "
+        "handler_in_total=1 drain_in_handler=1 native_counters_in_native_texsub=1 "
+        "native_counters_mutually_exclusive=0 native_deltas=uint32(after-before) "
+        "perf_queries_outside_native_texsub=1 query_errors_checked=0\n");
+    for (i = 0; i < HostLmCount; ++i) {
+        const struct HostLmRecord *r = &HostLmRecords[i];
+#define HOST_LM_UL(v) ((unsigned long)(v))
+        printf("HOST_LM_ID seq=%lu context=%lu name=%lu request_serial=%lu\n",
+            HOST_LM_UL(r->serial), HOST_LM_UL(r->contextId), HOST_LM_UL(r->args[0]), HOST_LM_UL(r->requestSerial));
+        printf("HOST_LM_RECT seq=%lu level=%lu x=%lu y=%lu\n",
+            HOST_LM_UL(r->serial), HOST_LM_UL(r->args[1]), HOST_LM_UL(r->args[2]), HOST_LM_UL(r->args[3]));
+        printf("HOST_LM_SIZE seq=%lu w=%lu h=%lu wire_format_type=%lu\n",
+            HOST_LM_UL(r->serial), HOST_LM_UL(r->args[4]), HOST_LM_UL(r->args[5]), HOST_LM_UL(r->args[6]));
+        printf("HOST_LM_RESULT seq=%lu status=%ld error=%lu native_samples=%lu\n",
+            HOST_LM_UL(r->serial), (long)r->status, HOST_LM_UL(r->error), HOST_LM_UL(r->nativeSamples));
+        printf("HOST_LM_HINT seq=%lu error=%lu\n",
+            HOST_LM_UL(r->serial), HOST_LM_UL(r->hintError));
+        printf("HOST_LM_ENTRY seq=%lu mailbox=%lu handler_entered=%lu fences_at_drain=%lu\n",
+            HOST_LM_UL(r->serial), HOST_LM_UL(r->mailbox), HOST_LM_UL(r->handlerEntered), HOST_LM_UL(r->fenceCount));
+        printf("HOST_LM_TOTAL seq=%lu start=%lu end=%lu ticks=%lu\n",
+            HOST_LM_UL(r->serial), HOST_LM_UL(r->time.start), HOST_LM_UL(r->time.end),
+            HOST_LM_UL((ULONG)(r->time.end - r->time.start)));
+        if (r->handlerEntered)
+            printf("HOST_LM_HANDLER seq=%lu start=%lu end=%lu ticks=%lu\n",
+                HOST_LM_UL(r->serial), HOST_LM_UL(r->handlerStart), HOST_LM_UL(r->handlerEnd),
+                HOST_LM_UL((ULONG)(r->handlerEnd - r->handlerStart)));
+        for (phase = 0; phase < sizeof(HostLmPhases)/sizeof(HostLmPhases[0]); ++phase)
+            if (r->time.seen & (1UL << phase))
+                printf("HOST_LM_PHASE seq=%lu stage=%s start=%lu end=%lu\n",
+                    HOST_LM_UL(r->serial), HostLmPhases[phase],
+                    HOST_LM_UL(r->time.begin[phase]), HOST_LM_UL(r->time.finish[phase]));
+        if (r->nativeSamples == 3UL)
+            for (counter = 0; counter < HOST_LM_COUNTERS; ++counter) {
+                ULONG before = (ULONG)r->nativeBefore[counter];
+                ULONG after = (ULONG)r->nativeAfter[counter];
+                printf("HOST_LM_NATIVE seq=%lu key=%s before=%lu after=%lu\n",
+                    HOST_LM_UL(r->serial), HostLmCounters[counter].label,
+                    HOST_LM_UL(before), HOST_LM_UL(after));
+                if (counter) /* Clock rate is a rate, not a cumulative counter. */
+                    printf("HOST_LM_DELTA seq=%lu key=%s delta=%lu\n",
+                        HOST_LM_UL(r->serial), HostLmCounters[counter].label,
+                        HOST_LM_UL((ULONG)(after - before)));
+            }
+#undef HOST_LM_UL
+    }
+    fflush(stdout);
+}
+#define HOST_LM_NEXT(phase) do { if (HostLmActive) \
+    MGLLmNext(&HostLmActive->time, (phase), HostClock()); } while (0)
+#define HOST_LM_HANDLER_END() do { if (HostLmActive) { \
+    HostLmActive->handlerEnd = HostClock(); \
+    MGLLmNext(&HostLmActive->time, HOST_LM_REPLY, HostLmActive->handlerEnd); \
+    } } while (0)
+#else
+#define HOST_LM_NEXT(phase) ((void)0)
+#define HOST_LM_HANDLER_END() ((void)0)
+#endif
+
 /* The stdout redirect dies in the FFS cache on every hard reset of a
  * wedged session -- exactly when the evidence matters. This companion
  * logger opens/appends/closes per line, so the file survives and stays
@@ -2882,6 +3037,13 @@ static BOOL ExecuteBatch(MGLPPCMessage *message, MGLPPCHostState *state)
 static void HandleMessage(MGLPPCMessage *message,
                           MGLPPCHostState *state)
 {
+#if MGLPPC_PROFILE
+    if (HostLmActive) {
+        HostLmActive->handlerEntered = 1;
+        HostLmActive->handlerStart = HostClock();
+        MGLLmNext(&HostLmActive->time, HOST_LM_HANDLER, HostLmActive->handlerStart);
+    }
+#endif
     if (message->magic != MGLPPC_PROTOCOL_MAGIC) {
         message->status = MGLPPC_STATUS_BAD_MESSAGE;
         return;
@@ -3261,12 +3423,31 @@ static void HandleMessage(MGLPPCMessage *message,
     case MGLPPC_CMD_TEXTURE_DIRECT_BEGIN:
         {
         MGLR200PrivateTexDirectBeginV2 bridge;
+        GLenum bindError, restoreError;
         if (state->context == NULL || message->contextId != state->contextId) {
             message->status = MGLPPC_STATUS_NO_CONTEXT;
             break;
         }
         if (!DrainSemanticFence(state)) {
             message->status = MGLPPC_STATUS_GL_ERROR;
+            break;
+        }
+        /* Classic clients may derive texture names arithmetically (GLQuake
+         * never calls glGenTextures) and the native backend refuses
+         * BeginDirectTexture on a non-generated name - 267/267 direct
+         * fallbacks on one demo1 run, forcing every upload through the
+         * shared 68k path. Bind the packet's name explicitly, exactly like
+         * the shared subimage handler does, so native glBindTexture
+         * auto-generates it; the shadow binding is restored after the
+         * reply so no later shared command acts on this name. */
+        (void)glGetError();
+        glBindTexture(GL_TEXTURE_2D, message->value[0]);
+        bindError = glGetError();
+        if (bindError) {
+            ++state->uploadCount;
+            ++state->uploadFails;
+            message->status = MGLPPC_STATUS_GL_ERROR;
+            message->value[0] = bindError;
             break;
         }
         {
@@ -3295,6 +3476,10 @@ static void HandleMessage(MGLPPCMessage *message,
         }
         if (!ok) {
             message->status = MGLPPC_STATUS_GL_ERROR;
+            /* The explicit bind above changed the native binding; restore
+             * the shadow binding on this exit too. */
+            glBindTexture(GL_TEXTURE_2D, state->semanticBoundTexture);
+            (void)glGetError();
             break;
         }
         }
@@ -3304,6 +3489,17 @@ static void HandleMessage(MGLPPCMessage *message,
         message->value[4] = bridge.deviceEpoch;
         message->value[5] = bridge.format;
         message->value[6] = bridge.flags;
+        glBindTexture(GL_TEXTURE_2D, state->semanticBoundTexture);
+        restoreError = glGetError();
+        if (restoreError) {
+            /* The surface is leased but the binding state is no longer
+             * trustworthy: fail the call so the frontend aborts the direct
+             * surface instead of filling a texture whose binding cannot be
+             * restored. */
+            message->status = MGLPPC_STATUS_GL_ERROR;
+            message->value[0] = restoreError;
+            break;
+        }
         }
         break;
     case MGLPPC_CMD_TEXTURE_DIRECT_COMMIT:
@@ -3568,6 +3764,7 @@ static void HandleMessage(MGLPPCMessage *message,
 #if MGLPPC_PROFILE
         ULONG subStart = ProbeTicks(), preflightStart, nativeStart, bridgeStart;
 #endif
+        HOST_LM_NEXT(HOST_LM_VALIDATE);
         memcpy(args, message->value, sizeof(args));
         memset(message->value, 0, sizeof(message->value));
         if (!state->context || message->contextId != state->contextId) {
@@ -3615,11 +3812,16 @@ static void HandleMessage(MGLPPCMessage *message,
             message->status = MGLPPC_STATUS_BAD_PAYLOAD;
             break;
         }
+#if MGLPPC_PROFILE
+        if (HostLmActive) HostLmActive->fenceCount = state->fenceCount;
+#endif
+        HOST_LM_NEXT(HOST_LM_DRAIN);
         if (!DrainSemanticFence(state)) {
             message->status = MGLPPC_STATUS_GL_ERROR;
             message->value[0] = GL_INVALID_OPERATION;
             break;
         }
+        HOST_LM_NEXT(HOST_LM_PREFLIGHT_PREP);
         (void)glGetError();
         /* V1 requires an image and would reject direct textures before native
          * subimage gets the chance to materialize them. V2 checks residency
@@ -3629,11 +3831,13 @@ static void HandleMessage(MGLPPCMessage *message,
 #if MGLPPC_PROFILE
         ++HostSubimageCount;
         preflightStart = ProbeTicks();
+        if (HostLmActive) MGLLmNext(&HostLmActive->time, HOST_LM_PREFLIGHT, preflightStart);
 #endif
         glGetIntegerv(MGL_R200_PRIVATE_TEXTURE_V2_QUERY, (GLint *)&preflight);
 #if MGLPPC_PROFILE
         HostSubimagePreflightTicks += ProbeTicks() - preflightStart;
 #endif
+        HOST_LM_NEXT(HOST_LM_SETUP);
         error = glGetError();
         if (error || preflight.version != MGL_R200_PRIVATE_TEXTURE_V2_VERSION ||
             preflight.structSize != sizeof(preflight) ||
@@ -3662,13 +3866,22 @@ static void HandleMessage(MGLPPCMessage *message,
         for (index = 0; index < 4; ++index)
             glPixelStorei(HostUnpackNames[index], index ? 0 : 1);
 #if MGLPPC_PROFILE
+        HOST_LM_NEXT(HOST_LM_PERF_BEFORE);
+        HostLmSnapshot(FALSE);
         nativeStart = ProbeTicks();
+        if (HostLmActive) MGLLmNext(&HostLmActive->time, HOST_LM_NATIVE, nativeStart);
 #endif
         glTexSubImage2D(GL_TEXTURE_2D, args[1], args[2], args[3],
                        args[4], args[5], format, type, (const GLvoid *)args[7]);
 #if MGLPPC_PROFILE
-        HostSubimageNativeTicks += ProbeTicks() - nativeStart;
+        {
+            ULONG nativeEnd = ProbeTicks();
+            HostSubimageNativeTicks += nativeEnd - nativeStart;
+            if (HostLmActive) MGLLmNext(&HostLmActive->time, HOST_LM_PERF_AFTER, nativeEnd);
+        }
+        HostLmSnapshot(TRUE);
 #endif
+        HOST_LM_NEXT(HOST_LM_RESTORE);
         error = glGetError();
         for (index = 0; index < 4; ++index)
             glPixelStorei(HostUnpackNames[index], state->unpack[index]);
@@ -3676,6 +3889,7 @@ static void HandleMessage(MGLPPCMessage *message,
         if (!error) error = glGetError();
 #if MGLPPC_PROFILE
         bridgeStart = ProbeTicks();
+        if (HostLmActive) MGLLmNext(&HostLmActive->time, HOST_LM_BRIDGE, bridgeStart);
 #endif
         if (!QueryBackendTexture(args[0], &bridge)) {
 #if MGLPPC_PROFILE
@@ -3689,6 +3903,7 @@ static void HandleMessage(MGLPPCMessage *message,
             HostSubimageBridgeTicks += ProbeTicks() - bridgeStart;
         HostSubimageTicks += ProbeTicks() - subStart;
 #endif
+        HOST_LM_NEXT(HOST_LM_RESULT);
         if (!error) error = glGetError();
         message->value[0] = error;
         if (error) {
@@ -3929,6 +4144,9 @@ static BOOL PollMailbox(MGLPPCHostState *state)
     message.contextId = box->contextId;
     for (index = 0; index < 8; ++index)
         message.value[index] = box->reqValue[index];
+#if MGLPPC_PROFILE
+    HostLmBegin(&message, start, TRUE);
+#endif
     if (serial != next || box->magic != MGLPPC_MAILBOX_MAGIC ||
         box->version != MGLPPC_MAILBOX_VERSION ||
         box->epoch != state->ringEpoch)
@@ -3942,6 +4160,7 @@ static BOOL PollMailbox(MGLPPCHostState *state)
          * into the inner mailbox service. */
         HostRingMailboxActive = TRUE;
         HandleMessage(&message, state);
+        HOST_LM_HANDLER_END();
         HostRingMailboxActive = FALSE;
     }
     for (index = 0; index < 8; ++index)
@@ -3955,6 +4174,7 @@ static BOOL PollMailbox(MGLPPCHostState *state)
 #if MGLPPC_PROFILE
     {
         ULONG mailboxElapsed = HostClock() - start;
+        HostLmEnd(&message, start + mailboxElapsed);
         HostMailboxCount++;
         HostMailboxTicks += mailboxElapsed;
         if (message.command == MGLPPC_CMD_TEXTURE_DIRECT_BEGIN) {
@@ -4130,10 +4350,16 @@ int main(int argc, char **argv)
             (void)PollMailbox(&state);
             HOST_START(handleStart);
             if (message->execMessage.mn_Length >=
-                    MGLPPC_MESSAGE_HEADER_SIZE)
+                    MGLPPC_MESSAGE_HEADER_SIZE) {
+#if MGLPPC_PROFILE
+                HostLmBegin(message, handleStart, FALSE);
+#endif
                 HandleMessage(message, &state);
+                HOST_LM_HANDLER_END();
+            }
 #if MGLPPC_PROFILE
             handleElapsed = HostClock() - handleStart;
+            HostLmEnd(message, handleStart + handleElapsed);
             if (message->command == MGLPPC_CMD_EXECUTE_SEMANTIC_SLOT) {
                 HostExecuteMsgCount++;
             } else if (message->command == MGLPPC_CMD_SEMANTIC_BARRIER) {
@@ -4261,6 +4487,7 @@ int main(int argc, char **argv)
         MiniGLClose();
 #if MGLPPC_PROFILE
     HostNativeProfileReport();
+    HostLmDump();
     if (HostClockHz) {
         ULONG busy = HostControlTicks + HostBarrierTicks +
                      HostTotalTicks + HostRingTicks + HostMailboxTicks;
