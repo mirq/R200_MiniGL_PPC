@@ -35,6 +35,22 @@ spurious waits was fixed by dropping historical-fence reuse entirely.
 | Shared readback | `READ_PIXELS_SHARED` | host writes pixels into PPC staging; RGBA/UBYTE, ≤2 MiB | probes, verification |
 | Batched two-tile | `TEXTURE_DIRECT_BEGIN2`/`COMMIT2` | deferred pair of direct fills | **opt-in, currently a regression** (`MGLPPC_BATCH=1`) |
 
+Choosing a path (the batched two-tile variant is opt-in and currently a
+measured regression):
+
+```mermaid
+flowchart TB
+    A["texture update"] --> B{"what is being updated?"}
+    B -->|initial level load| C["deferred glTexImage2D<br/>CPU backing, upload at first draw"]
+    B -->|large image, copy avoidable| D["TEXTURE_DIRECT_BEGIN / COMMIT"]
+    B -->|moderate buffer| E["TEXTURE_UPLOAD_SHARED<br/>MEMF_PUBLIC staging, <= 2 MiB"]
+    B -->|sub-rectangle update| F["TEXTURE_SUBIMAGE_SHARED<br/>tight rows, native BGRA path"]
+    B -->|read pixels back| G["READ_PIXELS_SHARED<br/>RGBA / UBYTE, <= 2 MiB"]
+    D --> H{"MGLPPC_BATCH = 1?"}
+    H -->|yes| I["BEGIN2 / COMMIT2 two-tile<br/>slower on current host"]
+    H -->|no| J["single-tile direct fill"]
+```
+
 ### 2.1 Direct fill
 
 `BEGIN(name, w, h, requestedFormat)` with `BGRA32=0` or `RGB565=1` returns

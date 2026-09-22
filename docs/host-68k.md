@@ -30,6 +30,16 @@ frequently-idle host therefore adds up to ~20 ms to a begin-upload call
 
 ## 2. Main loop
 
+```mermaid
+flowchart TB
+    A["PollMailbox - mailbox has priority"] --> B{"GetMsg(hostPort)?"}
+    B -->|yes| C["PollMailbox again"] --> D["HandleMessage"] --> E["ReplyMsg"] --> F["PollQueuedFence - non-blocking retire prefix"]
+    B -->|no| F
+    F --> G{"anything to do?"}
+    G -->|no| H["idle sleep MGLPPC_IDLE_SLEEP_MS (1500 ms)"] --> A
+    G -->|yes| A
+```
+
 ```
 for (;;) {
     PollMailbox(&state);            /* before each wait and each message */

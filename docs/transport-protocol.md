@@ -126,6 +126,18 @@ slots:        8 x 8192 dwords, cacheable shared memory (slotAddrs[])
   segments and, when `CP_EMIT` is requested and echoed, 256 KiB of CP space.
   Reply tuples expand from 3 to 4 words (CPU address/bytes/id/GPU address).
 
+Segment layout (offsets in bytes; the control block is 32-byte aligned):
+
+```mermaid
+flowchart TB
+    subgraph SEG["Ring segment - 64 KiB, non-cacheable streaming aperture"]
+        CTRL["offset 0: control block v6 - 456 B / 114 dwords<br/>magic, version, slotCount, slotDwords, epoch, head, completed,<br/>retired, presentSeq, error, slotAddrs[8], entries[8],<br/>sync state, event region, colorToken/colorSeq"]
+        MB["offset 4096: mailbox v1 - 160 B, one writer per 32-byte line"]
+    end
+    S["8 x 8192-dword slots - cacheable shared memory, addressed by slotAddrs"]
+    SEG --- S
+```
+
 ### 4.1 Publication and ownership rules
 
 1. PPC writes a slot and its entry metadata, flushes the data cache
@@ -167,6 +179,24 @@ MGLPPCMailboxV1 (160 bytes, at ring offset 4096):
   `TEXTURE_SUBIMAGE_SHARED`, `READ_PIXELS_SHARED`, `TEXTURE_UPLOAD_SHARED`.
 - `MGLPPC_NOMAILBOX` disables it (diagnostic); registration echoes `MAILBOX`
   only after the region is initialized.
+
+Request/ack handshake:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as PPC DLL
+    participant MB as Mailbox at ring +4096
+    participant H as 68k host
+    P->>MB: reqSerial, command, contextId, reqValue[8]
+    H->>MB: poll (before the Exec loop and before each message)
+    H->>H: execute whitelisted command
+    H->>MB: ackSerial, status, ackValue[8]
+    loop bounded ack poll, ~1 per 100 us, 5 s deadline
+        P->>MB: read ackSerial
+    end
+    Note over P,MB: timeout poisons the session - no retry, no abort, cleanup only
+```
 
 ## 6. Shared-memory transfers (Exec path)
 

@@ -28,6 +28,7 @@ emulator.
 | 11 | [benchmarking.md](benchmarking.md) | The hardware-validated benchmark procedure (cold boot → medians) |
 | 12 | [testing.md](testing.md) | Host-side test suite, probes, generated regression scripts |
 | 13 | [troubleshooting.md](troubleshooting.md) | Symptoms, causes, recovery, deployment rules learned the hard way |
+| 14 | [run68k-direct-calls.md](run68k-direct-calls.md) | Measured PPC→68k `Run68K` direct calls: mechanism, costs, limits, probes |
 
 Deep, still-authoritative specifications and evidence live in `reference/`:
 
@@ -68,3 +69,6 @@ Deep, still-authoritative specifications and evidence live in `reference/`:
   `minigl.library` and its own `AGENTS.md`.
 - Timebase values are session-specific; always re-read them, do not assume
   the documented value for a new boot.
+- Diagrams are [Mermaid](https://mermaid.js.org/) code blocks and render on
+  GitHub/GitLab and in editors with Mermaid support. Keep them valid: every
+  diagram in `docs/` has been rendered with `mmdc` before commit.

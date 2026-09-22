@@ -136,8 +136,11 @@
   68k helper `backend_r200/minigl_ppc_host.c` (port
   `MiniGLPPC.R200.Host.1`), which calls the 68k `minigl.library` v12
   direct-R200 backend (uses `Radeon9200.chip` via `Radeon3D.library`).
-  PPC code cannot call that 68k library directly (mixed-mode calls trip
-  the "illegal run68k function execution" trap).
+  Raw 68k function-pointer execution from PPC traps, but 68k code **can** be
+  called through `powerpc.library/Run68K` (measured 2026-09-22 at ~0.4–0.7 ms
+  per call vs ~82–94 µs per ring publish); the host/ring design is retained
+  for batching, overlap and isolation, not because direct calls are
+  impossible. See `docs/run68k-direct-calls.md`.
 - `Elf2Exe2` is target-hosted (`DH2:wosbuild/Elf2Exe2`). Deploy as ZIP
   (`UnZip -o x.zip -d DH2:wosbuild`) and CRC32-verify both ends; three
   302k+ WarpELFs of the same size can be different builds — only CRC

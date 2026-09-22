@@ -25,7 +25,8 @@ EXAMPLE_NAMES = library_test milestone_ballonly_library \
                  milestone_gears_stats_library milestone_gears_precalc r200_legacy_smoke \
                  r200_texture_upload_smoke r200_triangle_smoke warp_library \
                   r200_mapping_bench r200_texture_update_test r200_bind_bench r200_ib_smoke \
-                  r200_defect_probe minigl_testsuite
+                  r200_defect_probe minigl_testsuite \
+                  r200_run68k_bridge_probe r200_run68k_context_probe
 EXAMPLE_OBJS = $(addprefix $(EXOBJDIR)/,$(addsuffix .o,$(EXAMPLE_NAMES)))
 EXAMPLE_DEPS = $(EXAMPLE_OBJS:.o=.d)
 EXAMPLE_WARPELFS = $(addprefix $(BINDIR)/,$(addsuffix _ppc.warpelf,$(EXAMPLE_NAMES)))

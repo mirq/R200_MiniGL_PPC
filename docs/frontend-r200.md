@@ -77,6 +77,20 @@ A missing capability fails context creation; it is not silently degraded.
 
 ### 4.1 Immediate mode and arrays
 
+```mermaid
+flowchart LR
+    A["glColor* / glTexCoord* / glNormal*"] --> S["current attribute state"]
+    V["glVertex* / glDrawArrays / glDrawElements"] --> VB["context vertex buffer"]
+    S --> VB
+    VB --> F["FlushScreenVertices<br/>capture PendingDrawState if changed"]
+    F --> SER["serialize into submit slot<br/>MGLPPCSwapLit13 / Lit10 / TCL10 / TCL7"]
+    SER --> B{"state batch still valid?<br/>mismatches <= R200_EXPAND_MISMATCH_MIN"}
+    B -->|yes| SB["shared TCL header + draw descriptors"]
+    B -->|no| EX["R200ExpandStateBatch - per-draw records"]
+    SB --> PUB["Submit: dcbf+sync, publish slot, head++"]
+    EX --> PUB
+```
+
 - `glBegin/glEnd` and the `glVertex*` family append screen vertices
   (position, packed color, texture coordinates, optional normal index) to the
   context vertex buffer.

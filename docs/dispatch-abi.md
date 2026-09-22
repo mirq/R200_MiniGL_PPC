@@ -46,6 +46,19 @@ struct MGLDispatchTable {
   re-read on every call (`MGLD_CTX = (*MiniGLDispatch->currentContext)`), so a
   context create/destroy is immediately visible to subsequent calls.
 
+Layout of the table (offsets grow downwards; field *i* is at `20 + (i-1)*4`):
+
+```mermaid
+flowchart TB
+    subgraph T["MGLDispatchTable - 0x238 bytes, normal PPC layout"]
+        HDR["Header, 20 B: abiVersion = 3, structSize, backendFlags, reserved, currentContext"]
+        V10["V10 frozen prefix - fields 1..129, ending at GLPolygonOffset<br/>never removed, reordered or resized"]
+        V19["V19 appended - GLClientActiveTextureARB, GLInterleavedArrays,<br/>GLMultiDrawArrays, MGLEmergencyCloseScreen, MGLForceNewRenderPass"]
+        FP["FastPath V2 - mglBeginFastPath, mglEndFastPath,<br/>mglGetFastPathCapabilities"]
+    end
+    HDR --> V10 --> V19 --> FP
+```
+
 ### 2.1 Frozen V10 prefix (fields 1–129, in order)
 
 ```

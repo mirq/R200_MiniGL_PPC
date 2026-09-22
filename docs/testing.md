@@ -180,7 +180,33 @@ clocks are not synchronized, and a pre-publication failure can create a
 sequence gap. `python3 tests/test_frame260_deep_profile.py` runs extracted
 production paths for the phase bookkeeping.
 
-## 5. Rules
+## 5. PPC→68k direct-call probes
+
+Two hardware probes answer "can a native PPC task call the 68k
+`minigl.library` directly, and what does it cost?" without the 68k host or
+`minigl_ppc.dll`. They are built by `Makefile.import.gcc` (in the normal
+`testprograms` set) and need only `C:InitPPC` once per boot.
+
+| Probe | Build target | Purpose |
+|---|---|---|
+| `examples/r200_run68k_bridge_probe.c` | `bin/examples/r200_run68k_bridge_probe_ppc.warpelf` | `Run68K` sanity vs LP stubs, `minigl.library` LVO −30, dispatch-table header, `PP_Stack` entries, timing matrix |
+| `examples/r200_run68k_context_probe.c` | `bin/examples/r200_run68k_context_probe_ppc.warpelf` | create/query/clear/draw/present/delete a real 68k context via direct calls |
+
+Options: `r68ctx [-nopresent] [-fs] [-hold N] [-n N]`; `r68bridge
+[-n N] [-lowlevel]` plus the dangerous, opt-in `-waitfor` (known to wedge
+the task — cold reboot), `-async` and `-raw` stages, which run only after
+all results are written.
+
+Evidence files: `Work:wosbuild/run68k_trace.log` + `run68k_result.txt`,
+`Work:wosbuild/run68k_ctx_trace.log` + `run68k_ctx_result.txt` (one
+open/append/close per line, so the last line names a wedge point).
+
+Results, constraints and measured costs: see
+[run68k-direct-calls.md](run68k-direct-calls.md). Do not treat these probes
+as production paths; they exist to keep the evaluation reproducible and to
+catch regressions in `Run68K`, `PP_Stack` and the direct context lifecycle.
+
+## 6. Rules
 
 - Compilation or mocked tests are not hardware validation; say so in reports.
 - Compare against HEAD before calling a suite failure new.

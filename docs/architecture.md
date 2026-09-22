@@ -35,10 +35,14 @@ and how the pieces are layered. For the protocol wire details see
  +-------------------------------------------------------------------------------------------+
 ```
 
-Key property: **the PPC never calls 68k code**. A WarpOS task calling a 68k
-function raises the "illegal run68k function execution" trap, so all 68k
-services are reached through shared memory and Exec messages handled by a
-separate 68k task.
+Key property: **the PPC never executes raw 68k function pointers, and the
+hot path never crosses CPUs per call.** Jumping to a 68k address from PPC
+raises the "illegal run68k function execution" trap, but 68k code *can* be
+called through the supported `powerpc.library` `Run68K` bridge. That option
+was measured on hardware (2026-09-22): ~0.4–0.7 ms per call, versus an
+~82–94 µs ring publish, so the draw path deliberately stays in shared memory
+with a separate 68k task; direct calls are viable for init/control
+operations. See [run68k-direct-calls.md](run68k-direct-calls.md).
 
 ## 2. Components and ownership
 
@@ -103,6 +107,25 @@ into it through exported symbols, not through library vectors.
   `abiVersion`/`structSize`/`currentContext` → publish `MiniGLBase` and
   `MiniGLDispatch`. `MiniGLClose` detaches and zeroes the globals *before*
   `dllFreeLibrary`, so a late call can never reach a freed DLL.
+
+The loader handshake in time order:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as PPC client
+    participant L as hyperion_dll/dll.c
+    participant D as DLL process
+    C->>L: MiniGLOpen()
+    L->>L: already open? reuse instance (max 20, keyed by port)
+    L->>D: launch SystemTags SYS_Asynch, stack 10000
+    L->>D: DLLMTYPE_Open (records caller StackType)
+    D-->>L: Open ack
+    L->>D: SymbolQuery MGLGetDispatchTable
+    D-->>L: table pointer
+    L->>L: validate abiVersion / structSize / currentContext
+    L-->>C: MiniGLBase + MiniGLDispatch published
+```
 
 ## 4. Frontend modules (`backend_r200/library/`)
 
@@ -249,6 +272,30 @@ per cache line range. Both are bounded and pool-free.
    fence and blits/flips the target surface.
 6. Next frame reuses slots whose fences retired. `glFinish` (or a full ring)
    blocks until retirement.
+
+The same path as a sequence (semantic mode, one batch):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as PPC client
+    participant D as minigl_ppc.dll frontend
+    participant R as Ring control + slot
+    participant H as 68k host
+    participant L as minigl.library / Radeon3D
+    C->>D: glBegin / glVertex / glEnd (no OS call)
+    D->>D: capture PendingDrawState, serialize vertices
+    D->>R: dcbf+sync payload, write entry, head++
+    H->>R: poll head, CacheClearE, decode
+    H->>L: Radeon3DExecute / Radeon3DCommitBatch
+    L-->>H: fence token
+    H->>R: completed++, retired++ when fenced
+    C->>D: mglSwitchDisplay()
+    D->>R: publish PRESENT entry
+    H->>L: present blit / flip
+    H->>R: presentSeq++
+    D->>R: reuse slot after retired reaches generation
+```
 
 In CP-emitter mode (opt-in, `MGLPPC_CPEMIT=1`) steps 2–4 change: the PPC builds
 driver-format command packets itself and the host only submits them and manages

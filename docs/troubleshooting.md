@@ -57,6 +57,9 @@ diagnostic evidence on `DH2:`.
 | Context creation fails | required driver capability missing | Check the driver pair/interface version; `REQUIRED_CAPS` must all be present |
 | GL error after an operation | GL-level reject | Most commonly upload format/size violations (readback: only RGBA/UBYTE, ≤2 MiB) |
 | Pixels swapped in channels | big-endian surface/format mismatch | Check the enum translation and canonical BGRA path; run the pixel tests |
+| PPC task hangs in a direct 68k call | `WaitFor68K` after a synchronous `Run68K` blocks forever (measured 2026-09-22); async `Run68K` is unsupported on this `powerpc.library` | Do not use `WaitFor68K` in sync-only code; `Break`/`Kill` are ignored, recover with a cold reboot (see [run68k-direct-calls.md](run68k-direct-calls.md)) |
+| Direct stack-ABI call receives zeros | `PP_Stack` args must start at **`PP_Stack+24`** (WarpUP `Runk86`; `PP_StackSize` bytes are copied from there) | Offset the argument block by 24 bytes, first argument first |
+| Direct call returns wrong enums/masks | The 68k R200 backend has its own enum numbering (`GL_VERSION=206`, `GL_VENDOR=205`, `GL_RENDERER=148`, `GL_EXTENSIONS=57`, `GL_TRIANGLES=191`, clear bits 0x1/0x2) | Use the backend values from `library/minigl_r200.h`, not standard GL constants |
 
 ## 5. Sonnet loader classification (important, subtle)
 

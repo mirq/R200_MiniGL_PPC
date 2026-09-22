@@ -27,9 +27,12 @@ helper task. Its primary product is the direct-R200 stack:
  libminigl.a         PPC  client import archive (MiniGLOpen/MiniGLClose + loader)
 ```
 
-The PPC side cannot call the 68k `minigl.library` directly: mixed-mode calls
-trip the WarpOS "illegal run68k function execution" trap. The design therefore
-splits work by ownership:
+The PPC side cannot execute raw 68k function pointers (that trips the WarpOS
+"illegal run68k function execution" trap), but it *can* call 68k library
+vectors and C functions through the `Run68K` bridge — measured at ~0.4–0.7 ms
+per call, which is why the draw path does not use it (see
+[run68k-direct-calls.md](run68k-direct-calls.md)). The design splits work by
+ownership:
 
 - **PPC DLL** owns all GL semantics: state tracking, matrix math, lighting,
   vertex transform/clip bookkeeping, texture bookkeeping, command generation.
@@ -70,6 +73,24 @@ backend and the source of the shared `mglQ3` GL core.
 Both DLLs satisfy the same client-side contract (same ABI, same
 `MGLGetDispatchTable` bootstrap), so a client linked against `libminigl.a` does
 not care which DLL it loads — the DLL must simply be in its current directory.
+
+End to end, including the legacy path:
+
+```mermaid
+flowchart TB
+    C["PPC client"] --> W["inline gl*/mgl* wrappers"] --> T["MGLDispatchTable (ABI 3)"]
+    T --> D["minigl_ppc.dll - R200 semantic frontend (PPC)"]
+    T --> L["mglQ3 DLL (legacy)"] --> W3["Warp3DPPC.library"]
+    D --> R["ring - 8 x 8192-dword slots (shared memory, big-endian)"]
+    D --> M["mailbox - 160 B at ring +4096"]
+    D --> E["Exec port - lifecycle and control"]
+    R --> H["minigl_ppc_host (68k, 68060) - MiniGLPPC.R200.Host.1"]
+    M --> H
+    E --> H
+    H --> ML["minigl.library v12 - direct-R200 backend (68k)"]
+    ML --> RD["Radeon3D service in Radeon9200.chip (68k)"]
+    RD --> HW["RV280 hardware"]
+```
 
 ## 4. Hardware target
 

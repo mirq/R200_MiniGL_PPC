@@ -61,6 +61,21 @@ make -f Makefile.dll.r200.gcc host        # 68k side + classifier check
 make -f Makefile.import.gcc testprograms  # client archive + examples
 ```
 
+Artifact flow:
+
+```mermaid
+flowchart LR
+    F["backend_r200 frontend + dispatch + transport + hyperion_dll"] -->|"Makefile.dll.r200.gcc warpelf"| WE["bin/minigl_ppc_r200.warpelf"]
+    WE -->|"Elf2Exe2 on WarpOS"| DLL["minigl_ppc.dll"]
+    HC["backend_r200/minigl_ppc_host.c"] -->|"m68k-amigaos-gcc + classifier check"| H["bin/minigl_ppc_host"]
+    NL["classic_68k R200 minigl.library"] -->|"native-r200 target"| LIB["minigl.library"]
+    CL["client/ + hyperion_dll/dll.c"] -->|"Makefile.import.gcc"| A["lib/libminigl.a"]
+    DLL --> PKG["bin/r200-package/"]
+    H --> PKG
+    LIB --> PKG
+    A --> PKG
+```
+
 ### 2.2 Tunables (build-time)
 
 These are `?=` variables; set them on the `make` command line. They change

@@ -203,6 +203,29 @@ converts every pixel. Never use it as a throughput target.
 - 64 KiB residency rebuild copy-back: ~11 ms (`CopyMem` ~5.8 MB/s through the
   aperture).
 
+### 4.4 Direct PPC→68k calls (`Run68K`)
+
+Measured 2026-09-22 on a fresh boot (no host running, `minigl.library` v12,
+`powerpc.library` 17.15), 1000 iterations, per-run timebase calibration
+(24.4–24.9 MHz); full context in
+[run68k-direct-calls.md](run68k-direct-calls.md).
+
+| Call | ns/call |
+|---|---:|
+| `exec FindTask(NULL)` via `Run68K` (register ABI) | 405,000–413,000 |
+| same via the SDK LP stub (control) | 400,000–409,000 |
+| `dos DateStamp(&buf)` via `Run68K` | 932,000–941,000 |
+| `minigl.library` LVO −30 (dispatch table) | 402,000–405,000 |
+| `mglChooseWindowMode` via `PP_Stack` | 674,000–679,000 |
+| Exec `PutMsg`+`WaitPort`+`GetMsg` loopback | 1,500,000–1,522,000 |
+| `GLGetString(ctx, …)` via dispatch entry | 628,000–675,000 |
+| `GLClear(ctx, color\|depth)` via dispatch entry | 950,000–1,055,000 |
+
+Reference: ring publish with no OS calls is **82–94 µs**. Direct calls are
+therefore 4–8× more expensive and lose the PPC/68k overlap; they are only
+attractive for init/control operations, not for per-draw or per-GL-call
+work.
+
 ## 5. Cycle-level data
 
 These are the only cycle-level figures the project has measured. Do not
@@ -315,6 +338,22 @@ directories (the client loads the DLL from its CWD), and profile numbers must
 never be compared against quiet numbers. For sub-5 ms claims use ≥20 DateStamp
 iterations. Never run diagnostics (`MGLPPC_VERBOSE`, traces, pacing) in a
 quiet measurement.
+
+Attribution guide before touching code:
+
+```mermaid
+flowchart TB
+    A["frame slower than expected"] --> B{"what is waiting?"}
+    B -->|"publish stalls dominate"| C["ring space - host execute is the bottleneck"]
+    B -->|"host idle high"| D["PPC frontend or client logic is the bottleneck"]
+    B -->|"control op takes 1-5 ms"| E["Exec / mailbox round trip"]
+    B -->|"fullscreen present dominates"| F["blit/flip path (20-26 ms), not draw submission"]
+    C --> G["profile builds: PPC buckets + host counters"]
+    D --> G
+    E --> G
+    F --> G
+    G --> H["change one variable, same stack CRCs, re-measure"]
+```
 
 ## 10. Keeping this document current
 

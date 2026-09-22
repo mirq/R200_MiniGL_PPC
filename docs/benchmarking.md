@@ -89,6 +89,26 @@ client; AmigaOS otherwise keeps the old resident copy while disk CRCs match.
    Missing-file symptom: `milestone_gears_stats_library: can't find texture
    data/chrome.ppm`, and the aborted run consumes the host.
 
+The protocol as a flow (each performance claim repeats this whole cycle
+three times and reports the median plus every sample):
+
+```mermaid
+flowchart TB
+    A["Cold power cycle"] --> B["poll tools/wait_bridge.sh - 80-100 s"]
+    B --> C["reconnect 192.168.1.21:2345 explicitly"]
+    C --> D["verify clean state: no host, no client, no host port"]
+    D --> E["C:InitPPC exactly once this boot"]
+    E --> F["SetEnv MGLPPC_HOSTPRI -1; clear diagnostics"]
+    F --> G["start a fresh host, verify port appears"]
+    G --> H["CD to the DLL directory"]
+    H --> I["run client with -frames N"]
+    I --> J["read GEARS_RUN fps, require error=0"]
+    J --> K["verify clean state again"]
+    K --> L{"three cold-boot runs done?"}
+    L -->|no| A
+    L -->|yes| M["report median + every sample + stack CRCs"]
+```
+
 ## 3. Benchmark commands
 
 Fullscreen reference workload (precalc gears):
