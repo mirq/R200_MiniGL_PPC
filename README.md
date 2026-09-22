@@ -1,252 +1,174 @@
-# MiniGL V19 direct dispatch for WarpOS/PPC
+# MiniGL V19 for WarpOS/PPC — direct-R200 stack
 
-This package provides the WarpOS/PPC build of MiniGL V19. It is independent of
-the 68k `minigl.library`: a WarpOS game links the PPC import archive and loads a
-Hyperion-style PPC DLL. After one bootstrap lookup, GL/MGL calls dispatch
-straight to PPC function pointers.
+MiniGL is an OpenGL-1.x-style 3D API for Amiga systems: a small `gl*`/`mgl*`
+surface, one global current context, and a positional **dispatch table**
+instead of per-call library opening. This repository builds the **WarpOS/PPC
+implementation** of MiniGL V19 for the Amiga 4000 (68060) + Prometheus +
+Radeon 9200 + PMC MPC7410/PPC configuration.
 
-The actual MiniGL implementation is now the **bundled `mglQ3` source tree**,
-matching the Classic V19 package rather than requiring an external PPC backend
-archive.
-
-## Versions and compatibility
-
-Public API level:
-
-```
-MINIGL_VERSION     19
-MINIGL_MIN_VERSION 10
-```
-
-Dispatch ABI remains:
+The primary product is the **direct-R200 stack**: a PPC DLL (`minigl_ppc.dll`)
+that carries the GL semantics and talks over shared memory to a 68k helper
+(`minigl_ppc_host`), which drives `Radeon9200.chip` through its bounded
+Radeon3D service. There is **no Warp3D driver for the R200**; that absence is
+why this stack exists.
 
 ```
-MINIGL_DISPATCH_ABI_VERSION 3
+ PPC client (libminigl.a)
+   -> inline wrappers -> MGLDispatchTable     (one indirect call, no 68k transition)
+   -> minigl_ppc.dll                          (semantic frontend, PPC)
+   -> ring / mailbox / Exec messages          (shared memory, big-endian)
+   -> minigl_ppc_host                         (68k helper, port MiniGLPPC.R200.Host.1)
+   -> LIBS:minigl.library                     (68k direct-R200 backend)
+   -> Radeon3D service in Radeon9200.chip      -> RV280
 ```
 
-The released V10 dispatch layout is frozen as the prefix of the V19 table. No
-V10 entry was removed, reordered or changed in size; the V19 additions are
-appended after the old `glPolygonOffset` slot. Therefore an application already
-compiled with the V10 WarpOS import library still sees the offsets it expects
-and accepts the larger V19 table.
+## What is in the box
 
-A newly compiled V19 application requires the complete V19 table and will
-reject an old V10 DLL because its `structSize` is too small.
+| Artifact | Runs on | Role |
+|---|---|---|
+| `minigl_ppc.dll` | PPC/WarpOS | The GL implementation: state, matrices, lighting, batching, command generation |
+| `minigl_ppc_host` | 68k | Executes semantic batches, manages fences/present, answers queries |
+| `LIBS:minigl.library` | 68k | Direct-R200 backend (built in `classic_68k/`) |
+| `LIBS:Picasso96/{Radeon9200.chip,Prometheus.card}` | 68k | Matched driver pair (separate `~/p96-driver` tree) |
+| `libminigl.a` | PPC | Client import archive: `MiniGLOpen`/`MiniGLClose` + Hyperion loader |
+| `mglQ3` / `Makefile.dll.gcc` | PPC | Legacy alternate DLL over Warp3D (not the R200 path) |
 
-The Silent Hill reference DLL has a private three-entry fast-path extension at
-the same tail boundary. Those slots are not part of this V19 API. Static
-analysis of `SilentHill.elf` found no access to them: the game only uses the
-frozen prefix, accepts a table of at least `0x224` bytes and is compatible with
-the current `0x22c`-byte table. Another client that calls the private fast-path
-slots is not compatible with the V19 tail.
-
-The appended V19 entries are:
-
-```
-glClientActiveTextureARB
-glInterleavedArrays
-glMultiDrawArrays
-mglEmergencyCloseScreen
-glMGLForceNewRenderPass
-```
-
-`FromWindow` is intentionally **not** part of this API.
-
-## Runtime path
-
-```
-WarpOS game
-  -> libminigl_dispatch_ppc.a
-  -> MiniGLOpen()
-  -> dllLoadLibrary("minigl_ppc.dll", "MiniGLPPC.DLL")
-  -> MGLGetDispatchTable()
-  -> PPC MGLDispatchTable
-  -> bundled mglQ3 PPC implementation
-  -> Warp3DPPC.library
-  -> installed Warp3D hardware driver
-```
-
-There is no 68k `OpenLibrary()` and no 68k/PPC transition in the GL hot path.
-`MiniGLBase` is the Hyperion DLL instance handle on WarpOS.
-
-The DLL is hardware-neutral. R200 support is selected below MiniGL by the
-installed `Warp3DPPC.library`, `Warp3D.library` and Radeon-capable Warp3D
-driver. This PPC path does not open `Radeon9200.chip` or use the separate 68k
-direct-R200 backend ABI.
-
-## Toolchain configuration
-
-All GCC makefiles include `Makefile.wos.gcc.common`. Its local defaults point
-at the GCC 8.4 cross-toolchain and MOS2WOS SDK overlay used for this build, and
-can be overridden without editing a makefile:
-
-```
-make -f Makefile.dll.gcc warpelf \
-    WOS_TOOLCHAIN_BIN=/path/to/cross/bin \
-    MOS2WOS_ROOT=/path/to/mos2wos
-```
-
-The build uses the `ppc-amigaos-*` compiler/binutils for PPC SysV code but
-replaces their AmigaOS 4 defaults with the WarpOS SDK headers, startup objects
-and runtime libraries. The compiler does not support the historical `-warpup`
-option.
-
-## Build the bundled mglQ3 backend
-
-Normally this is done automatically while building the DLL ELF:
-
-```
-make -f Makefile.dll.gcc warpelf
-```
-
-To build only the backend:
-
-```
-make -C mglQ3 -f Makefile.wos.gcc
-```
-
-Output:
-
-```
-mglQ3/lib/libmgl-wos.a
-```
-
-The GCC WarpOS build uses the same `mglQ3` sources as the Classic package.
-The historical `makefile.vbccWOS` is retained as a reference/alternative.
-
-## Build minigl_ppc.dll
-
-On Linux, build the normalized PowerPC ELF input with:
-
-```
-make -f Makefile.dll.gcc warpelf
-```
-
-This builds `mglQ3/lib/libmgl-wos.a` and links:
-
-```
-bin/minigl_ppc.warpelf
-```
-
-The ELF link is normalized for historical `Elf2Exe2`: `_start` is defined at
-`.text+0`, COMMON symbols are allocated, executable fragments are merged and
-only `R_PPC_ADDR32`, `R_PPC_ADDR16_LO`, `R_PPC_ADDR16_HA` and `R_PPC_REL24`
-relocations are permitted. The makefile fails if those invariants are broken.
-
-`Elf2Exe2` is a target-hosted mixed 68k/WarpOS program from the historical PPC
-GCC package and requires `ixemul.library` V48. Transfer the ELF to a compatible
-WarpOS machine and run:
-
-```
-Stack 100000
-Elf2Exe2 minigl_ppc.warpelf minigl_ppc.dll
-```
-
-The final runtime artifact is `bin/minigl_ppc.dll`. If `ELF2EXE2` names a
-runnable converter on the build host, plain `make -f Makefile.dll.gcc` performs
-both stages. The `.warpelf` file is not a stock AmigaDOS executable; direct
-execution requires a separately installed ELF-aware `LoadSeg()` patch.
-
-The old `BACKEND_INC` / `BACKEND_LIB` external-backend mechanism is no longer
-needed.
-
-## Build the client import archive
-
-```
-make -f Makefile.import.gcc
-```
-
-Creates:
-
-```
-lib/libminigl_dispatch_ppc.a
-lib/libminigl.a
-```
-
-The two archives are byte-identical. `libminigl.a` is the drop-in historical
-name. Use the compile and normalized ET_REL link flags from
-`Makefile.wos.gcc.common`; `Makefile.import.gcc` is the canonical example and
-does not use `-warpup` or `-lppcamiga`.
-
-Build all import-linked diagnostic programs with:
-
-```
-make -f Makefile.import.gcc testprograms
-```
-
-Their normalized ELF files are written below `bin/examples/` and require the
-same `Elf2Exe2` conversion before use on stock AmigaDOS.
-
-Source code continues to use:
+## Quick start (client)
 
 ```c
 #include <proto/minigl.h>
 
-if (!MiniGLOpen())
-    ...;
+int main(void)
+{
+    if (!MiniGLOpen()) return 20;
+    mglChooseWindowMode(GL_TRUE);
+    mglChoosePixelDepth(16);
+    if (!mglCreateContext(0, 0, 640, 480)) { MiniGLClose(); return 20; }
 
-/* normal gl* / mgl* calls */
+    glViewport(0, 0, 640, 480);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    /* ... draw ... */
+    glFinish();
+    mglSwitchDisplay();
 
-MiniGLClose();
+    mglDeleteContext();
+    MiniGLClose();
+    return 0;
+}
 ```
 
-## V19 backend notes
+Per session: cold boot with the matched driver pair, `C:InitPPC` **once**, then
+start a **fresh host** and run the client from the directory containing the
+matched `minigl_ppc.dll`. Full details:
+[docs/client-guide.md](docs/client-guide.md).
 
-The WarpOS mglQ3 dispatch follows the conservative Classic behaviour where
-appropriate:
+## Quick start (build, Linux host)
 
-- `glPolygonOffset` uses the mglQ3 implementation.
-- `glInterleavedArrays` uses the mglQ3 implementation.
-- `glMultiDrawArrays` is implemented as repeated `GLDrawArrays` calls.
-- Radeon and Radeon2 Warp3D contexts expose the backend's generic multitexture
-  and compiled-vertex-array implementations and report a specific renderer name.
-- `glClientActiveTextureARB` is a no-op because mglQ3 has no independent
-  client-active texture selector.
-- `mglResizeContext` remains a no-op until the legacy fullscreen resource path
-  is safe to expose.
-- `mglEmergencyCloseScreen` and `glMGLForceNewRenderPass` are conservative
-  no-ops on this backend.
-- `mglGetInputWindowHandle` returns the ordinary mglQ3 window handle.
+```sh
+# PPC DLL (ET_REL; final .dll conversion is target-hosted Elf2Exe2)
+make -f Makefile.dll.r200.gcc warpelf
 
-## Hyperion DLL details
+# 68k host (also builds the 68k library via R200_NATIVE_ROOT)
+make -f Makefile.dll.r200.gcc host
 
-The Hyperion runtime remains in `hyperion_dll/`. The DLL exports the MiniGL
-bootstrap function:
-
-```c
-const MGLDispatchTable *MGLGetDispatchTable(void);
+# client import archive + examples
+make -f Makefile.import.gcc
+make -f Makefile.import.gcc testprograms
 ```
 
-The required resource exports `dllFindResource`, `dllLoadResource` and
-`dllFreeResource` are also supplied.
+Build system, targets and the ET_REL contract:
+[docs/building.md](docs/building.md).
 
-## WarpOS stub DLL
-
-The backend-free diagnostic stub remains buildable with:
+## Versions and compatibility
 
 ```
-make -f Makefile.dll.stub.gcc warpelf
+MINIGL_VERSION               19
+MINIGL_MIN_VERSION           10
+MINIGL_DISPATCH_ABI_VERSION   3
+sizeof(MGLDispatchTable)     0x238
 ```
 
-This creates `bin/stub/minigl_ppc.warpelf`; plain
-`make -f Makefile.dll.stub.gcc` additionally invokes `Elf2Exe2` to create
-`bin/stub/minigl_ppc.dll` when a compatible converter is available.
+The released WarpOS **V10 dispatch layout is frozen** as the prefix of the V19
+table: no field through `GLPolygonOffset` was removed, reordered or resized.
+V19 appends `glClientActiveTextureARB`, `glInterleavedArrays`,
+`glMultiDrawArrays`, `mglEmergencyCloseScreen`, `glMGLForceNewRenderPass` and
+the FastPath V2 entries (`mglBeginFastPath`, `mglEndFastPath`,
+`mglGetFastPathCapabilities`). A V19 client rejects an old V10 DLL by
+`structSize`; a V10 client accepts the V19 DLL because its prefix is unchanged.
+
+The Silent Hill reference DLL has a private three-entry extension in the same
+tail region; `SilentHill.elf` was verified to use only the frozen prefix, so it
+is compatible with the `0x238` table. Do not claim compatibility for other
+clients that call the private extension. Full ABI and synchronization rules:
+[docs/dispatch-abi.md](docs/dispatch-abi.md).
+
+## Design rules
+
+- **One indirect call per GL call**, no 68k transitions in the hot path.
+- **Bounded resources**: two 8192-dword submit slots, an 8 x 8192-dword ring,
+  four vertex segments, ≤2 MiB texture staging, no per-frame heap churn.
+- **The PPC never touches PCI, MMIO, the CP ring or VRAM.** Only the driver
+  service does; caps are negotiated at context creation.
+- **Both CPUs are big-endian**; byte swapping is confined to GPU-consumed
+  payloads at the aperture boundary.
+- **Diagnostics are opt-in**; console/trace logging is compiled out of release
+  builds because it dominates frame time.
+
+## Backends
+
+- **direct-R200 (primary)** — PPC frontend + 68k host + `Radeon9200.chip`
+  (`Makefile.dll.r200.gcc`). Protocol 15, ring control v6, mailbox v1.
+- **legacy mglQ3/Warp3D** — shared GL core over `Warp3DPPC.library`
+  (`Makefile.dll.gcc`). Same dispatch ABI and client flow, different rendering
+  architecture; not used on the R200 target.
+- **stub** — backend-free diagnostic DLL that logs every call
+  (`Makefile.dll.stub.gcc`).
+
+Internals: [docs/frontend-r200.md](docs/frontend-r200.md),
+[docs/transport-protocol.md](docs/transport-protocol.md),
+[docs/host-68k.md](docs/host-68k.md), [docs/textures.md](docs/textures.md).
+
+## Performance at a glance
+
+All on the physical machine; numbers depend on stack CRCs and boot state and
+are catalogued with conditions in [docs/performance.md](docs/performance.md):
+
+| Workload | Result |
+|---|---:|
+| Precalc gears, fullscreen 640x480x16, 3 buffers, sync off | 144.927 FPS (current source, warm boot) |
+| Same, CP-emitter mode, fullscreen | 174.4–182.9 FPS (3-run medians) |
+| Windowed 800x600x32, CP emitter | 68.3–69.4 FPS |
+| Texture upload suite | 44.642 FPS |
+| Quake room walk, 800x600x32 | 59.405 FPS |
+
+Measured cycle-level data (aperture store ~27 cycles/4 B, AltiVec serialization
+−14% to −16% ticks, 68060 copy floor ~11.6 cycles/dword, `WaitTime` ~20.3 ms
+quantum) and the full regression catalogue are in
+[docs/performance.md](docs/performance.md). Benchmark procedure:
+[docs/benchmarking.md](docs/benchmarking.md).
+
+## Documentation
+
+Start at [docs/README.md](docs/README.md). It indexes:
+
+- [overview](docs/overview.md) and [architecture](docs/architecture.md)
+- [building](docs/building.md), [dispatch ABI](docs/dispatch-abi.md),
+  [client guide](docs/client-guide.md)
+- internals: [frontend](docs/frontend-r200.md),
+  [transport](docs/transport-protocol.md), [68k host](docs/host-68k.md),
+  [textures](docs/textures.md)
+- [performance](docs/performance.md) and [benchmarking](docs/benchmarking.md)
+- [testing](docs/testing.md) and [troubleshooting](docs/troubleshooting.md)
+- deep reference: [mailbox](docs/reference/MAILBOX_V1.md),
+  [CP emitter](docs/reference/CP_EMITTER.md),
+  [host loader regression](docs/reference/HOST_LOADER_REGRESSION.md)
+
+`docs/` must be kept current: any change committed/pushed to the remote updates
+the affected documents in the same change set (see `AGENTS.md`).
 
 ## Validation status
 
-The real DLL ELF, stub ELF, import archives and all five example ELFs build
-successfully from an empty object tree with the configured GCC 8.4 toolchain. The
-ELF invariants and Silent Hill dispatch accesses have been checked statically.
-
-Target conversion and graphical R200 execution still require a WarpOS setup on
-which PPC tools run correctly. On the current Sonnet `powerpc.library` 17.15
-test system, both the historical converter and initialization of
-`ppclibemu` 0.9d raised a PowerPC exception. This does not invalidate the ELF
-input, but it prevents claiming target runtime validation on that setup.
-
-## Alignment / packing
-
-Do not force two-byte packing on the MiniGL dispatch table. The table is a
-PPC-to-PPC ABI and both sides compile the same structure with normal PPC
-compiler layout. The Hyperion DLL glue keeps its own required packing around
-classic Amiga system structures.
+Binary validation is cross-build plus hardware runs on the physical A4000.
+There is no emulator path for the R200 backend. A clean build is necessary but
+not sufficient: record commit + dirty state, artifact CRCs, driver pair, mode,
+depth, buffers, sync, cold/warm state, and the exact tests run.

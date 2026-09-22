@@ -40,8 +40,10 @@ Never apply this override to the actual PPC DLL or PPC clients. Existing
 classification bits can survive a file replacement despite a correct CRC.
 
 The optional MGLPPC_CPEMIT=1 mode keeps command generation on the PPC and
-submission/recovery on the driver-owned 68k side. It currently supports
-windowed contexts only. See CP_EMITTER.md and HOST_LOADER_REGRESSION.md.
+submission/recovery on the driver-owned 68k side. Windowed and fullscreen
+BLIT contexts are supported; FLIP presentation has a documented limitation.
+See docs/reference/CP_EMITTER.md and docs/reference/HOST_LOADER_REGRESSION.md
+in the source repository.
 
 Launch order
 ------------

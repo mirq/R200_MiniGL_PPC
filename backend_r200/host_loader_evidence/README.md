@@ -1,7 +1,7 @@
 # Loader and short-yield evidence
 
 CRC-verified bridge downloads from the physical Amiga at 192.168.1.21:2345.
-See `../HOST_LOADER_REGRESSION.md` for build identities and interpretation.
+See `../../docs/reference/HOST_LOADER_REGRESSION.md` for build identities and interpretation.
 
 - `classification-before.log`: the unchanged ABI-4 host with cached PPC classification.
 - `classification-after.log`: same `D0406387` bytes, classification changed to normal 68k.

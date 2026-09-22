@@ -124,7 +124,7 @@ matching header + import lib + runtime together.
   640x480x16, three buffers, 600 frames, GL error zero. CP path retained and
   validated (68.337 FPS windowed 800x600x32, 2,031 IBs; 7,127 texture checks pass).
   Quiet DLL CRC 02605851; host/native/driver unchanged. All 12 local test scripts
-  pass. Details: ../../../backend_r200/HOST_LOADER_REGRESSION.md.
+  pass. Details: ../../../docs/reference/HOST_LOADER_REGRESSION.md.
 
 - 2026-09-12: Final quiet current DLL reached 101.694 FPS in the requested
   600-frame precalc fullscreen 640x480x16 / 3-buffer / sync-off run, with GL
@@ -132,7 +132,7 @@ matching header + import lib + runtime together.
   2,031 IB submissions and 511,620 dwords; CP texture acceptance passed all
   7,127 checks. Native bootstrap passed afterward. Host 0FAA4EFA, classified
   normal 68k; DLL A02F353A; native 62343673 restored. Evidence and distinctions:
-  ../../../backend_r200/HOST_LOADER_REGRESSION.md.
+  ../../../docs/reference/HOST_LOADER_REGRESSION.md.
 
 - 2026-09-12: Confirmed the host slowdown was a Sonnet LoadSeg false positive:
   the RACE substring in MGLPPC_UPLOAD_TRACE marked the 68k helper as PPC. The
@@ -142,7 +142,7 @@ matching header + import lib + runtime together.
   issue was measured: 263 DOS tick sleeps/600 frames. PPC-native 100 us yields
   retain ownership/deadline checks and improved matching profiled fullscreen
   precalc 640x480x16/3-buffer runs 59.760 -> 102.040 FPS. CPP packet emission is
-  retained. Evidence: ../../../backend_r200/HOST_LOADER_REGRESSION.md.
+  retained. Evidence: ../../../docs/reference/HOST_LOADER_REGRESSION.md.
 
 - 2026-09-10: Real opt-in windowed PPC command emission now implemented and
   cross-built, retaining streamed vertices, 68k fences/presents and driver
@@ -150,7 +150,7 @@ matching header + import lib + runtime together.
   retirement discipline, driver generation/transition guards and even-dword
   padding. All 11 local test scripts pass; physical new-path tests and FPS
   pending matched-pair cold load. The unchanged semantic baseline is 52.264 FPS,
-  one 600-frame 800x600x32 windowed envmap run. Details: ../../../backend_r200/CP_EMITTER.md.
+  one 600-frame 800x600x32 windowed envmap run. Details: ../../../docs/reference/CP_EMITTER.md.
 
 - 2026-09-10: Started the bounded PPC-emitter follow-up. Audit confirmed the
   driver emitter can be shared without register-programming duplication, but
@@ -185,7 +185,7 @@ matching header + import lib + runtime together.
   test (7,127 checks, 2 contexts, 18 updates) passed. New native library CRC
   2F05868E is installed; DC041695 remains at DH2:texretire/native-base. Only
   lifetime cleanup changed; P96 allocation counts/FPS savings were not measured.
-  Details: ../../../backend_r200/TEXTURE_P96_AUDIT.md.
+  Details: ../../../docs/textures.md.
 
 - 2026-09-07: Started bounded fullscreen notification waiting, preserving the
   synchronous two-buffer rotation and all GPU waits. An unmodified isolated

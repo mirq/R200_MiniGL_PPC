@@ -106,7 +106,7 @@ negotiated request, not the chip version).
 
 ### Implementation: live color target (ring control v6)
 
-Steps 1-4 of `PHASE3_HANDOFF.md` section 5 are implemented:
+The live color-target steps are implemented:
 
 - `MGLPPCRingControlV1` (ring control v6) appends `colorToken`/`colorSeq`;
   the existing compile-time size/offset asserts cover the new pair, which

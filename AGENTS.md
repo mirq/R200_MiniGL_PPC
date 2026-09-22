@@ -31,6 +31,37 @@
   Its `R200_3D_PROGRESS.md` and `RADEON3D_SUBMISSION.md` track results
   and the Radeon3D service contract.
 
+## Documentation — must stay current (mandatory)
+
+- `docs/` is the single source of developer documentation for this repo and is
+  **PPC-first**: the WarpOS/PPC direct-R200 stack is the primary subject.
+  `docs/README.md` is the index; a new developer starts there.
+- **Whenever code, protocol, ABI, build, performance or session-rule behavior
+  is changed and committed/pushed to the remote, the affected documents must
+  be updated in the same change set.** A doc update is part of the change,
+  never a follow-up task.
+- Minimum update map:
+  - dispatch/API/ABI → `docs/dispatch-abi.md`
+  - protocol/ring/mailbox/commands/caps → `docs/transport-protocol.md`
+  - 68k host behavior/options → `docs/host-68k.md`
+  - PPC frontend internals/batching → `docs/frontend-r200.md`
+  - texture paths/formats/costs → `docs/textures.md`
+  - build system/makefiles/toolchain/outputs → `docs/building.md`
+  - performance → `docs/performance.md` (measured values + conditions; label
+    measured/derived/estimated; never invent cycle counts)
+  - hardware/benchmark procedure → `docs/benchmarking.md`
+  - tests/tools → `docs/testing.md`
+  - client runtime/deployment/recovery → `docs/client-guide.md`,
+    `docs/troubleshooting.md`
+- New documents must be added to the `docs/README.md` index. Moving or
+  deleting a document requires updating every reference (grep the whole repo,
+  including `classic_68k/` and source comments).
+- Historical session notes, plans, handovers and findings files are not
+  documentation: fold durable facts into `docs/` and delete the note; git
+  history preserves the rest.
+- Deep specifications and regression evidence live in `docs/reference/`; keep
+  their cross-references valid when moving them.
+
 ## Build and Validation
 
 - There is no default root `Makefile`; always select one with `-f`. There
@@ -199,7 +230,7 @@
   unrelated bits and set `(bits & ~0x00030000) | 0x00020000` after replacing a
   previously misclassified file. Verify bits as well as CRC. Never apply this
   classification override to genuine PPC clients/DLLs. See
-  `backend_r200/HOST_LOADER_REGRESSION.md` for the unchanged-binary proof.
+  `docs/reference/HOST_LOADER_REGRESSION.md` for the unchanged-binary proof.
 
 - Never push, pull, copy, checksum, or otherwise mutate/query Amiga files
   in parallel. Serialize all Amiga filesystem and DOS operations;

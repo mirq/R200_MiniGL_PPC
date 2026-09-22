@@ -47,7 +47,7 @@ waiting for the 68k, not computing. Publish stalls are negligible
 (93,906 ticks total; the 131,072-iteration spin budget from the yield fix
 works on the ring path).
 
-## The yield pathology from HOST_LOADER_REGRESSION.md is still active on the control path
+## The yield pathology from docs/reference/HOST_LOADER_REGRESSION.md is still active on the control path
 
 Room-walk: PPC_YIELD calls=1450 (11.2/frame), average actual yield
 500,660 ticks = **15.07 ms** per yield (requested 100 us; max observed

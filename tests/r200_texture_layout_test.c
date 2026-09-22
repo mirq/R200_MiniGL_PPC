@@ -1,5 +1,5 @@
 /* Host-independent production arithmetic checks, not native conversion/GPU ordering.
- * Build and run commands: tests/README-r200-readback.md. */
+ * Build and run commands: docs/testing.md. */
 #define MGLPPC_TEXTURE_VALIDATION_TEST
 #include "../backend_r200/include/libraries/minigl_ppc_protocol.h"
 #include <assert.h>

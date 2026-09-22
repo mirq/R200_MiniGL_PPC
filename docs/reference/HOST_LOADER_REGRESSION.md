@@ -138,7 +138,7 @@ Copying the corrected host over `mglhost` **did retain the old `00010000`
 classification**. It was explicitly corrected to `00020000` and read back.
 This independently demonstrates why checking only the new file CRC is not enough.
 
-Selected raw results are archived in `host_loader_evidence/` beside this note.
+Selected raw results are archived in `backend_r200/host_loader_evidence/`.
 The final native bootstrap passed and no client, DLL, or host remained running.
 The current boot already has PPC initialized. `MGLPPC_HOSTPRI=-1` remains the
 explicit benchmark setting; CP-emitter/smoke/verbose/upload-trace toggles and
