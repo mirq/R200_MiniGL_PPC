@@ -87,7 +87,7 @@
 /* Capacities                                                          */
 /* ------------------------------------------------------------------ */
 
-#define MAX_VERTICES 4096UL
+#define MAX_VERTICES 8192UL
 #define MAX_SCREEN_VERTICES RADEON3D_IMMD_MAX_VERTICES
 #define MAX_QUAD_VERTICES RADEON3D_IMMD_MAX_QUAD_VERTICES
 
@@ -1022,6 +1022,7 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
 void ZeroMemory(APTR memory, ULONG bytes);
 ULONG PerfClock(void);
 ULONG PerfClockRate(void);
+ULONG PerfClockDeltaMs(ULONG start);
 struct MiniGLR200Context *CurrentContext(void);
 /* context must be zero-initialized before frontend defaults are applied. */
 void InitializeFrontendContext(struct MiniGLR200Context *context);

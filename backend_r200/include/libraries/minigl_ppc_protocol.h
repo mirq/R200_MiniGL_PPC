@@ -370,6 +370,11 @@ typedef struct MGLPPCRingEntryV1 {
  * payload tuples expand from 3 to 4 words: CPU address/bytes/id/GPU address.
  * Mutually exclusive with startup INDIRECT; protocol v15 optional extension. */
 #define MGLPPC_RING_REGISTER_CP_EMIT (1UL << 4)
+/* Reply-only: the live Radeon3D session advertises RADEON3D_CAP_PPC_RING
+ * (interface 20), so the frontend may hold the PPC engine lease. The 68k
+ * host only learns the driver caps while opening the session here — HELLO
+ * cannot advertise them. Protocol v16. */
+#define MGLPPC_RING_REGISTER_PPC_RING (1UL << 5)
 
 /* Optional protocol-15 extension; never changes RingControlV1. Registration
  * echoes MAILBOX only after initializing this region, and returns the segment

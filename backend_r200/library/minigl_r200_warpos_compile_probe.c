@@ -240,6 +240,44 @@ static void TraceEmit(const char *label1, ULONG value1,
 #endif
 }
 
+/* Raw text line into the same per-line open/append/close trace file.
+ * Used to mirror R200PPCConsolePrintf output (PPCPERF_LIVE/PPCDELTA) so a
+ * fullscreen run leaves readable evidence while the client is still alive. */
+static void TraceRaw(const char *text)
+{
+#if MGLPPC_CLIENT_TRACE
+    char buf[384];
+    char *p = buf;
+    ULONG len;
+    BPTR fh;
+    if (TraceCreated != TRACE_CREATED) {
+        R200PPCTraceOpen();
+        if (TraceCreated != TRACE_CREATED)
+            return;
+    }
+    if (++TraceLines > 200000UL)
+        return;
+    *p++ = '#';
+    TraceHex(&p, TraceLines);
+    *p++ = '@';
+    TraceHex(&p, PerfClock());
+    *p++ = ' ';
+    while (*text && (ULONG)(p - buf) < sizeof(buf) - 2)
+        *p++ = *text++;
+    if (p[-1] != '\n')
+        *p++ = '\n';
+    len = (ULONG)(p - buf);
+    fh = Open((STRPTR)TRACE_PATH, MODE_OLDFILE);
+    if (!fh)
+        return;
+    Seek(fh, 0, OFFSET_END);
+    (void)Write(fh, buf, len);
+    Close(fh);
+#else
+    (void)text;
+#endif
+}
+
 void R200PPCTraceStr(const char *line)
 {
     TraceEmit(line, 0, NULL, 0, 0);
@@ -263,6 +301,10 @@ void R200PPCTraceUL2(const char *label1, ULONG value1,
  * (DH2:wosbuild/mglppc_client.log) is separately compile-time gated. */
 static ULONG FrontendConsoleVerbose;
 
+/* EXP-FORCENORMAL: A/B switch (MGLPPC_FORCENORMAL env) that puts
+ * hardware-TCL draws on the normal-vertex layout. Diagnostic only. */
+ULONG R200PPCForceNormalVertex;
+
 void R200PPCConsolePrintf(const char *fmt, ...)
 {
     char buf[320];
@@ -274,6 +316,34 @@ void R200PPCConsolePrintf(const char *fmt, ...)
     va_end(ap);
     printf("%s", buf);
     fflush(stdout);
+    TraceRaw(buf);
+}
+
+/* --- DEBUG (render-path investigation): DH2:cpdbg.log -------------------
+ * Always-on, event-gated trace. One Open/Seek/Write/Close per emitted line;
+ * only stall/failure events are logged (bounded per run), never per frame. */
+static void CpDbgPrintf(const char *fmt, ...)
+{
+    static BOOL opened = FALSE;
+    char buf[256];
+    va_list ap;
+    BPTR fh;
+
+    if (!opened) {
+        opened = TRUE;
+        fh = Open((CONST_STRPTR)"DH2:cpdbg.log", MODE_NEWFILE);
+        if (fh)
+            Close(fh);
+    }
+    va_start(ap, fmt);
+    vsprintf(buf, fmt, ap);
+    va_end(ap);
+    fh = Open((CONST_STRPTR)"DH2:cpdbg.log", MODE_OLDFILE);
+    if (!fh)
+        return;
+    Seek(fh, 0, OFFSET_END);
+    Write(fh, (APTR)buf, (LONG)strlen(buf));
+    Close(fh);
 }
 
 /* The link proof exercises CPU-side state only. These definitions are the
@@ -737,6 +807,15 @@ extern void MGLPPCBlit565Swap(UBYTE *destination, const UBYTE *source,
                               ULONG bytes);
 extern void MGLPPCStoreBarrier(void);
 extern void MGLPPCInvalidateLine32(APTR address);
+/* Ring-writer MMIO primitives (backend_r200/client/minigl_ppc_ring_mmio.s):
+ * shapes copied from the hardware-validated p96-driver phase-0 helpers
+ * (lwbrx/stwbrx + eieio; committed WPTR publish = store + readback). */
+extern ULONG R200PPCMmioRead32(volatile void *address);
+extern void R200PPCMmioWrite32(volatile void *address, ULONG value);
+extern ULONG R200PPCMmioWriteCommit(volatile void *address, ULONG value);
+extern void R200PPCCopyRingBr(volatile ULONG *destination,
+                              const ULONG *source, ULONG dwords);
+extern void R200PPCWriteBarrier(void);
 /* CP surface-descriptor cache capacity. The cache holds every surface token
  * the emitter can resolve: colour target, depth, texture unit 0 and texture
  * unit 1. Resident textures dominate the working set, so the old 16 entries
@@ -783,6 +862,23 @@ typedef struct R200PPCFrontendPlatform {
     APTR cpAddress;
     ULONG cpBytes, cpSurfaceCount;
     ULONG cpColorToken, cpColorSeq;
+    /* Interface-20 PPC engine lease (protocol v16). leaseAvailable is the
+     * reply-only register flag; leaseActive means this frontend currently
+     * owns the ring (68k refuses all other submissions until LEASE_END). */
+    BOOL leaseAvailable, leaseActive;
+    BOOL leaseRequested;
+    ULONG leaseLastFence;
+    volatile ULONG *leaseRing;      /* CP ring CPU address (cached PPC view) */
+    ULONG leaseRingGpu, leaseRingDwords, leaseRingMask;
+    ULONG leaseBar2;                /* BAR2 MMIO base (GTT scratch regs) */
+    ULONG leaseNextFence, leaseMaxBatch, leaseHeartbeatMs;
+    ULONG leaseLastHeartbeat;       /* PerfClock sample of last heartbeat */
+    ULONG leaseWptr;                /* local ring write cursor (masked) */
+    /* Emit staging for lease batches: batch dwords + 6-dword fence tail
+     * + padding to the ring's 16-dword alignment. Kept separate from the
+     * transport slot buffers so the lease path never fights the bounded
+     * path for slot space. */
+    ULONG leaseStaging[MGLPPC_CP_DWORDS + 16UL];
     struct {
         ULONG token, epoch;
         struct MGLPPCEmitSurface surface;
@@ -1546,7 +1642,7 @@ static BOOL PlatformMailboxWait(void)
             return FALSE;
         }
         /* Yield VERY rarely, on the same bounded budget as the ring wait
-         * rework in HOST_LOADER_REGRESSION.md: a 68k-side sleep
+         * rework in docs/reference/HOST_LOADER_REGRESSION.md: a 68k-side sleep
          * (Delay(1), WaitTime(0,100)) quantizes to a 50 Hz tick, about
          * 20 ms of actual latency on this kernel, so yielding added 1-4 of
          * those to every control round-trip. The 68k host runs on a
@@ -1872,6 +1968,137 @@ BOOL MGLPPCPollEvent(MGLPPCEvent *event)
     return TRUE;
 }
 
+/* ---- Interface-20 PPC engine lease (protocol v16) ----
+ * The frontend takes the lease over the transport (metadata only) and then
+ * submits CP batches directly into the ring the driver published, skipping
+ * the 68k entirely on the hot path. The heartbeat cadence is a fraction of
+ * the driver's 5 s expiry bound; the reply layout matches the p96-driver
+ * phase-3 gate descriptors (docs/09):
+ *   value[0]=RingCpuAddress value[1]=RingGpuAddress value[2]=RingDwords
+ *   value[3]=RingMask       value[4]=Bar2Base      value[5]=NextFence
+ *   value[6]=MaxBatchDwords value[7]=HeartbeatMs                                   */
+
+/* Heartbeat interval: renew at ~1/3 of the negotiated HeartbeatMs but never
+ * below 100 ms or above 1500 ms (the driver bound is 5000 ms). */
+static ULONG R200PPCLeaseHeartbeatMs(void)
+{
+    ULONG period = FrontendPlatform.leaseHeartbeatMs;
+    if (!period)
+        period = 500UL;
+    if (period < 300UL)
+        period = 300UL;
+    if (period > 4500UL)
+        period = 4500UL;
+    return period;
+}
+
+BOOL MGLPPCLeaseBegin(void)
+{
+    MGLPPCMessage *message = &FrontendPlatform.control;
+    volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
+
+    if (!FrontendPlatform.leaseAvailable || FrontendPlatform.leaseActive ||
+        !control)
+        return FALSE;
+    if (!PlatformMailboxReady())
+        return FALSE;
+    message->command = MGLPPC_CMD_LEASE_BEGIN;
+    message->contextId = FrontendPlatform.contextId;
+    message->payloadWords = 1UL;
+    message->payload[0] = FrontendPlatform.contextId;
+    message->status = MGLPPC_STATUS_BUSY;
+    if (!MGLPPCTransportCall(&FrontendPlatform.transport, message) ||
+        message->status != MGLPPC_STATUS_OK)
+        return FALSE;
+    FrontendPlatform.leaseRing = (volatile ULONG *)message->value[0];
+    FrontendPlatform.leaseRingGpu = message->value[1];
+    FrontendPlatform.leaseRingDwords = message->value[2];
+    FrontendPlatform.leaseRingMask = message->value[3];
+    FrontendPlatform.leaseBar2 = message->value[4];
+    FrontendPlatform.leaseNextFence = message->value[5];
+    FrontendPlatform.leaseMaxBatch = message->value[6];
+    FrontendPlatform.leaseHeartbeatMs = message->value[7];
+    /* Sanity: ring must be 16-byte aligned, dword count a power of two, and
+     * the granted batch limit must fit a whole burst. */
+    if (!FrontendPlatform.leaseRing ||
+        (FrontendPlatform.leaseRingDwords & (FrontendPlatform.leaseRingDwords - 1UL)) ||
+        FrontendPlatform.leaseRingDwords < 4096UL ||
+        !FrontendPlatform.leaseBar2 ||
+        !FrontendPlatform.leaseMaxBatch ||
+        FrontendPlatform.leaseMaxBatch > MGLPPC_CP_DWORDS) {
+        /* Driver keeps ownership; nothing to release. */
+        return FALSE;
+    }
+    FrontendPlatform.leaseActive = TRUE;
+    FrontendPlatform.leaseLastHeartbeat = PerfClock();
+    R200PPCConsolePrintf(
+        "LEASE begin ring=%08lx dwords=%lu mask=%08lx bar2=%08lx "
+        "fence=%lu max=%lu hb=%lums\n",
+        (unsigned long)FrontendPlatform.leaseRing,
+        (unsigned long)FrontendPlatform.leaseRingDwords,
+        (unsigned long)FrontendPlatform.leaseRingMask,
+        (unsigned long)FrontendPlatform.leaseBar2,
+        (unsigned long)FrontendPlatform.leaseNextFence,
+        (unsigned long)FrontendPlatform.leaseMaxBatch,
+        (unsigned long)FrontendPlatform.leaseHeartbeatMs);
+    return TRUE;
+}
+
+BOOL MGLPPCLeaseHeartbeat(void)
+{
+    MGLPPCMessage *message = &FrontendPlatform.control;
+
+    if (!FrontendPlatform.leaseActive)
+        return FALSE;
+    message->command = MGLPPC_CMD_LEASE_HEARTBEAT;
+    message->contextId = FrontendPlatform.contextId;
+    message->payloadWords = 0UL;
+    message->status = MGLPPC_STATUS_BUSY;
+    if (!MGLPPCTransportCall(&FrontendPlatform.transport, message) ||
+        message->status != MGLPPC_STATUS_OK) {
+        /* Stale lease: the driver already reclaimed the ring. Drop the
+         * local ownership so the next Execute falls back to the bounded
+         * paths; a later LEASE_BEGIN may re-take the lease. */
+        FrontendPlatform.leaseActive = FALSE;
+        R200PPCConsolePrintf("LEASE heartbeat lost (stale)\n");
+        return FALSE;
+    }
+    FrontendPlatform.leaseLastHeartbeat = PerfClock();
+    return TRUE;
+}
+
+BOOL MGLPPCLeaseEnd(void)
+{
+    MGLPPCMessage *message = &FrontendPlatform.control;
+    BOOL ok;
+
+    if (!FrontendPlatform.leaseActive)
+        return TRUE;
+    message->command = MGLPPC_CMD_LEASE_END;
+    message->contextId = FrontendPlatform.contextId;
+    message->payloadWords = 0UL;
+    message->value[0] = FrontendPlatform.leaseLastFence;
+    message->status = MGLPPC_STATUS_BUSY;
+    ok = MGLPPCTransportCall(&FrontendPlatform.transport, message) &&
+         message->status == MGLPPC_STATUS_OK;
+    FrontendPlatform.leaseActive = FALSE;
+    if (!ok)
+        R200PPCConsolePrintf("LEASE end failed status=%lu\n",
+                             (unsigned long)message->status);
+    return ok;
+}
+
+/* Renew the lease if the heartbeat cadence has elapsed. Called from the
+ * frame path; a transport heartbeat costs one message round trip. */
+static void R200PPCLeasePump(void)
+{
+    ULONG periodMs = R200PPCLeaseHeartbeatMs();
+    ULONG elapsed = PerfClockDeltaMs(FrontendPlatform.leaseLastHeartbeat);
+
+    if (FrontendPlatform.leaseActive && elapsed >= periodMs)
+        (void)MGLPPCLeaseHeartbeat();
+}
+
 static void CopyRecordToRingSlot(const ULONG *source, ULONG *destination,
                                  ULONG dwords)
 {
@@ -1933,11 +2160,19 @@ BOOL R200PPCPlatformOpen(void)
         GetVar((CONST_STRPTR)"MGLPPC_VERBOSE", verbose, (LONG)sizeof(verbose),
                GVF_GLOBAL_ONLY);
         FrontendConsoleVerbose = verbose[0] ? 1UL : 0UL;
+        /* EXP-FORCENORMAL: A/B switch for the 2D layout investigation.
+         * Forces hardware-TCL draws onto the normal-vertex layout (13 or
+         * compact-10 dwords, DRAW_NORMALS set) so the TCL input state of
+         * the known-good 3D path is used for 2D text too. Diagnostic only. */
+        nobatch[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_FORCENORMAL", nobatch,
+               (LONG)sizeof(nobatch), GVF_GLOBAL_ONLY);
+        R200PPCForceNormalVertex = nobatch[0] ? 1UL : 0UL;
         /* The batched two-tile path is opt-in: on the current host the
          * deferred BEGIN2 lands in a window where the mailbox service
          * latency is ~16 ms (vs ~0.3 ms for an immediate BEGIN), which
          * costs more than the two round trips it saves. See
-         * BATCH_TWO_TILE_FINDINGS.md. MGLPPC_BATCH=1 enables it. */
+         * docs/textures.md. MGLPPC_BATCH=1 enables it. */
         nobatch[0] = 0;
         GetVar((CONST_STRPTR)"MGLPPC_BATCH", nobatch, (LONG)sizeof(nobatch),
                GVF_GLOBAL_ONLY);
@@ -2161,23 +2396,247 @@ static void RefreshCpColorTarget(volatile MGLPPCRingControlV1 *control,
     }
 }
 
+/* ---- Lease local ring submission (phase-3-validated chain) ----
+ *
+ * The frontend owns the CP ring while the lease is live; the 68k host
+ * refuses every other submission. Per batch, the exact sequence the
+ * p96-driver phase-3 gate validated across 20,000+ hardware batches
+ * (including a full ring wrap and 10 s paced runs):
+ *
+ *   1. reserve space: poll RB_RPTR (BAR2+0x0710), bounded spins;
+ *      available = (rptr - wptr - 1) & mask
+ *   2. write the batch with stwbrx bursts (R200PPCCopyRingBr), splitting
+ *      at the ring wrap; the stream carries the 6-dword fence tail
+ *      (DSTCACHE_CTLSTAT flush, WAIT_UNTIL idle, SCRATCH_REG0 sequence)
+ *      padded to the ring's 16-dword alignment
+ *   3. read back the final dword (posted-write ordering check)
+ *   4. publish WPTR (BAR2+0x0714) with a committed write (store +
+ *      readback)
+ *   5. retire locally by polling SCRATCH_REG0 (BAR2+0x15e0) for the
+ *      sequence (SCRATCH advances in ring order)
+ *
+ * Lease sequences continue the driver's fence space from NextFence; the
+ * 68k path is inactive until LEASE_END adopts the last sequence. */
+
+/* Fence tail shape (p96-driver tools/phase3/phase3_regs.h). */
+#define R200_LEASE_PACKET2          0x80000000UL
+#define R200_LEASE_PACKET0(reg)     ((ULONG)(reg) >> 2)
+#define R200_LEASE_DSTCACHE_CTLSTAT 0x1714UL
+#define R200_LEASE_WAIT_UNTIL       0x1720UL
+#define R200_LEASE_CACHE_FLUSH_ALL  0x0000000fUL
+#define R200_LEASE_WAIT_IDLE \
+    ((1UL << 9) | (1UL << 16) | (1UL << 17) | (1UL << 18))
+#define R200_LEASE_SCRATCH_REG0     0x15e0UL
+#define R200_LEASE_FENCE_TAIL       6UL
+#define R200_LEASE_ALIGN            16UL
+#define R200_LEASE_RESERVE_TIMEOUT  200000UL
+
+/* BAR2 register offsets (phase-3 validated). */
+#define R200_LEASE_RB_RPTR          0x0710UL
+#define R200_LEASE_RB_WPTR          0x0714UL
+
+static volatile void *R200LeaseReg(ULONG offset)
+{
+    return (volatile void *)((volatile UBYTE *)FrontendPlatform.leaseBar2 +
+                             offset);
+}
+
+static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
+                             struct SubmitSlot *slot)
+{
+    struct MGLPPCEmitVertices vertices;
+    ULONG *staging = FrontendPlatform.leaseStaging;
+    volatile ULONG *ring = FrontendPlatform.leaseRing;
+    volatile void *rbRptr = R200LeaseReg(R200_LEASE_RB_RPTR);
+    volatile void *rbWptr = R200LeaseReg(R200_LEASE_RB_WPTR);
+    volatile void *scratch0 = R200LeaseReg(R200_LEASE_SCRATCH_REG0);
+    ULONG mask = FrontendPlatform.leaseRingMask;
+    ULONG ringDwords = FrontendPlatform.leaseRingDwords;
+    ULONG maxBatch = FrontendPlatform.leaseMaxBatch;
+    ULONG segmentIx = 0xffffffffUL;
+    ULONG wptr, space, count, index, total, firstRun;
+    ULONG sequence = 0, readback, newWptr, poll;
+    ULONG start = PerfClock();
+    const char *failure = "ring";
+
+    if (!ring || !FrontendPlatform.leaseBar2) {
+        failure = "nodesc";
+        goto failed;
+    }
+    memset(&vertices, 0, sizeof(vertices));
+    if (slot->commitMode && slot->drawCount) {
+        for (index = 0; index < context->segmentPoolCount; ++index)
+            if (context->segmentPool[index].Id == context->segment.info.Id) {
+                segmentIx = index;
+                break;
+            }
+        if (segmentIx == 0xffffffffUL) {
+            failure = "nosegment";
+            goto failed;
+        }
+        vertices.gpuAddress = context->segment.info.GpuAddress;
+        vertices.bytes = context->segment.info.Bytes;
+        vertices.drawCount = slot->drawCount;
+        vertices.stateBatch = slot->stateBatch;
+        vertices.offsets = slot->stateBatch ? (const ULONG *)slot->stateBatchDraws :
+                                            slot->vertexOffsets;
+    }
+    /* v6: resolve the drawing buffer before the emitter bakes the target. */
+    RefreshCpColorTarget(FrontendPlatform.ring, slot->records,
+                         slot->recordCount);
+    count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
+                            vertices.drawCount ? &vertices : NULL,
+                            ResolveCpSurface, context);
+    if (!count || count > MGLPPC_CP_DWORDS) {
+        failure = "emit";
+        goto failed;
+    }
+    if (count > maxBatch) {
+        /* The driver granted a smaller batch limit than the emitter can
+         * produce; refuse rather than overflow the granted window. */
+        failure = "maxbatch";
+        goto failed;
+    }
+    /* Classic CP dispatch needs an even dword count. */
+    if (count & 1UL)
+        staging[count++] = R200_LEASE_PACKET2;
+    if (vertices.drawCount)
+        MGLPPCFlushDataRange((APTR)((ULONG)context->segment.info.CpuAddress +
+            context->buildSlot * SEGMENT_HALF_BYTES), slot->segmentCursor);
+    /* Fence tail: cache flush, full idle wait, scratch sequence; pad the
+     * whole submission to the ring's 16-dword alignment with PACKET2. */
+    sequence = FrontendPlatform.leaseNextFence;
+    if (!sequence)
+        sequence = 1UL;
+    staging[count++] = R200_LEASE_PACKET0(R200_LEASE_DSTCACHE_CTLSTAT);
+    staging[count++] = R200_LEASE_CACHE_FLUSH_ALL;
+    staging[count++] = R200_LEASE_PACKET0(R200_LEASE_WAIT_UNTIL);
+    staging[count++] = R200_LEASE_WAIT_IDLE;
+    staging[count++] = R200_LEASE_PACKET0(R200_LEASE_SCRATCH_REG0);
+    staging[count++] = sequence;
+    while (count & (R200_LEASE_ALIGN - 1UL))
+        staging[count++] = R200_LEASE_PACKET2;
+    total = count;
+
+    /* Heartbeat pump before the (possibly long) ring wait. */
+    R200PPCLeasePump();
+    if (!FrontendPlatform.leaseActive) {
+        failure = "stalelease";
+        goto failed;
+    }
+
+    wptr = FrontendPlatform.leaseWptr;
+    /* Reserve: available = (rptr - wptr - 1) & mask; the CP advances
+     * RB_RPTR as it consumes dwords. Bounded spin, hardware-validated
+     * budget. */
+    for (poll = 0;; ++poll) {
+        space = R200PPCMmioRead32(rbRptr) & mask;
+        space = (space - wptr - 1UL) & mask;
+        if (space >= total)
+            break;
+        if (poll >= R200_LEASE_RESERVE_TIMEOUT) {
+            failure = "reserve";
+            goto failed;
+        }
+        if (!(poll & 1023UL)) {
+            MGLPPCYield();
+            R200PPCLeasePump();
+            if (!FrontendPlatform.leaseActive) {
+                failure = "stalelease";
+                goto failed;
+            }
+        }
+    }
+
+    /* Write the stream at wptr, splitting at the ring wrap. The ring
+     * dwords must arrive on the bus little-endian: stwbrx bursts. */
+    firstRun = ringDwords - wptr;
+    if (firstRun > total)
+        firstRun = total;
+    R200PPCCopyRingBr(ring + wptr, staging, firstRun);
+    if (firstRun < total)
+        R200PPCCopyRingBr(ring, staging + firstRun, total - firstRun);
+
+    /* Posted-write ordering: the final dword must read back. */
+    readback = R200PPCMmioRead32((volatile void *)
+            (ring + ((wptr + total - 1UL) & mask)));
+    if (readback != staging[total - 1UL]) {
+        failure = "readback";
+        goto failed;
+    }
+
+    /* Publish WPTR with the driver's committed shape (store + readback). */
+    newWptr = (wptr + total) & mask;
+    if (R200PPCMmioWriteCommit(rbWptr, newWptr) != newWptr) {
+        failure = "wptr";
+        goto failed;
+    }
+    FrontendPlatform.leaseWptr = newWptr;
+    FrontendPlatform.leaseNextFence = sequence + 1UL;
+    FrontendPlatform.leaseLastFence = sequence;
+
+    /* Local retirement: SCRATCH_REG0 advances in ring order. Bounded. */
+    for (poll = 0;; ++poll) {
+        if (R200PPCMmioRead32(scratch0) == sequence)
+            break;
+        if (poll >= R200_LEASE_RESERVE_TIMEOUT) {
+            failure = "fence";
+            goto failed;
+        }
+        if (!(poll & 1023UL)) {
+            MGLPPCYield();
+            R200PPCLeasePump();
+            if (!FrontendPlatform.leaseActive) {
+                failure = "stalelease";
+                goto failed;
+            }
+        }
+    }
+    ++CpPhasePublishes;
+    CpPhasePublishTicks += PerfClock() - start;
+    return TRUE;
+failed:
+    /* A lease batch failure is terminal for the lease: release it (last
+     * fence so the driver can drain what actually executed) and drop to
+     * the bounded paths. */
+    R200PPCConsolePrintf("LEASE submit failed: %s fence=%lu\n",
+                         failure, (unsigned long)sequence);
+    MGLPPCIBTrace("DH2:cpfail.log", failure);
+    (void)MGLPPCLeaseEnd();
+    FrontendPlatform.cpFailed = TRUE;
+    return FALSE;
+}
+
 static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *slot)
 {
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
     volatile MGLPPCRingEntryV1 *entry;
     volatile ULONG *destination;
     struct MGLPPCEmitVertices vertices;
-    ULONG head, ringSlot, count, index, segmentIx = 0xffffffffUL;
+    ULONG head = 0, ringSlot = 0xffffffffUL, count = 0, index;
+    ULONG segmentIx = 0xffffffffUL;
+    ULONG stallReports = 0, stallReportNext = 0;
     ULONG cpRetiredSeen = 0;
     ULONG waitSamples = 0, waitSampleTime = 0, waitClass = 0;
     ULONG *staging, start = PerfClock(), spin = 0;
     ULONG waitStart, emitStart, copyStart, publishStart;
     ULONG resolveBefore, emitElapsed, resolveDelta;
     const char *failure = "ring";
-    if (!control || !FrontendPlatform.cpAddress ||
-        FrontendPlatform.cpBytes < MGLPPC_CP_SEGMENT_BYTES)
+    /* Interface-20 lease: the frontend owns the ring; the bounded-path
+     * wait/publish machinery below must not run. */
+    if (FrontendPlatform.leaseActive && !FrontendPlatform.cpFailed)
+        return SubmitLeaseBatch(context, slot);
+    if (!control) {
+        failure = "noctrl";
         goto failed;
+    }
+    if (!FrontendPlatform.cpAddress ||
+        FrontendPlatform.cpBytes < MGLPPC_CP_SEGMENT_BYTES) {
+        failure = "noctrl_addr";
+        goto failed;
+    }
     head = control->head;
+    stallReportNext = PerfClock() + PlatformClockRate / 5UL;
     waitStart = PerfClock();
     /* Completion releases CPU metadata, retirement releases GPU-read slices. */
     for (;;) {
@@ -2197,12 +2656,20 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
                 cpRetiredSeen = control->retired;
             }
         }
-        if (control->error || control->epoch != FrontendPlatform.epoch)
+        if (control->error) {
+            failure = "host_error";
             goto failed;
+        }
+        if (control->epoch != FrontendPlatform.epoch) {
+            failure = "epoch";
+            goto failed;
+        }
         if (head - control->retired < MGLPPC_RING_SLOTS)
             break;
-        if (PerfClock() - start >= PlatformClockRate * 5UL || ++spin > 5000000UL)
+        if (PerfClock() - start >= PlatformClockRate * 5UL || ++spin > 5000000UL) {
+            failure = "timeout";
             goto failed;
+        }
         if (!(++waitSamples & 255UL)) {
             /* Genuinely stalling here (the break/timeout checks ran
              * first): sample the blocking state and attribute the time
@@ -2228,6 +2695,23 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
                 CpWaitMaxBacklog = backlog;
             if (pending > CpWaitMaxPending)
                 CpWaitMaxPending = pending;
+            if (stallReports < 40UL && stallReportNext &&
+                now >= stallReportNext) {
+                ++stallReports;
+                stallReportNext = now + PlatformClockRate / 5UL;
+                CpDbgPrintf("PUBSTALL spin=%lu head=%lu completed=%lu "
+                            "retired=%lu err=%lu epoch=%lu/%lu "
+                            "backlog=%lu pending=%lu\n",
+                            (unsigned long)spin,
+                            (unsigned long)head,
+                            (unsigned long)control->completed,
+                            (unsigned long)control->retired,
+                            (unsigned long)control->error,
+                            (unsigned long)control->epoch,
+                            (unsigned long)FrontendPlatform.epoch,
+                            (unsigned long)backlog,
+                            (unsigned long)pending);
+            }
         }
         if (!(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
             MGLPPCYield();
@@ -2235,8 +2719,10 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     CpPhaseWaitTicks += PerfClock() - waitStart;
     ringSlot = head % MGLPPC_RING_SLOTS;
     staging = FrontendPlatform.ringSlots[ringSlot];
-    if (!staging || control->slotAddrs[ringSlot] != (ULONG)staging)
+    if (!staging || control->slotAddrs[ringSlot] != (ULONG)staging) {
+        failure = "slotaddr";
         goto failed;
+    }
     memset(&vertices, 0, sizeof(vertices));
     if (slot->commitMode && slot->drawCount) {
         for (index = 0; index < context->segmentPoolCount; ++index)
@@ -2244,8 +2730,10 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
                 segmentIx = index;
                 break;
             }
-        if (segmentIx == 0xffffffffUL)
+        if (segmentIx == 0xffffffffUL) {
+            failure = "nosegment";
             goto failed;
+        }
         vertices.gpuAddress = context->segment.info.GpuAddress;
         vertices.bytes = context->segment.info.Bytes;
         vertices.drawCount = slot->drawCount;
@@ -2268,8 +2756,10 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     emitElapsed = PerfClock() - emitStart;
     resolveDelta = CpPhaseResolveTicks - resolveBefore;
     CpPhaseEmitTicks += emitElapsed >= resolveDelta ? emitElapsed - resolveDelta : 0;
-    if (!count || count > MGLPPC_CP_DWORDS)
+    if (!count || count > MGLPPC_CP_DWORDS) {
+        failure = "emit";
         goto failed;
+    }
     /* Classic Radeon CP dispatch requires an even dword count (Linux
      * radeon_cp_dispatch_indirect); padding is part of the endian conversion. */
     if (count & 1UL)
@@ -2311,6 +2801,18 @@ failed:
     FrontendPlatform.cpFailed = TRUE;
     MGLPPCIBTrace("DH2:cpfail.log", failure);
     R200PPCConsolePrintf("CP publish failed: %s\n", failure);
+    CpDbgPrintf("PUBFAIL %s head=%lu completed=%lu retired=%lu err=%lu "
+                "epoch=%lu/%lu spin=%lu cpen=%lu count=%lu\n",
+                failure,
+                control ? (unsigned long)control->head : 0UL,
+                control ? (unsigned long)control->completed : 0UL,
+                control ? (unsigned long)control->retired : 0UL,
+                control ? (unsigned long)control->error : 0UL,
+                control ? (unsigned long)control->epoch : 0UL,
+                (unsigned long)FrontendPlatform.epoch,
+                (unsigned long)spin,
+                (unsigned long)FrontendPlatform.cpEnabled,
+                (unsigned long)count);
     return FALSE;
 }
 
@@ -2695,6 +3197,8 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
     ULONG spin;
     ULONG drainSeen = 0;
     ULONG cpCompletedSeen = 0;
+    ULONG drainStallReports = 0;
+    ULONG drainReportNext = 0;
     volatile MGLPPCRingControlV1 *control;
     BOOL result = TRUE;
     /* A deferred direct tile must be installed before this frame's work is
@@ -2829,6 +3333,7 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
             spin = 0;
             drainSeen = FrontendPlatform.cpEnabled ? control->retired
                                                    : control->completed;
+            drainReportNext = PerfClock() + PlatformClockRate / 5UL;
 #if MGLPPC_PROFILE
             stallSleeps = 0;
             stallEntered = control->completed != control->head;
@@ -2858,6 +3363,19 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
                             drainSeen = now;
                             spin = 0;
                         }
+                    }
+                    if (drainStallReports < 40UL && drainReportNext &&
+                        PerfClock() >= drainReportNext) {
+                        ++drainStallReports;
+                        drainReportNext = PerfClock() +
+                                          PlatformClockRate / 5UL;
+                        CpDbgPrintf("DRAINSTALL spin=%lu head=%lu "
+                                    "completed=%lu retired=%lu err=%lu\n",
+                                    (unsigned long)spin,
+                                    (unsigned long)control->head,
+                                    (unsigned long)control->completed,
+                                    (unsigned long)control->retired,
+                                    (unsigned long)control->error);
                     }
                 }
                 /* Spin budget before the first sleep; see the publish loop. */
@@ -3153,10 +3671,20 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
         FrontendPlatform.cpRequested =
             GetVar((CONST_STRPTR)"MGLPPC_CPEMIT", flag, sizeof(flag),
                    GVF_GLOBAL_ONLY) > 0 && flag[0] == '1';
+        flag[0] = 0;
+        /* Interface-20 lease opt-in: MGLPPC_LEASE=1 asks the frontend to
+         * take the PPC engine lease after ring registration. Without it
+         * (or without the driver cap) the bounded CP path runs unchanged. */
+        FrontendPlatform.leaseRequested =
+            GetVar((CONST_STRPTR)"MGLPPC_LEASE", flag, sizeof(flag),
+                   GVF_GLOBAL_ONLY) > 0 && flag[0] == '1';
     }
     /* The host verifies the first Execute of EACH registration, not DLL open. */
     FrontendPlatform.crcArmed = TRUE;
     FrontendPlatform.hostEventsConfirmed = FALSE;
+    FrontendPlatform.leaseAvailable = FALSE;
+    FrontendPlatform.leaseActive = FALSE;
+    FrontendPlatform.leaseLastFence = 0;
     if (FrontendPlatform.capabilities & MGLPPC_CAP_SEMANTIC_RING) {
         MGLPPCMessage *registerMessage =
             (MGLPPCMessage *)FrontendPlatform.registerMessageWords;
@@ -3252,6 +3780,10 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                 FrontendPlatform.ibSegmentBytes = registerMessage->value[4];
                 FrontendPlatform.cpEnabled =
                     (registerMessage->value[3] & MGLPPC_RING_REGISTER_CP_EMIT) != 0;
+                /* Reply-only lease flag: the live driver session advertises
+                 * RADEON3D_CAP_PPC_RING, so LEASE_BEGIN may be negotiated. */
+                FrontendPlatform.leaseAvailable =
+                    (registerMessage->value[3] & MGLPPC_RING_REGISTER_PPC_RING) != 0;
                 if (FrontendPlatform.cpEnabled) {
                     if (!registerMessage->value[5] || (registerMessage->value[5] & 31UL) ||
                         registerMessage->value[7] < MGLPPC_CP_SEGMENT_BYTES ||
@@ -3391,6 +3923,30 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     if (!R200PPCIbSmokeAfterRegistration()) {
         SetError(&proofContext, GL_INVALID_OPERATION);
         return NULL;
+    }
+    /* Interface-20 lease acquisition (opt-in). The lease flips the CP hot
+     * path to local ring submission; the bounded transport path remains
+     * the fallback whenever the lease is not live. */
+    if (FrontendPlatform.leaseRequested) {
+        if (FrontendPlatform.leaseAvailable) {
+            if (MGLPPCLeaseBegin()) {
+                FrontendPlatform.leaseWptr =
+                    R200PPCMmioRead32(
+                        (volatile void *)((volatile UBYTE *)
+                            FrontendPlatform.leaseBar2 +
+                            R200_LEASE_RB_WPTR)) &
+                    FrontendPlatform.leaseRingMask;
+                R200PPCConsolePrintf(
+                    "LEASE active wptr=%lu nextfence=%lu\n",
+                    (unsigned long)FrontendPlatform.leaseWptr,
+                    (unsigned long)FrontendPlatform.leaseNextFence);
+            } else {
+                R200PPCConsolePrintf("LEASE begin refused; bounded path\n");
+            }
+        } else {
+            R200PPCConsolePrintf(
+                "LEASE cap not advertised by host; bounded path\n");
+        }
     }
     return &proofContext;
 }
@@ -3657,6 +4213,13 @@ void R200PPCDispatchDeleteContext(void)
             R200PPCTraceStr("delctx FAIL flush/submit");
             return;
         }
+    }
+    /* Release the PPC engine lease before the ring infrastructure it
+     * bypassed is torn down. LEASE_END drains through the lease fence and
+     * re-arms the 68k path; the last submission's sequence rides along. */
+    if (FrontendPlatform.leaseActive) {
+        (void)MGLPPCLeaseEnd();
+        R200PPCTraceUL("delctx lease end", FrontendPlatform.leaseLastFence);
     }
     if (!deadPipe && FrontendPlatform.registered &&
         !R200PPCPlatformBarrier(&proofContext, FALSE)) {
@@ -5398,6 +5961,67 @@ static int FrontendDirectBatchOffer(struct MiniGLR200Context *context,
  * header defines it; the value is fixed by the extension. */
 #define MGL_COLOR_INDEX8_EXT 0x80E5UL
 
+/* DEBUG (2D-text investigation): bounded canonical-staging dump. For the
+ * first uploads after boot, write wire texels to DH2:texdump.log so the
+ * PPC-side BGRA conversion can be compared against the source TGA. The
+ * font atlases carry WHITE RGB at every texel with the glyph mask in
+ * ALPHA, so each dumped byte group reads B,G,R,A: a healthy texel is
+ * either FFFFFF00 (transparent) or FFFFFFFF (glyph stroke). */
+static void FrontendTexStageDump(ULONG name, ULONG width, ULONG height,
+                                 ULONG level, ULONG format, ULONG type,
+                                 const UBYTE *staging)
+{
+    static LONG dumpsLeft = 24;
+    static BOOL opened = FALSE;
+    static const char hex[] = "0123456789ABCDEF";
+    ULONG probeOffsets[4];
+    int probeCount = 0;
+    char line[384];
+    int pos = 0, i, b;
+    BPTR fh;
+
+    if (dumpsLeft <= 0 || !staging || !width || !height)
+        return;
+    /* Skip the tiny scratch/system textures so the bounded budget
+     * reaches the large atlas uploads (fonts/logo/fog/console). */
+    if (width * height < 4096UL)
+        return;
+    --dumpsLeft;
+    probeOffsets[probeCount++] = 0;                     /* texel (0,0)  */
+    if (height > 8UL)
+        probeOffsets[probeCount++] = 8UL * width * 4UL; /* texel (0,8)  */
+    if (width == 256UL && height == 256UL) {
+        /* Glyph-interior probes matching the decoded TGA samples. */
+        probeOffsets[probeCount++] = (40UL * 256UL + 115UL) * 4UL;
+        probeOffsets[probeCount++] = (128UL * 256UL + 64UL) * 4UL;
+    }
+    pos += sprintf(line + pos,
+                   "STAGE name=%lu %lux%lu lvl=%lu fmt=%lu type=%lu tex:",
+                   (unsigned long)name, (unsigned long)width,
+                   (unsigned long)height, (unsigned long)level,
+                   (unsigned long)format, (unsigned long)type);
+    for (i = 0; i < probeCount; ++i) {
+        ULONG off = probeOffsets[i];
+        line[pos++] = ' ';
+        line[pos++] = '|';
+        for (b = 0; b < 8; ++b) {
+            UBYTE v = staging[off + (ULONG)b];
+            line[pos++] = hex[v >> 4];
+            line[pos++] = hex[v & 15];
+        }
+    }
+    line[pos++] = '\n';
+    line[pos] = 0;
+    fh = Open((STRPTR)"DH2:texdump.log",
+              opened ? MODE_OLDFILE : MODE_NEWFILE);
+    opened = TRUE;
+    if (fh) {
+        Seek(fh, 0, OFFSET_END);
+        Write(fh, (APTR)line, (LONG)pos);
+        Close(fh);
+    }
+}
+
 void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                                GLint internalFormat, GLsizei width,
                                GLsizei height, GLint border, GLenum format,
@@ -5675,7 +6299,13 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
-    if (!FrontendTextureBarrier(context)) return;
+    if (!FrontendTextureBarrier(context)) {
+        CpDbgPrintf("TEXBARRIER fail w=%lu h=%lu level=%lu cpfail=%lu\n",
+                    (unsigned long)width, (unsigned long)height,
+                    (unsigned long)level,
+                    (unsigned long)FrontendPlatform.cpFailed);
+        return;
+    }
 
     {
     /* Shared staging converts the client texels to canonical BGRA8888
@@ -5708,6 +6338,12 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                                      source + sourceOffset, width, height,
                                      format, type, stageSourceBytes,
                                      rowBytes, sourceStride);
+        if (canonical)
+            FrontendTexStageDump(
+                (ULONG)context->boundTexture[context->activeTexture],
+                (ULONG)width, (ULONG)height, (ULONG)level,
+                (ULONG)format, (ULONG)type,
+                FrontendPlatform.textureUploadBuffer);
         else
             FrontendCopyTextureBytes(FrontendPlatform.textureUploadBuffer,
                                      source + sourceOffset, 0, total,

@@ -147,6 +147,21 @@ ULONG PerfClockRate(void)
 #endif
 }
 
+/* Milliseconds elapsed since a PerfClock() sample. The subtraction wraps
+ * naturally in 32-bit timebase arithmetic. */
+ULONG PerfClockDeltaMs(ULONG start)
+{
+    ULONG rate = PerfClockRate();
+    ULONG delta;
+
+    if (!rate)
+        return 0UL;
+    delta = PerfClock() - start;
+    if (delta / 1000UL > 0xffffffffUL / rate)
+        return 0xffffffffUL; /* clamp rather than overflow the multiply */
+    return delta * 1000UL / rate;
+}
+
 void ResetPerf(struct MiniGLR200Context *context)
 {
     ZeroMemory(&context->perf, sizeof(context->perf));

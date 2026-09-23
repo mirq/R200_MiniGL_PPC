@@ -1610,6 +1610,15 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         state->cpFailed = FALSE;
         message->value[3] |= MGLPPC_RING_REGISTER_CP_EMIT;
     }
+    /* Interface-20 PPC engine lease: echo the driver's RADEON3D_CAP_PPC_RING
+     * to the client as a reply-only register flag. The client still has to
+     * negotiate LEASE_BEGIN/HEARTBEAT/END over the transport before writing
+     * the ring; a make PPCRING=0 driver never sets the cap bit. */
+    if (state->ringRadeonCaps & RADEON3D_CAP_PPC_RING) {
+        message->value[3] |= MGLPPC_RING_REGISTER_PPC_RING;
+        printf("HOST_LEASE cap offered caps=%08lx\n",
+               (unsigned long)state->ringRadeonCaps);
+    }
     /* Publish the new addresses and epoch before the producer may cache any
      * control lines (entry zero shares a line with the last slot addresses). */
     CacheClearE((APTR)control, sizeof(*control), CACRF_ClearD);
@@ -3299,12 +3308,11 @@ static void HandleMessage(MGLPPCMessage *message,
          * harmless extra drain, so the intent bit can be advertised here. */
         if (state->fenceGroupSize > 1UL)
             message->value[3] |= MGLPPC_CAP_FENCE_DRAIN;
-        /* Interface-20 PPC engine lease: offered only when the live
-         * driver session advertises RADEON3D_CAP_PPC_RING (bit 30). A
-         * make PPCRING=0 driver never sets it, so the client falls back
-         * to the bounded paths unchanged. */
-        if (state->ringRadeonCaps & RADEON3D_CAP_PPC_RING)
-            message->value[3] |= MGLPPC_CAP_PPC_RING;
+        /* Interface-20 PPC engine lease: NOT advertised here. HELLO runs
+         * before the Radeon3D session is opened, so ringRadeonCaps is still
+         * zero; the driver's RADEON3D_CAP_PPC_RING bit reaches the client
+         * through the REGISTER_SEMANTIC_RING reply instead (reply-only
+         * MGLPPC_RING_REGISTER_PPC_RING). */
         break;
     case MGLPPC_CMD_SHUTDOWN:
         if (state->cpSegmentLeased && state->context) {
@@ -4321,6 +4329,7 @@ static void HandleMessage(MGLPPCMessage *message,
                     (struct Radeon3DDevice *)state->ringDeviceToken,
                     &lease)) {
                 message->status = MGLPPC_STATUS_GL_ERROR;
+                printf("HOST_LEASE begin FAILED\n");
                 break;
             }
             state->leaseActive = TRUE;
@@ -4333,6 +4342,15 @@ static void HandleMessage(MGLPPCMessage *message,
             message->value[5] = lease.NextFence;
             message->value[6] = lease.MaxBatchDwords;
             message->value[7] = lease.HeartbeatMs;
+            printf("HOST_LEASE begin ok ring=%08lx dwords=%lu mask=%08lx "
+                   "bar2=%08lx fence=%lu max=%lu hb=%lu\n",
+                   (unsigned long)lease.RingCpuAddress,
+                   (unsigned long)lease.RingDwords,
+                   (unsigned long)lease.RingMask,
+                   (unsigned long)lease.Bar2Base,
+                   (unsigned long)lease.NextFence,
+                   (unsigned long)lease.MaxBatchDwords,
+                   (unsigned long)lease.HeartbeatMs);
         }
         break;
     case MGLPPC_CMD_LEASE_HEARTBEAT:
@@ -4344,12 +4362,14 @@ static void HandleMessage(MGLPPCMessage *message,
                 (struct Radeon3DDevice *)state->ringDeviceToken)) {
             state->leaseActive = FALSE;
             message->status = MGLPPC_STATUS_STALE_GENERATION;
+            printf("HOST_LEASE heartbeat STALE (driver reclaimed)\n");
             break;
         }
         break;
     case MGLPPC_CMD_LEASE_END:
         if (!state->leaseActive) {
             message->status = MGLPPC_STATUS_BUSY;
+            printf("HOST_LEASE end ignored (not active)\n");
             break;
         }
         {
@@ -4359,6 +4379,8 @@ static void HandleMessage(MGLPPCMessage *message,
                 message->value[0]);
             state->leaseActive = FALSE;
             state->leaseLastFence = 0UL;
+            printf("HOST_LEASE end ok=%lu lastFence=%lu\n",
+                   (unsigned long)ok, (unsigned long)message->value[0]);
             if (!ok)
                 message->status = MGLPPC_STATUS_GL_ERROR;
         }
