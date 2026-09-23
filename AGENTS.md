@@ -9,7 +9,7 @@
   belong to an unrelated local emulator process.
 - Primary AmigaBridge endpoint: `192.168.1.21:2345`. Always connect with
   that explicit host and port; localhost defaults fail. After a cold boot
-  (80-100 s) poll with `/home/mirek/minigl_ppc/tools/wait_bridge.sh`, then
+  (80-100 s) poll with `tools/wait_bridge.sh` (this repo), then
   reconnect explicitly; do not rely on a fixed sleep.
 - This machine cannot be recovered through software: after a grey screen,
   guru, or hard GPU hang, require an operator cold power cycle. A warm
@@ -210,10 +210,14 @@
   (`FillRect`, `InvertRect`, `BlitRect`, `DrawLine`, JAM1/JAM2 templates,
   complete 4-bit minterm copies). FIFO/idle waits are bounded; failed
   recovery must not permit unsafe VRAM rendering.
-- Radeon3D is an active bounded service (driver 3.0, interface 17; do not
-  copy older interface numbers from consumer notes). Follow
-  `RADEON3D_SUBMISSION.md` and reconcile consumer headers under
-  `third_party/radeon3d/include/` before ABI changes.
+- Radeon3D is an active bounded service (driver 3.0, interface 20; do not
+  copy older interface numbers from consumer notes). The p96-driver tree's
+  `docs/02-service-abi-reference.md` is the ABI contract (interface 19's
+  fence coalescing is parked; interface 20 adds the PPC engine lease with
+  `Radeon3DAcquireLease`/`Radeon3DHeartbeatLease`/`Radeon3DReleaseLease` —
+  hardware-validated: the ring gates and the cross-CPU emitter proof).
+  Reconcile consumer headers under `third_party/radeon3d/include/` before
+  ABI changes.
 - Check fixed-function behaviour against Mesa 7.11.2 classic r200
   (`src/mesa/drivers/dri/r200`, plus `src/mesa/tnl/t_vb_texgen.c`,
   `t_vb_light.c` for exact arithmetic) before writing it and before
