@@ -133,6 +133,10 @@ typedef struct MGLPPCHostState {
     ULONG indirectProbeOk;
     int ibDryRun;
     BOOL cpEnabled, cpSegmentLeased, cpFailed;
+    /* Interface-20 PPC engine lease (v16). leaseActive while the
+     * frontend holds the lease; leaseLastFence feeds ReleaseLease. */
+    BOOL leaseActive;
+    ULONG leaseLastFence;
     struct Radeon3DSegment cpSegment;
     ULONG cpColorToken, cpColorSeq, cpDispatches, cpDwords;
     int cpTokenMismatchReported;
@@ -1105,6 +1109,61 @@ static void HostTraceLine(const char *line)
     (void)line;
 #endif
 }
+
+/* --- DEBUG (render-path investigation): DH2:hostdbg.log ------------------
+ * Always-on, event-gated trace: per-stage slow markers, the ring stall
+ * signature (work pending but not consumed) and error transitions. One
+ * Open/Seek/Write/Close per emitted line; emission is bounded per run, so
+ * the frame loop cost is nil unless something is actually wrong. */
+static void HostDbgLine(const char *line)
+{
+    static BOOL opened = FALSE;
+    BPTR fh;
+
+    if (!opened) {
+        opened = TRUE;
+        fh = Open((STRPTR)"DH2:hostdbg.log", MODE_NEWFILE);
+        if (fh)
+            Close(fh);
+    }
+    fh = Open((STRPTR)"DH2:hostdbg.log", MODE_OLDFILE);
+    if (!fh)
+        return;
+    Seek(fh, 0, OFFSET_END);
+    Write(fh, (APTR)line, (LONG)strlen(line));
+    Close(fh);
+}
+
+static void HostDbgPrintf(const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsprintf(buf, fmt, ap);
+    va_end(ap);
+    HostDbgLine(buf);
+}
+
+static const char *HostDbgStage = "init";
+static ULONG HostDbgStageTick;
+static ULONG HostDbgPendingSince;
+static ULONG HostDbgStallReports;
+static ULONG HostDbgErrSeen;
+static ULONG HostDbgSummaryLoops;
+static ULONG HostDbgLoop;
+static ULONG HostDbgMsDiv;
+
+static ULONG HostDbgMs(ULONG ticks)
+{
+    if (!HostDbgMsDiv)
+        HostDbgMsDiv = TimerClockRate / 1000UL;
+    return HostDbgMsDiv ? ticks / HostDbgMsDiv : 0UL;
+}
+
+#define HOST_DBG_STAGE(s) \
+    do { HostDbgStage = (s); HostDbgStageTick = ProbeTicks(); } while (0)
+#define HOST_DBG_SLOW_TICKS (TimerClockRate / 10UL) /* 100 ms */
 
 #if MGLPPC_PROFILE
 #define HOST_START(stage) do { (stage) = HostClock(); } while (0)
@@ -3240,9 +3299,23 @@ static void HandleMessage(MGLPPCMessage *message,
          * harmless extra drain, so the intent bit can be advertised here. */
         if (state->fenceGroupSize > 1UL)
             message->value[3] |= MGLPPC_CAP_FENCE_DRAIN;
+        /* Interface-20 PPC engine lease: offered only when the live
+         * driver session advertises RADEON3D_CAP_PPC_RING (bit 30). A
+         * make PPCRING=0 driver never sets it, so the client falls back
+         * to the bounded paths unchanged. */
+        if (state->ringRadeonCaps & RADEON3D_CAP_PPC_RING)
+            message->value[3] |= MGLPPC_CAP_PPC_RING;
         break;
     case MGLPPC_CMD_SHUTDOWN:
         if (state->cpSegmentLeased && state->context) {
+        /* A lease held across SHUTDOWN dies with the session: release
+         * with the last fence (or 0 if no submission retired). */
+        if (state->leaseActive) {
+            (void)Radeon3DReleaseLease(
+                (struct Radeon3DDevice *)state->ringDeviceToken,
+                state->leaseLastFence);
+            state->leaseActive = FALSE;
+        }
             message->status = MGLPPC_STATUS_BUSY;
             break;
         }
@@ -4223,6 +4296,73 @@ static void HandleMessage(MGLPPCMessage *message,
         else
             state->semanticBoundTexture = message->value[1];
         break;
+    case MGLPPC_CMD_LEASE_BEGIN:
+        /* Interface-20 PPC engine lease (v16). The driver session must
+         * advertise RADEON3D_CAP_PPC_RING; the 68k side refuses every
+         * other submission while the lease is live, and Picasso96 2D
+         * renders in software. The descriptors match the p96-driver
+         * phase-3 gate layout (docs/09). */
+        if (!state->cpEnabled || state->cpFailed || !state->context ||
+            message->contextId != state->contextId ||
+            message->payloadWords != 1UL ||
+            !(state->ringRadeonCaps & RADEON3D_CAP_PPC_RING)) {
+            message->status = MGLPPC_STATUS_UNSUPPORTED;
+            break;
+        }
+        if (state->leaseActive) {
+            message->status = MGLPPC_STATUS_BUSY;
+            break;
+        }
+        {
+            struct Radeon3DLease lease;
+            memset(&lease, 0, sizeof(lease));
+            lease.Size = sizeof(lease);
+            if (!Radeon3DAcquireLease(
+                    (struct Radeon3DDevice *)state->ringDeviceToken,
+                    &lease)) {
+                message->status = MGLPPC_STATUS_GL_ERROR;
+                break;
+            }
+            state->leaseActive = TRUE;
+            state->leaseLastFence = 0UL;
+            message->value[0] = (ULONG)lease.RingCpuAddress;
+            message->value[1] = lease.RingGpuAddress;
+            message->value[2] = lease.RingDwords;
+            message->value[3] = lease.RingMask;
+            message->value[4] = lease.Bar2Base;
+            message->value[5] = lease.NextFence;
+            message->value[6] = lease.MaxBatchDwords;
+            message->value[7] = lease.HeartbeatMs;
+        }
+        break;
+    case MGLPPC_CMD_LEASE_HEARTBEAT:
+        if (!state->leaseActive) {
+            message->status = MGLPPC_STATUS_UNSUPPORTED;
+            break;
+        }
+        if (!Radeon3DHeartbeatLease(
+                (struct Radeon3DDevice *)state->ringDeviceToken)) {
+            state->leaseActive = FALSE;
+            message->status = MGLPPC_STATUS_STALE_GENERATION;
+            break;
+        }
+        break;
+    case MGLPPC_CMD_LEASE_END:
+        if (!state->leaseActive) {
+            message->status = MGLPPC_STATUS_BUSY;
+            break;
+        }
+        {
+            BOOL ok;
+            ok = Radeon3DReleaseLease(
+                (struct Radeon3DDevice *)state->ringDeviceToken,
+                message->value[0]);
+            state->leaseActive = FALSE;
+            state->leaseLastFence = 0UL;
+            if (!ok)
+                message->status = MGLPPC_STATUS_GL_ERROR;
+        }
+        break;
     default:
         message->status = MGLPPC_STATUS_UNKNOWN_COMMAND;
         break;
@@ -4491,6 +4631,8 @@ int main(int argc, char **argv)
         if (sample)
             pollStart = HostClock();
 #endif
+        ++HostDbgLoop;
+        HOST_DBG_STAGE("poll_mailbox");
         workHandled = PollMailbox(&state);
 #if MGLPPC_PROFILE
         if (sample) {
@@ -4498,6 +4640,7 @@ int main(int argc, char **argv)
             ++HostMailboxPollCalls;
         }
 #endif
+        HOST_DBG_STAGE("messages");
         while ((message = (MGLPPCMessage *)GetMsg(hostPort)) != NULL) {
             /* Published mailbox work precedes destruction/unregister, even
              * when an Exec message arrives during the previous handler. */
@@ -4508,7 +4651,18 @@ int main(int argc, char **argv)
 #if MGLPPC_PROFILE
                 HostLmBegin(message, handleStart, FALSE);
 #endif
-                HandleMessage(message, &state);
+                {
+                    ULONG dbgT0 = ProbeTicks();
+                    HandleMessage(message, &state);
+                    {
+                        ULONG dbgD = ProbeTicks() - dbgT0;
+                        if (dbgD > HOST_DBG_SLOW_TICKS)
+                            HostDbgPrintf("SLOW handle cmd=%lu ms=%lu stage=%s\n",
+                                          (unsigned long)message->command,
+                                          (unsigned long)HostDbgMs(dbgD),
+                                          HostDbgStage);
+                    }
+                }
                 HOST_LM_HANDLER_END();
             }
 #if MGLPPC_PROFILE
@@ -4527,7 +4681,62 @@ int main(int argc, char **argv)
             ReplyMsg(&message->execMessage);
             workHandled = TRUE;
         }
-        ringBusy = RingPoll(&state);
+        HOST_DBG_STAGE("ring_poll");
+        {
+            ULONG dbgT0 = ProbeTicks();
+            ringBusy = RingPoll(&state);
+            {
+                ULONG dbgD = ProbeTicks() - dbgT0;
+                if (dbgD > HOST_DBG_SLOW_TICKS)
+                    HostDbgPrintf("SLOW ring_poll ms=%lu head=%lu completed=%lu retired=%lu err=%lu\n",
+                                  (unsigned long)HostDbgMs(dbgD),
+                                  (unsigned long)(state.ringControl ? state.ringControl->head : 0UL),
+                                  (unsigned long)state.ringCompleted,
+                                  (unsigned long)(state.ringControl ? state.ringControl->retired : 0UL),
+                                  (unsigned long)(state.ringControl ? state.ringControl->error : 0UL));
+            }
+        }
+        /* --- DEBUG: ring stall signature, error transitions, heartbeat --- */
+        if (state.ringControl) {
+            volatile MGLPPCRingControlV1 *dbgCtl = state.ringControl;
+            ULONG dbgNow = ProbeTicks();
+
+            if (dbgCtl->error != HostDbgErrSeen) {
+                HostDbgErrSeen = dbgCtl->error;
+                HostDbgPrintf("RING error=%lu stage=%s head=%lu completed=%lu retired=%lu\n",
+                              (unsigned long)dbgCtl->error, HostDbgStage,
+                              (unsigned long)dbgCtl->head,
+                              (unsigned long)state.ringCompleted,
+                              (unsigned long)dbgCtl->retired);
+            }
+            if (dbgCtl->head > state.ringCompleted) {
+                if (!HostDbgPendingSince)
+                    HostDbgPendingSince = dbgNow;
+                else if (HostDbgStallReports < 80UL &&
+                         dbgNow - HostDbgPendingSince > HOST_DBG_SLOW_TICKS) {
+                    ++HostDbgStallReports;
+                    HostDbgPrintf("STALL ms=%lu stage=%s head=%lu completed=%lu retired=%lu err=%lu\n",
+                                  (unsigned long)HostDbgMs(dbgNow - HostDbgPendingSince),
+                                  HostDbgStage,
+                                  (unsigned long)dbgCtl->head,
+                                  (unsigned long)state.ringCompleted,
+                                  (unsigned long)dbgCtl->retired,
+                                  (unsigned long)dbgCtl->error);
+                }
+            } else {
+                HostDbgPendingSince = 0;
+            }
+            if ((HostDbgLoop & 8191UL) == 0UL && dbgCtl->head != 0UL &&
+                HostDbgSummaryLoops < 400UL) {
+                ++HostDbgSummaryLoops;
+                HostDbgPrintf("HB head=%lu completed=%lu retired=%lu err=%lu stage=%s\n",
+                              (unsigned long)dbgCtl->head,
+                              (unsigned long)state.ringCompleted,
+                              (unsigned long)dbgCtl->retired,
+                              (unsigned long)dbgCtl->error,
+                              HostDbgStage);
+            }
+        }
 #if MGLPPC_PROFILE
         HostRingTicks += ringBusy;
         if (sample)
@@ -4536,6 +4745,7 @@ int main(int argc, char **argv)
         /* A fence completed by this poll still counts as work this pass. */
         if (state.semanticFence)
             workHandled = TRUE;
+        HOST_DBG_STAGE("fence_poll");
         PollQueuedFence(&state);
 #if MGLPPC_PROFILE
         if (sample) {
@@ -4545,6 +4755,7 @@ int main(int argc, char **argv)
         if (sample)
             pollStart = HostClock();
 #endif
+        HOST_DBG_STAGE("ctx_events");
         PollContextEvents(&state);
 #if MGLPPC_PROFILE
         if (sample) {
@@ -4577,6 +4788,7 @@ int main(int argc, char **argv)
             BOOL active = state.semanticRegistered != 0;
             BOOL rendering = active && HostExecuteCount != 0;
 #endif
+            HOST_DBG_STAGE("delay");
             Delay(1);
 #if MGLPPC_IDLE_DIAG
             ULONG elapsed = ProbeTicks() - sleepStart;

@@ -23,7 +23,18 @@ typedef uint32_t ULONG;
  * tiles) need no 32-bit expansion. v14 hosts/clients keep the old
  * layout (value[5] = format, type = GL_UNSIGNED_BYTE); the host
  * accepts both and the client downgrades after a BAD_VERSION HELLO. */
-#define MGLPPC_PROTOCOL_VERSION 15UL
+/* v16: MGLPPC_CMD_LEASE_BEGIN/HEARTBEAT/END expose the interface-20
+ * PPC engine lease. BEGIN replies the ring/bar/fence descriptors in
+ * value[0..7]; HEARTBEAT renews the expiry; END releases with
+ * value[0] = lastFence. Advertised in HELLO as MGLPPC_CAP_PPC_RING
+ * only when the driver interface-20 session advertises
+ * RADEON3D_CAP_PPC_RING (make PPCRING=0 drivers never set it). While
+ * the lease is live the 68k refuses every other submission (stage
+ * 122) and Picasso96 2D renders in software; the frontend submits CP
+ * dwords locally through the validated reserve / stwbrx / readback /
+ * committed-WPTR chain (docs/09, phase-3 gate v2). The bounded paths
+ * remain the built-in automatic fallback. */
+#define MGLPPC_PROTOCOL_VERSION 16UL
 
 #define MGLPPC_CMD_HELLO 1UL
 #define MGLPPC_CMD_SHUTDOWN 2UL
@@ -78,6 +89,19 @@ typedef uint32_t ULONG;
  * BEGIN2 leaves no host-side pending allocation. */
 #define MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2 29UL
 #define MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2 30UL
+/* Interface-20 PPC engine lease (docs/09; p96-driver commit 172c93a).
+ * BEGIN request: value[0] = batch count. Reply value[0..7] =
+ * ring CPU address, ring GPU address, ring dwords, ring mask, BAR2
+ * MMIO base, nextFence, granted batch count, EClock rate. HEARTBEAT:
+ * no request payload; reply value[0] = ok. END request: value[0] =
+ * lastFence; reply value[0] = ok. While the lease is live the 68k
+ * host refuses every other Radeon3D submission (the driver returns
+ * stage 122) and Picasso96 2D falls back to software. The lease dies
+ * with its session or after the 5 s expiry bound; the frontend must
+ * heartbeat within that bound. */
+#define MGLPPC_CMD_LEASE_BEGIN 31UL
+#define MGLPPC_CMD_LEASE_HEARTBEAT 32UL
+#define MGLPPC_CMD_LEASE_END 33UL
 /* CP-emitter metadata, negotiated at registration. Input value[0]=surface
  * token; reply: GL error, CPU/GPU address, pitch, width, height, format, epoch.
  * Read-only: no recovery, residency allocation, or native context mutation. */
@@ -131,6 +155,11 @@ typedef uint32_t ULONG;
  * further gated on CP emit. A host without this bit never sees a DRAIN
  * entry, and a client without it never publishes one. */
 #define MGLPPC_CAP_FENCE_DRAIN (1UL << 15)
+/* The host implements the interface-20 lease commands. Negotiated in
+ * HELLO only when the live driver session advertises
+ * RADEON3D_CAP_PPC_RING (bit 30). A client without the bit uses the
+ * bounded paths unchanged (the built-in fallback). */
+#define MGLPPC_CAP_PPC_RING (1UL << 16)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL

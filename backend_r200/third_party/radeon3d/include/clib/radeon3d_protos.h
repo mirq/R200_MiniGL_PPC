@@ -43,5 +43,9 @@ BOOL Radeon3DDispatchIndirect(struct Radeon3DDevice *device,
                               const struct Radeon3DIndirect *indirect,
                               ULONG *fenceOut);
 BOOL Radeon3DSubmitFence(struct Radeon3DDevice *device, ULONG *fenceOut);
+BOOL Radeon3DAcquireLease(struct Radeon3DDevice *device,
+                          struct Radeon3DLease *lease);
+BOOL Radeon3DReleaseLease(struct Radeon3DDevice *device, ULONG lastFence);
+BOOL Radeon3DHeartbeatLease(struct Radeon3DDevice *device);
 
 #endif
