@@ -59,6 +59,65 @@ been run. Treat the bold numbers above as the best-known current-source values
 (warm boot) until a cold-boot series replaces them; record every new series
 here with its conditions.
 
+### 2.0 The ~190 FPS milestone `gears_p4` series (2026-09-26) — and its 2.5x regression
+
+The milestone client `gears_p4` (built from
+`examples/milestone_gears_stats_library.c`, reporting `GEARS_RUN`; it is **not**
+the canonical `gears_benchmark.c` client, so per [benchmarking.md](benchmarking.md)
+these numbers are not a canonical A/B) was run fullscreen 640x480x16, three
+buffers, sync off, `-frames 600 -width 640 -height 480 -depth 16 -buffers 3
+-nosync -nofps`, on the physical A4000 68060 / MPC7410 / RV280.
+
+| Build | Client | Library | Host | Sample(s) | Conditions |
+|---|---|---|---|---:|---|
+| dirty PPC frontend | `gears_p4` `92597327` | `CDF4451B` | `EB52F5CB` | **76.726** | cold boot, `error=0`, `dispatches=2031 dwords=511620 presents=600` |
+| clean `13e3dba` PPC frontend | `gears_p4` `92597327` | `CDF4451B` | `E8C6568F` | **196.078** / **189.873** | two independent cold boots, `error=0`, same `dispatches=2031 dwords=511620` |
+
+**Measured cause: debug file loggers in the PPC hot path.** The rendered work
+was byte-identical across both builds — same `dispatches=2031`,
+`dwords=511620`, `presents=600` — so the 2.55x difference was entirely
+CPU-side overhead, not less rendering. Uncommitted edits in
+`backend_r200/library/r200_surface.c` (`R200ClearLog`, an `Open`/`Seek`/
+`Write`/`Close` cycle on `DH2:cleardbg.log` **per `glClear`**) and
+`backend_r200/library/r200_geometry.c` (`R200RecStateLog`, the same per batch
+on `DH2:recstate.log`, plus a `vsnprintf` with eight `double` arguments) are
+compiled into the PPC DLL through `backend_r200/library/r200_unity.c` ->
+`r200_frontend.o`, so they run in the frontend's hottest loops. The 400/200
+line caps were reached and the files were written on hardware
+(`DH2:recstate.log` 134,523 bytes, `DH2:cleardbg.log` 11,400 bytes; retained
+under `evidence/perf-regression-20260926/`). The clean DLL left both files
+untouched and measured 2.55x faster.
+
+Note that `backend_r200/library/r200_*.c` and
+`classic_68k/dev/MiniGL_Library_Source_Code/library/r200_*.c` are **separate
+copies** with the same names. The 68k `minigl.library` is built from the
+classic tree (its CRC was `CDF4451B` both dirty and clean, which is what
+isolated the fault to the PPC DLL); the PPC DLL is built from
+`backend_r200/library/`. Editing the wrong copy silently changes nothing.
+
+**Rules this establishes:**
+
+- A bounded counter does **not** make hot-path file I/O safe. `recStateLogs <
+  400` still costs hundreds of file operations inside a 600-frame run, and it
+  makes the cost data-dependent on run length.
+- Per-frame `glClear`/draw logging must be compiled out or env-gated, in the
+  same class as `MGLPPC_CLIENT_TRACE`, `MGLPPC_HOST_TRACE` and
+  `MGLPPC_UPLOAD_TRACE`. A new on-target log path is never an acceptable
+  quiet-build default.
+- When a number collapses, check the **converted artifact's** provenance
+  before optimising code. Rebuild the stack from a pristine worktree
+  (`git worktree add --detach <dir> HEAD`) and compare identical workloads;
+  equal `dispatches`/`dwords`/`presents` across builds means the delta is
+  overhead, not rendering.
+- Never mix a dirty-worktree artifact into a stack whose number is quoted.
+  Record the artifact CRC32, and remember only CRC identifies a build.
+
+The local work that carried the regression is parked, unmerged, on
+`local/dirty-perf-regression-2026-09-26` (`cae45a0`); it also contains the
+host-less stack, which is uncommitted work and therefore **cannot** be built
+from `main` (`Makefile.dll.r200.hostless.gcc` and the
+`backend_r200/library/r200_hostless_*.c` sources are untracked there).
+
 ### 2.1 Hygiene matrix (640x480x32, 150 frames, envmap, one cold boot)
 
 | Configuration | FPS | Ticks |

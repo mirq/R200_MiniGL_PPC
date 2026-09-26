@@ -218,6 +218,33 @@ Session corrections worth remembering:
 Never mix DLL and host from different builds: the result is a deterministic
 ~7.8 FPS with `presents=0`.
 
+### 7.1 Do not benchmark a dirty worktree
+
+Record the artifact CRC32 *and* its build provenance. Only CRC identifies a
+build, and a CRC recorded on a previous session says nothing about the binary
+in your hand today.
+
+`backend_r200/library/r200_*.c` and
+`classic_68k/dev/MiniGL_Library_Source_Code/library/r200_*.c` are separate
+files that share names. The 68k `minigl.library` is compiled from the classic
+tree; the PPC DLL is compiled from `backend_r200/library/` (via
+`r200_unity.c` -> `r200_frontend.o`). Confirm which tree your edit reached
+before concluding anything from a run.
+
+When a number collapses unexpectedly, rebuild the stack from a pristine
+worktree and re-run the **identical** workload before optimising anything:
+
+```sh
+git worktree add --detach /tmp/opencode/clean-main HEAD
+```
+
+If the `dispatches`, `dwords` and `presents` counters are unchanged between
+the two builds while the frame time moves, the delta is CPU-side overhead
+rather than rendering, and a hot-path debug logger or an unconditional layout
+change is the first thing to look for. A bounded counter does not make
+per-`glClear` or per-batch file I/O safe. See the measured 2.55x case in
+[performance.md](performance.md) section 2.0.
+
 ## 8. Reference scripts on the Amiga (`Work:ibdraw/`)
 
 | Script | Purpose |

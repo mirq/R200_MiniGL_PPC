@@ -1,0 +1,15 @@
+MiniGLPPC host: step=backend_open
+MiniGLPPC host: step=timer
+MiniGLPPC host: ready, MiniGL 12.0
+MiniGLPPC host: step=port_added
+MiniGLPPC host: priority=-1 previous=0
+MiniGLPPC host: step=service_enter
+[mgl] ctx fullscreen=1 depth=16 mode=0
+[mgl] fs=begin
+[mgl] fs=ok buffers=3
+MiniGLPPC host: create windowed=0 w=640 h=480 depth=16
+[minigl.library] LibClose count=0
+HOST_LEASE cap offered caps=fffff7ff
+CP_RUN dispatches=2031 dwords=511620 failed=0
+MiniGLPPC host: executes=2031 presents=600
+MiniGLPPC host: stopped
