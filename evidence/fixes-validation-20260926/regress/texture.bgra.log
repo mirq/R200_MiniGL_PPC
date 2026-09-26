@@ -1,0 +1,5 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=520ec1e0
+MINIGL_START id=texture.bgra name="BGRA BYTE ORDER" expected="Blue/green/red channels land exactly; R200 backend only."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_TEST version=9 id=texture.bgra result=PASS depth=16 frames=60 fps_x1000=272727 gl_error=0 detail="BGRA bytes land on the exact channels"

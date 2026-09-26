@@ -1,0 +1,4 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=516a03e0
+MINIGL_START id=benchmark.triangles name="TRIANGLE GRID" expected="A dense animated 8 by 8 colored triangle grid fills most of the view."
+MINIGL_TEST version=9 id=benchmark.triangles result=PASS depth=16 frames=60 fps_x1000=300000 gl_error=0 detail="64 triangle grid visible"

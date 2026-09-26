@@ -1,0 +1,5 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=52e50b20
+MINIGL_START id=quake.particles-mixed name="WORLD AND PARTICLES" expected="Particles sweep across the blue world while the later green triangle stays intact; sampled particles match their frame-0 blend."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_TEST version=9 id=quake.particles-mixed result=PASS depth=16 frames=60 fps_x1000=200000 gl_error=0 detail="24 animated particles; three verified on orbit"

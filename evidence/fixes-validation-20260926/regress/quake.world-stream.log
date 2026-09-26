@@ -1,0 +1,5 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=52acc940
+MINIGL_START id=quake.world-stream name="WORLD STREAM" expected="A dense teal field remains complete; sentinel samples never disappear."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_TEST version=9 id=quake.world-stream result=PASS depth=16 frames=60 fps_x1000=214285 gl_error=0 detail="3072 vertices/frame; 4 sentinel pixels correct"

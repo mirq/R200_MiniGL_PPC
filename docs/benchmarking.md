@@ -245,6 +245,35 @@ change is the first thing to look for. A bounded counter does not make
 per-`glClear` or per-batch file I/O safe. See the measured 2.55x case in
 [performance.md](performance.md) section 2.0.
 
+### 7.2 Do not launch the timed workload in the `InitPPC` script
+
+Measured 2026-09-26 on the physical A4000 with the fixes build
+(`minigl_ppc.dll` `05FA4903`, host `E8C6568F`, `gears_p4` `92597327`):
+launching `mglhost` and the 600-frame benchmark **in the same AmigaDOS
+script, seconds after `C:InitPPC`**, measured **111.111** and **111.940**
+FPS on two independent cold boots. The same binary pair measured
+**192.307** and **188.679** when the sequence was decompressed —
+`C:InitPPC`, then a separate step for the host launch, then the client —
+on identical cold-boot conditions. Host logs were healthy in all four runs
+(`priority=-1`, `CP_RUN dispatches=2031 dwords=511620 failed=0`,
+`presents=600`), and the client-side `kernel_flushes`/`kernel_vertices`
+counters were identical, so neither rendering nor host configuration
+explains the 1.7x gap; something in the first seconds after `InitPPC`
+steals throughput from the PPC/68k pair.
+
+Rules:
+
+- After `C:InitPPC`, let the machine settle before the first timed run:
+  separate bridge/script steps for InitPPC, host launch, and the client,
+  with a few seconds between them.
+- Treat a first-run number far below the established band with a healthy
+  host log as a boot-timing artifact first: re-run the full cold-boot
+  cycle with the decompressed sequence before believing it.
+- The host exits with its client (`stopped` in the host log); a second
+  client run on the same boot cannot reopen `minigl_ppc.dll`
+  ("could not open minigl_ppc.dll") and needs a fresh cold boot. One
+  benchmark sample per cold boot, exactly as section 7 prescribes.
+
 ## 8. Reference scripts on the Amiga (`Work:ibdraw/`)
 
 | Script | Purpose |

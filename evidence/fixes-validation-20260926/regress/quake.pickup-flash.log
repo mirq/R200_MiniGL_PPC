@@ -1,0 +1,5 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=53254f60
+MINIGL_START id=quake.pickup-flash name="PICKUP FLASH" expected="The green preview flashes periodically, stays translucent while visible, and disappears completely between pulses."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_TEST version=9 id=quake.pickup-flash result=PASS depth=16 frames=60 fps_x1000=200000 gl_error=0 detail="red/green/yellow device fans blend and scissor correctly"

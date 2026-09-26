@@ -1,0 +1,5 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=51e940a0
+MINIGL_START id=texture.luminance-alpha name="LUMINANCE-ALPHA UPLOAD" expected="An opaque light-grey texel and a half-alpha texel at half brightness."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_TEST version=9 id=texture.luminance-alpha result=PASS depth=16 frames=60 fps_x1000=250000 gl_error=0 detail="luminance and alpha channels both correct"

@@ -1,0 +1,9 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=51a245c0
+MINIGL_START id=raster.point-size name="POINT SIZE" expected="Five dots of increasing size. Detail lists requested->measured pixels."
+POINTDIAG size=1 count=1 box=1x1 at=319,240 centre=320,240
+POINTDIAG size=2 count=4 box=2x2 at=319,239 centre=320,240
+POINTDIAG size=4 count=16 box=4x4 at=318,238 centre=320,240
+POINTDIAG size=8 count=64 box=8x8 at=316,236 centre=320,240
+POINTDIAG size=16 count=256 box=16x16 at=312,232 centre=320,240
+MINIGL_TEST version=9 id=raster.point-size result=PASS depth=16 frames=60 fps_x1000=214285 gl_error=0 detail="px 1->1 2->2 4->4 8->8 16->16"

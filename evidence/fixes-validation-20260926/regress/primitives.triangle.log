@@ -1,0 +1,4 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=50f29e80
+MINIGL_START id=primitives.triangle name="IMMEDIATE TRIANGLE" expected="A gold triangle appears on a dark background and the center is nonempty."
+MINIGL_TEST version=9 id=primitives.triangle result=PASS depth=16 frames=60 fps_x1000=333333 gl_error=0 detail="center differs from background"

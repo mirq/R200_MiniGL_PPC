@@ -1,0 +1,4 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=510c40c0
+MINIGL_START id=depth.less name="DEPTH LESS" expected="The central square stays red; a later green square must remain hidden."
+MINIGL_TEST version=9 id=depth.less result=PASS depth=16 frames=60 fps_x1000=176470 gl_error=0 detail="near surface matches reference"

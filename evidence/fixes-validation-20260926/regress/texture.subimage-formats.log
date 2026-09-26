@@ -1,0 +1,5 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=52344320
+MINIGL_START id=texture.subimage-formats name="SUBIMAGE FORMATS" expected="Patched regions turn white, surroundings stay grey; FAIL isolates the broken format."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_TEST version=9 id=texture.subimage-formats result=PASS depth=16 frames=60 fps_x1000=58823 gl_error=0 detail="luminance and RGBA patches land exactly"

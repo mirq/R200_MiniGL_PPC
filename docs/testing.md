@@ -142,6 +142,14 @@ AmigaDOS regression script (34 cases, per-test fresh host, logs under
 `Work:ibdraw/regress/`, orphan cleanup via `hoststop --orphan`); the generated
 script is checked in as `tools/amiga-regress.script`.
 
+Known broken validator (2026-09-26): `quake.world-room-walk` fails pixel
+equality with `detail="room f128 want 59,44,25 got 34,29,15"` while the hall
+actually renders correctly. The mismatch is byte-identical on the clean
+`13e3dba` reference DLL and on the fixes build, and the operator confirmed
+the on-screen rendering; the baked offline reference pixels, not the driver
+path, are wrong. Treat that one case as a false failure until its expected
+values are regenerated.
+
 The Quake console assets are extracted from retail data with
 `python3 tools/extract_quake_console.py [PAK0.PAK] [out.h]` → `examples/quake_console.h`.
 

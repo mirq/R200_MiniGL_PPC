@@ -1,0 +1,4 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=52920640
+MINIGL_START id=quake.alias-ogre-x4-advance name="FOUR OGRES ADVANCING" expected="Four skin-textured Ogres change size and depth while remaining bounded."
+MINIGL_TEST version=9 id=quake.alias-ogre-x4-advance result=PASS depth=16 frames=60 fps_x1000=157894 gl_error=0 detail="four skinned Ogres advancing; all quadrants bounded"

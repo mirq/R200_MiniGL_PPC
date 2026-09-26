@@ -72,6 +72,26 @@ buffers, sync off, `-frames 600 -width 640 -height 480 -depth 16 -buffers 3
 |---|---|---|---|---:|---|
 | dirty PPC frontend | `gears_p4` `92597327` | `CDF4451B` | `EB52F5CB` | **76.726** | cold boot, `error=0`, `dispatches=2031 dwords=511620 presents=600` |
 | clean `13e3dba` PPC frontend | `gears_p4` `92597327` | `CDF4451B` | `E8C6568F` | **196.078** / **189.873** | two independent cold boots, `error=0`, same `dispatches=2031 dwords=511620` |
+| fixes `fix/r200-frontend-correctness` | `gears_p4` `92597327` | `CDF4451B` | `E8C6568F` | **192.307** / **188.679** | two protocol cold boots, `error=0`, same `dispatches=2031 dwords=511620` |
+
+The fixes row is the salvaged change set (locked-array live colour/texcoords,
+lit-only compact TCL stride, `PerfClockDeltaMs`, protocol comment
+corrections) cross-built from a pristine worktree; converted DLL CRC32
+`05FA4903`. It sits inside the clean-reference band, so none of the fixes
+cost measurable host-path throughput. Two additional samples of the same
+build measured **111.111** and **111.940** — both were launched in the same
+AmigaDOS script, seconds after `C:InitPPC`; identical host counters
+(`dispatches=2031 dwords=511620 presents=600`, `priority=-1`) rule out
+rendering and host-configuration causes. The compressed-launch hazard is
+reproducible; see [benchmarking.md](benchmarking.md) section 7.2.
+
+Hardware-validated 2026-09-26 alongside the benchmark: the 31-case
+`minigl_testsuite` regression run against this build passed 29 cases
+(including all texture, lightmap, alias-ogre and present-stability cases);
+`lighting.availability` skipped (`lighting vectors unavailable`), and the
+single `quake.world-room-walk` failure is the known broken validator
+([testing.md](testing.md)): the clean reference DLL reproduces the identical
+pixel mismatch and the operator confirmed the on-screen rendering.
 
 **Measured cause: debug file loggers in the PPC hot path.** The rendered work
 was byte-identical across both builds — same `dispatches=2031`,

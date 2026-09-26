@@ -1,0 +1,8 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=524703c0
+MINIGL_START id=texture.row-identity name="ROW IDENTITY MAP" expected="Every row reads back its own colour; shifted or stale rows name a pitch mismatch."
+MINIGL_CAPTURE topOrigin=0
+MINIGL_ROWMAP id=map4 rows=205,0,0;0,202,0;0,0,205;255,255,255
+MINIGL_ROWMAP id=map8 rows=8,20,24;205,210,222
+MINIGL_ROWMAP id=map16 rows=8,20,24;205,210,222
+MINIGL_TEST version=9 id=texture.row-identity result=PASS depth=16 frames=60 fps_x1000=73170 gl_error=0 detail="all rows identity-mapped at 4x4, 8x2 and 16x2"

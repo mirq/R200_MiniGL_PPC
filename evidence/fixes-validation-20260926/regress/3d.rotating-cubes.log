@@ -1,0 +1,4 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=51574340
+MINIGL_START id=3d.rotating-cubes name="ROTATING CUBES" expected="Five solid cubes rotate in depth; nearer faces correctly hide rear faces."
+MINIGL_TEST version=9 id=3d.rotating-cubes result=PASS depth=16 frames=60 fps_x1000=230769 gl_error=0 detail="center cube visible satellites visible"

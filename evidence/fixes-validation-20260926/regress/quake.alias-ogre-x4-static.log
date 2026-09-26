@@ -1,0 +1,4 @@
+MINIGL_SUITE version=9 abi=3 size=556 flags=00000008 mode=640x480x16 windowed=0
+MINIGL_SURFACE lock=640x480x32 pitch=2560 base=526c8500
+MINIGL_START id=quake.alias-ogre-x4-static name="FOUR OGRES STATIC" expected="Four skin-textured Ogres remain visible and bounded in separate quadrants."
+MINIGL_TEST version=9 id=quake.alias-ogre-x4-static result=PASS depth=16 frames=60 fps_x1000=166666 gl_error=0 detail="four skinned Ogres static; all quadrants bounded"
