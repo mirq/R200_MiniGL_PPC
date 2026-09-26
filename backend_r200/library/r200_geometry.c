@@ -2830,7 +2830,23 @@ static BOOL FetchDrawVertex(struct MiniGLR200Context *context, ULONG index,
 {
     if (context->lockedVertices && index >= context->lockedFirst &&
         index - context->lockedFirst < context->lockedCount) {
+        struct Vertex live;
         *vertex = context->lockedVertices[index - context->lockedFirst];
+        /* EXT_compiled_vertex_array freezes the VERTEX ARRAY only. Quake's
+         * stage iterators call glLockArrays BEFORE ComputeTexCoords and then
+         * rewrite the per-stage colour/texcoord arrays (tess.svars.*), so
+         * serving the locked copy for those fields made every draw sample
+         * the PREVIOUS surface's texture coordinates: scrambled/solid glyphs
+         * for 2D text, white world base textures, noisy model skins. Keep
+         * positions/normals/fog from the lock, but read colour and texture
+         * coordinates live. */
+        if (FetchArrayVertex(context, index, &live)) {
+            vertex->color = live.color;
+            vertex->s = live.s;
+            vertex->t = live.t;
+            vertex->s1 = live.s1;
+            vertex->t1 = live.t1;
+        }
         vertex->nx = context->currentNormalX;
         vertex->ny = context->currentNormalY;
         vertex->nz = context->currentNormalZ;

@@ -23,7 +23,12 @@ typedef uint32_t ULONG;
  * tiles) need no 32-bit expansion. v14 hosts/clients keep the old
  * layout (value[5] = format, type = GL_UNSIGNED_BYTE); the host
  * accepts both and the client downgrades after a BAD_VERSION HELLO. */
-#define MGLPPC_PROTOCOL_VERSION 15UL
+/* v16: interface-20 PPC engine lease commands. The driver capability is
+ * echoed by REGISTER_SEMANTIC_RING, not HELLO (there is no driver session
+ * yet at HELLO). MGLPPC_LEASE=1 selects an experimental PPC-only 3D path:
+ * a refused/lost lease must never silently use 68k 3D submission. Without
+ * that opt-in the existing bounded path remains available. */
+#define MGLPPC_PROTOCOL_VERSION 16UL
 
 #define MGLPPC_CMD_HELLO 1UL
 #define MGLPPC_CMD_SHUTDOWN 2UL
@@ -78,6 +83,15 @@ typedef uint32_t ULONG;
  * BEGIN2 leaves no host-side pending allocation. */
 #define MGLPPC_CMD_TEXTURE_DIRECT_BEGIN2 29UL
 #define MGLPPC_CMD_TEXTURE_DIRECT_COMMIT2 30UL
+/* BEGIN request: payloadWords=1, payload[0]=contextId. Reply value[0..7]:
+ * ring CPU address, ring GPU address, ring dwords, ring mask, BAR2 base,
+ * nextFence, MaxBatchDwords, HeartbeatMs. HEARTBEAT: no payload; success
+ * is the message status, NOT value[0]. END request: value[0]=lastFence;
+ * success is the status. The driver expires a lease after five seconds
+ * without renewal and rejects other Radeon3D submits while it is live. */
+#define MGLPPC_CMD_LEASE_BEGIN 31UL
+#define MGLPPC_CMD_LEASE_HEARTBEAT 32UL
+#define MGLPPC_CMD_LEASE_END 33UL
 /* CP-emitter metadata, negotiated at registration. Input value[0]=surface
  * token; reply: GL error, CPU/GPU address, pitch, width, height, format, epoch.
  * Read-only: no recovery, residency allocation, or native context mutation. */
@@ -131,6 +145,9 @@ typedef uint32_t ULONG;
  * further gated on CP emit. A host without this bit never sees a DRAIN
  * entry, and a client without it never publishes one. */
 #define MGLPPC_CAP_FENCE_DRAIN (1UL << 15)
+/* Reserved from early v16 drafts. HELLO cannot advertise a live driver
+ * capability; use the reply-only RING_REGISTER_PPC_RING bit instead. */
+#define MGLPPC_CAP_PPC_RING (1UL << 16)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL
@@ -341,6 +358,11 @@ typedef struct MGLPPCRingEntryV1 {
  * payload tuples expand from 3 to 4 words: CPU address/bytes/id/GPU address.
  * Mutually exclusive with startup INDIRECT; protocol v15 optional extension. */
 #define MGLPPC_RING_REGISTER_CP_EMIT (1UL << 4)
+/* Reply-only: the live Radeon3D session advertises RADEON3D_CAP_PPC_RING
+ * (interface 20), so the frontend may hold the PPC engine lease. The 68k
+ * host only learns the driver caps while opening the session here — HELLO
+ * cannot advertise them. Protocol v16. */
+#define MGLPPC_RING_REGISTER_PPC_RING (1UL << 5)
 
 /* Optional protocol-15 extension; never changes RingControlV1. Registration
  * echoes MAILBOX only after initializing this region, and returns the segment

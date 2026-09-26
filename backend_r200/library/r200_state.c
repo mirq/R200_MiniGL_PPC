@@ -122,6 +122,7 @@ static ULONG NativeQuadVertexLimit(const struct MiniGLR200Context *context)
         BOOL sphereMap = HardwareSphereMapEnabled(context);
         BOOL normalVertex = context->lightingEnabled || sphereMap;
         BOOL compactVertex = context->compactTclVertex &&
+                             normalVertex &&
                              !context->textureEnabled[1] &&
                              !context->fogEnabled;
         ULONG enabledLights = 0, scan;
@@ -255,11 +256,7 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
                                         ? RADEON3D_EXEC_DRAW_FRAGMENT_HEADER_DWORDS
                                         : RADEON3D_EXEC_DRAW_HEADER_DWORDS;
         state->vertexDwords = state->hardwareTransform
-                                  ? (context->compactTclVertex &&
-                                     !context->textureEnabled[1] &&
-                                     !context->fogEnabled
-                                         ? R200_TCL_VERTEX_COMPACT_DWORDS
-                                         : RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS)
+                                  ? RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS
                                   : extendedVertex
                                         ? RADEON3D_EXEC_EXTENDED_VERTEX_DWORDS
                                         : RADEON3D_EXEC_VERTEX_DWORDS;
@@ -398,8 +395,14 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
         options |= RADEON3D_DRAW_HW_TCL;
         /* Compact strides are only valid when unit 1 and fog are absent
          * from the vertex; the service rejects the combination otherwise.
-         * vertexDwords above already encodes the same decision. */
-        if (context->compactTclVertex &&
+         * Only LIT draws may declare the compact stride: their normal
+         * dwords are written ahead of the colour, so the compact
+         * {x,y,z,rhw,nx,ny,nz,color,s,t} prefix matches the vertex the
+         * frontend emits. Unlit draws leave the normal dwords unwritten,
+         * so a compact stride there would make the service read stale
+         * normal data as colour and texture coordinates (constant texel:
+         * solid 2D text, white world textures). */
+        if (state->normalVertex && context->compactTclVertex &&
             !state->textured[1] && !state->fog)
             options |= RADEON3D_DRAW_COMPACT_VERTEX;
         if (!context->combinedMatrixValid) {

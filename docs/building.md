@@ -165,6 +165,17 @@ make -f Makefile.dll.r200.gcc host
 
 The host binary is a plain 68k AmigaDOS executable (no `ixemul`).
 
+**A/B build isolation.** The native R200 build outputs are overridable so an
+A/B build never overwrites the classic tree's packaged library/import
+archive. Override all of these together for an isolated stack:
+`R200_NATIVE_OBJDIR`, `R200_NATIVE_EXOBJDIR`, `R200_NATIVE_OUTDIR`,
+`R200_NATIVE_BINDIR`, `R200_NATIVE_IMPORTLIB` (and `R200_NATIVE_IMPORT`,
+which defaults to the importlib), plus `R200_THIRDPARTY` and
+`R200_EMITTER_ROOT` to pin the build to one driver worktree. The
+`native-r200` recipe passes them through to
+`Makefile_dispatch_r200.gcc` together with the explicit `CC`/`AR`/`NM`
+from `M68K_CC`.
+
 ## 3. Client import archive and examples
 
 `Makefile.import.gcc`:

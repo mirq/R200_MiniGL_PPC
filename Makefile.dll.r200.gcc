@@ -8,11 +8,20 @@ OUT     ?= bin/minigl_ppc_r200.dll
 WARPELF ?= bin/minigl_ppc_r200.warpelf
 PYTHON  ?= python3
 M68K_CC ?= /opt/amiga/bin/m68k-amigaos-gcc
+M68K_PREFIX ?= $(patsubst %gcc,%,$(M68K_CC))
 
 R200_NATIVE_ROOT ?= $(CURDIR)/classic_68k/dev/MiniGL_Library_Source_Code
 R200_EMITTER_ROOT ?= $(abspath $(CURDIR)/../p96-driver)
-R200_NATIVE_IMPORT := $(R200_NATIVE_ROOT)/lib/libminigl_dispatch.a
-R200_NATIVE_LIBRARY := $(R200_NATIVE_ROOT)/bin/dispatch-r200-gcc/minigl.library
+# Native R200 build outputs are explicit so an A/B build never overwrites the
+# classic tree's packaged library/import archive. Override all four together
+# for an isolated stack (see docs/building.md).
+R200_NATIVE_OBJDIR ?= $(R200_NATIVE_ROOT)/obj_gcc_dispatch_r200
+R200_NATIVE_EXOBJDIR ?= $(R200_NATIVE_ROOT)/obj_gcc_examples_dispatch
+R200_NATIVE_OUTDIR ?= $(R200_NATIVE_ROOT)/bin/dispatch-r200-gcc
+R200_NATIVE_BINDIR ?= $(R200_NATIVE_ROOT)/bin
+R200_NATIVE_IMPORTLIB ?= $(R200_NATIVE_ROOT)/lib/libminigl_dispatch.a
+R200_NATIVE_IMPORT ?= $(R200_NATIVE_IMPORTLIB)
+R200_NATIVE_LIBRARY ?= $(R200_NATIVE_OUTDIR)/minigl.library
 R200_HOST ?= bin/minigl_ppc_host
 # Set MGLPPC_HOST_TRACE=1 to build the host with DH2:wosbuild/mglppc_host.log
 # stage/poll reporting enabled (diagnostic builds only -- the per-line
@@ -45,7 +54,9 @@ R200_DIR       := backend_r200
 R200_LIBRARY   := $(R200_DIR)/library
 R200_CLIENT    := $(R200_DIR)/client
 R200_INCLUDE   := $(R200_DIR)/include
-R200_THIRDPARTY:= $(R200_DIR)/third_party/radeon3d/include
+# Consumer Radeon3D header root. Override this together with R200_EMITTER_ROOT
+# to pin an A/B build to one driver worktree (for example /tmp/opencode/p96-flip).
+R200_THIRDPARTY ?= $(R200_DIR)/third_party/radeon3d/include
 R200_GENERATED := $(R200_DIR)/generated
 R200_SYMBOLS   := $(R200_GENERATED)/r200_symbols.txt
 R200_TABLE     := $(R200_GENERATED)/dispatch_table_abi3.c
@@ -109,7 +120,13 @@ all: $(OUT)
 warpelf: $(WARPELF)
 frontend: $(OBJDIR)/r200_frontend.o
 native-r200:
-	$(MAKE) -C "$(R200_NATIVE_ROOT)" -f Makefile_dispatch_r200.gcc all importlib
+	mkdir -p "$(dir $(R200_NATIVE_IMPORTLIB))"
+	$(MAKE) -C "$(R200_NATIVE_ROOT)" -f Makefile_dispatch_r200.gcc \
+		CC="$(M68K_CC)" AR="$(M68K_PREFIX)ar" NM="$(M68K_PREFIX)nm" \
+		OBJDIR="$(R200_NATIVE_OBJDIR)" EXOBJDIR="$(R200_NATIVE_EXOBJDIR)" \
+		OUTDIR="$(R200_NATIVE_OUTDIR)" BINDIR="$(R200_NATIVE_BINDIR)" \
+		IMPORTLIB="$(R200_NATIVE_IMPORTLIB)" \
+		RADEON3D_INC="$(abspath $(R200_THIRDPARTY))" all importlib
 host: native-r200 $(R200_HOST)
 stack: warpelf host
 package: stack $(OUT) lib/libminigl.a backend_r200/README-WarpOS-R200.txt

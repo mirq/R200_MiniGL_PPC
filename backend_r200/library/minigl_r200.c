@@ -147,19 +147,19 @@ ULONG PerfClockRate(void)
 #endif
 }
 
-/* Milliseconds elapsed since a PerfClock() sample. The subtraction wraps
- * naturally in 32-bit timebase arithmetic. */
+/* Milliseconds since a PerfClock() sample. Divide ticks first: at the PPC's
+ * ~25 MHz rate the former overflow *guard* saturated at ~172,000 ticks
+ * (under 7 ms), well before the delta * 1000 product itself overflowed.
+ * A lease renew must not be triggered by that erroneous early saturation.
+ * This is intended for intervals shorter than one 32-bit clock wrap. */
 ULONG PerfClockDeltaMs(ULONG start)
 {
     ULONG rate = PerfClockRate();
-    ULONG delta;
+    ULONG ticksPerMs = rate / 1000UL;
 
-    if (!rate)
-        return 0UL;
-    delta = PerfClock() - start;
-    if (delta / 1000UL > 0xffffffffUL / rate)
-        return 0xffffffffUL; /* clamp rather than overflow the multiply */
-    return delta * 1000UL / rate;
+    if (!ticksPerMs)
+        return 0xffffffffUL; /* unusable clock: fail the lease cadence closed */
+    return (PerfClock() - start) / ticksPerMs;
 }
 
 void ResetPerf(struct MiniGLR200Context *context)

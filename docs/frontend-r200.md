@@ -97,7 +97,13 @@ flowchart LR
 - `glDrawArrays`/`glDrawElements` use the same append path; indexed draws have
   a small index cache (`indexCacheVerts`, `indexCacheStamp`).
 - `glInterleavedArrays` and the client array pointers feed the same machinery;
-  `GLLockArrays`/`GLUnlockArrays` are honoured.
+  `GLLockArrays`/`GLUnlockArrays` are honoured. `EXT_compiled_vertex_array`
+  freezes the vertex array only: locked draws keep positions, normals and fog
+  from the lock snapshot but read colour and texture coordinates **live**
+  from the client arrays. Clients (Quake's stage iterators) legitimately
+  rewrite those arrays between `glLockArrays` and the draw; serving the
+  frozen copy sampled the previous surface's coordinates (scrambled/solid
+  2D glyphs, white world base textures, noisy model skins).
 - Multitexture: unit-1 coordinates are captured into a small queue and flushed
   as `MGLDrawMultitexBuffer` before the main draw when needed.
 
@@ -112,6 +118,16 @@ little-endian word format. Kernels live in `backend_r200/client/`:
 | `MGLPPCSwapLit10` | unlit vertex, 10 dwords |
 | `MGLPPCSwapTCL10` | TCL record, 10 dwords (hot path) |
 | `MGLPPCSwapTCL7` | compact TCL, 7 dwords |
+
+Stride selection is lit-aware. The compact TCL stride (7 dwords) is declared
+only for lit/normal-vertex records (`state->normalVertex`), whose normals are
+written ahead of the colour so the compact layout matches what the frontend
+emits; unlit hardware-TCL records always use the full 10-dword stride. An
+unlit compact stride made the service read the unwritten normal dwords as
+colour and texture coordinates — a constant texel per primitive (solid 2D
+text, white world textures) — so unlit draws never set
+`RADEON3D_DRAW_COMPACT_VERTEX` even when
+`RADEON3D_CAP_COMPACT_TCL_VERTEX` is available.
 
 They use `stwbrx` with source stride == record dwords and masks for disabled
 attributes. A scalar head/tail plus an AltiVec middle path
