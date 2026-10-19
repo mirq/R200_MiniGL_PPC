@@ -36,6 +36,7 @@
 #include <proto/radeon3d.h>
 #include <proto/timer.h>
 #include <radeon3d.h>
+#include <radeon3d_records.h>
 #include <utility/tagitem.h>
 
 #include <p96_bitmap_api.h>

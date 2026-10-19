@@ -11,7 +11,9 @@ M68K_CC ?= /opt/amiga/bin/m68k-amigaos-gcc
 M68K_PREFIX ?= $(patsubst %gcc,%,$(M68K_CC))
 
 R200_NATIVE_ROOT ?= $(CURDIR)/classic_68k/dev/MiniGL_Library_Source_Code
-R200_EMITTER_ROOT ?= $(abspath $(CURDIR)/../p96-driver)
+# CP emitter source. Radeon9200.chip 0.41 removed the record emitter from the
+# driver tree; the consumer now owns it (vendored from p96-driver 9d17239).
+R200_EMITTER_ROOT ?= $(CURDIR)/backend_r200/third_party/radeon3d/emit
 # Native R200 build outputs are explicit so an A/B build never overwrites the
 # classic tree's packaged library/import archive. Override all four together
 # for an isolated stack (see docs/building.md).
@@ -46,6 +48,9 @@ MGLPPC_AUTOREPORT ?= 0
 MGLPPC_PACING ?= 0
 # Sleep counters only; no clock calls outside actual host idle sleeps.
 MGLPPC_IDLE_DIAG ?= 0
+# Timed hostdbg markers (SLOW/STALL/HB in DH2:hostdbg.log); costs EClock
+# reads every host loop pass, so diagnostic builds only.
+MGLPPC_HOST_DBG ?= 0
 # Disable only in a separately named host build for lookup-cost comparisons.
 MGLPPC_HOST_TARGET_CACHE ?= 1
 R200_PACKAGE_DIR ?= bin/r200-package
@@ -220,7 +225,8 @@ $(R200_HOST): $(R200_DIR)/minigl_ppc_host.c \
 	$(M68K_CC) -std=gnu99 -O2 -mcpu=68060 -noixemul -Wall \
 		-Werror=incompatible-pointer-types -DMGLPPC_HOST_TRACE=$(MGLPPC_HOST_TRACE) \
 		-DMGLPPC_PROFILE=$(MGLPPC_PROFILE) -DMGLPPC_PACING=$(MGLPPC_PACING) \
-		-DMGLPPC_IDLE_DIAG=$(MGLPPC_IDLE_DIAG) $(MGLPPC_INFLIGHT_FLAG) \
+		-DMGLPPC_IDLE_DIAG=$(MGLPPC_IDLE_DIAG) -DMGLPPC_HOST_DBG=$(MGLPPC_HOST_DBG) \
+		$(MGLPPC_INFLIGHT_FLAG) \
 		-DMGLPPC_HOST_TARGET_CACHE=$(MGLPPC_HOST_TARGET_CACHE) \
 		-I$(R200_INCLUDE) -I$(R200_NATIVE_ROOT)/include \
 		-I$(R200_NATIVE_ROOT)/third_party/warp3d/include \

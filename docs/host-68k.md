@@ -165,6 +165,7 @@ Compile-time (`Makefile.dll.r200.gcc`):
 | `MGLPPC_PROFILE` | 0 | session counters (control/barrier/mailbox/ring ticks, uploads, subimage breakdown) printed at shutdown |
 | `MGLPPC_PACING` | 0 | EClock present histogram |
 | `MGLPPC_IDLE_DIAG` | 0 | idle sleep counters |
+| `MGLPPC_HOST_DBG` | 0 | timed `DH2:hostdbg.log` markers: SLOW handler/ring_poll, ring STALL signature, HB summaries (up to eight EClock reads per loop pass) |
 | `MGLPPC_HOST_TARGET_CACHE` | 1 | cache target-surface queries (V2 bridge) |
 | `MGLPPC_INFLIGHT_SLOTS` | unset | 1 = conservative drain-per-dispatch model (A/B only) |
 
@@ -179,6 +180,13 @@ Compile-time (`Makefile.dll.r200.gcc`):
   (`bin/minigl_ppc_host_prof`, `obj/dll-r200-prof`, a `*_prof.warpelf`) and run
   from a dedicated directory, because the client loads the DLL from its CWD.
 - Never compare profile-build numbers with quiet-build numbers.
+- `DH2:hostdbg.log` always records ring error transitions (no clock reads).
+  The timed markers (SLOW/STALL/HB) need `MGLPPC_HOST_DBG=1`; quiet builds
+  make no EClock reads in the steady-state loop.
+- Radeon9200.chip 0.41 removed the semantic record path. The host and the 68k
+  library report the record capability bits through `Radeon3DRecordCaps()`
+  (emitter-provided when the driver offers INDIRECT_RENDER); any non-cpemit
+  path that still reaches `Radeon3DExecute`/`Commit*` hits a fail-stub.
 
 ## 10. Host-side pitfalls
 

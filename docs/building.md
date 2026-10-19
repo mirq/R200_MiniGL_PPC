@@ -89,6 +89,7 @@ comparing (make does not track flag changes):
 | `MGLPPC_HOST_TRACE` | 0 | per-line host log + 2 s console reports (diagnostic) |
 | `MGLPPC_PACING` | 0 | present interval histogram (shutdown output only) |
 | `MGLPPC_IDLE_DIAG` | 0 | host idle sleep counters |
+| `MGLPPC_HOST_DBG` | 0 | timed host markers in `DH2:hostdbg.log` (SLOW/STALL/HB); EClock reads every host loop pass, diagnostic builds only |
 | `MGLPPC_AUTOREPORT` | 0 | live frontend console reports |
 | `MGLPPC_CP_SLOTS` | 128 | CP surface-descriptor cache capacity |
 | `MGLPPC_EXPAND_MIN` | 4 | mismatch submits before state-batch expansion |
@@ -112,8 +113,8 @@ MGLPPC_PROFILE=1 make -f Makefile.dll.r200.gcc \
 ```
 minigl_ppc_dispatch_r200.o   positional ABI-3 table + legacy/attach handling
 r200_frontend.o              the whole semantic frontend (unity translation unit)
-r200_cp_emit.o               CP-emitter adapter (links the driver's emitter source)
-radeon3d_emit.o              shared emitter from $(R200_EMITTER_ROOT)/src
+r200_cp_emit.o               CP-emitter adapter (record -> CP stream wrapper)
+radeon3d_emit.o              consumer-owned CP emitter from $(R200_EMITTER_ROOT)/src
 minigl_ppc_transport.o       Exec-port client
 minigl_ppc_yield.o           bounded yield helper
 minigl_ppc_serial.o          stwbrx vertex/TCL kernels
@@ -124,10 +125,17 @@ r200_poweropen_bridge.o      PowerOpen→SysV texture-upload bridge
 dllstartup.o dll.o dllimport.o   Hyperion DLL runtime
 ```
 
-`R200_EMITTER_ROOT` defaults to `../p96-driver` and supplies
-`src/radeon3d_emit.c`. **The emitter source is external to this repo**, so a
-committed `warpelf` is not reproducible from HEAD alone; always rebuild and
-record the new CRC.
+`R200_EMITTER_ROOT` defaults to `backend_r200/third_party/radeon3d/emit` and
+supplies `src/radeon3d_emit.c`. `Radeon9200.chip` 0.41 (remove-semantic)
+deleted the record emitter and the record ABI from the driver tree, so both
+are consumer-owned now: the emitter is vendored from p96-driver `08bc2e5`
+(the revision the hardware-validated DLLs were built with; the driver's later
+atom-reservation rewrite `bbae1b2` rejects the first PPC batch with
+`PUBFAIL emit count=0` and is not used), and the record format, the
+emitter-provided capability bits (`Radeon3DRecordCaps`) and fail-stubs for the
+removed `Radeon3DExecute`/`Commit*` entry points live in
+`third_party/radeon3d/include/radeon3d_records.h`. Rebuild and record the new
+CRC for every deployment; committed binaries are not authoritative.
 
 ### 2.4 Generated dispatch table
 
@@ -170,8 +178,8 @@ A/B build never overwrites the classic tree's packaged library/import
 archive. Override all of these together for an isolated stack:
 `R200_NATIVE_OBJDIR`, `R200_NATIVE_EXOBJDIR`, `R200_NATIVE_OUTDIR`,
 `R200_NATIVE_BINDIR`, `R200_NATIVE_IMPORTLIB` (and `R200_NATIVE_IMPORT`,
-which defaults to the importlib), plus `R200_THIRDPARTY` and
-`R200_EMITTER_ROOT` to pin the build to one driver worktree. The
+which defaults to the importlib), plus `R200_THIRDPARTY` (vendored driver headers) and
+`R200_EMITTER_ROOT` (consumer emitter) to pin an A/B build. The
 `native-r200` recipe passes them through to
 `Makefile_dispatch_r200.gcc` together with the explicit `CC`/`AR`/`NM`
 from `M68K_CC`.

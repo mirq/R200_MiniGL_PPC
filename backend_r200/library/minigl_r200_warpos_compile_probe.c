@@ -387,9 +387,6 @@ BOOL Radeon3DImportBitMap(struct Radeon3DDevice *device, struct BitMap *bitmap,
 void Radeon3DReleaseSurface(struct Radeon3DDevice *device,
                             struct Radeon3DSurface *surface)
 { (void)device; (void)surface; }
-BOOL Radeon3DExecute(struct Radeon3DDevice *device, const ULONG *records,
-                     ULONG dwords, ULONG flags, ULONG *fence)
-{ (void)device; (void)records; (void)dwords; (void)flags; (void)fence; return FALSE; }
 BOOL Radeon3DInvalidateForTest(struct Radeon3DDevice *device)
 { (void)device; return FALSE; }
 BOOL Radeon3DAllocSegment(struct Radeon3DDevice *device, ULONG bytes,
@@ -397,17 +394,6 @@ BOOL Radeon3DAllocSegment(struct Radeon3DDevice *device, ULONG bytes,
 { (void)device; (void)bytes; (void)segment; return FALSE; }
 BOOL Radeon3DFreeSegment(struct Radeon3DDevice *device, ULONG id)
 { (void)device; (void)id; return FALSE; }
-BOOL Radeon3DCommitDraw(struct Radeon3DDevice *device,
-                        const struct Radeon3DCommit *commit, ULONG *fence)
-{ (void)device; (void)commit; (void)fence; return FALSE; }
-BOOL Radeon3DCommitBatch(struct Radeon3DDevice *device,
-                         const struct Radeon3DCommitBatch *commit,
-                         ULONG *fence)
-{ (void)device; (void)commit; (void)fence; return FALSE; }
-BOOL Radeon3DCommitStateBatch(struct Radeon3DDevice *device,
-                              const struct Radeon3DStateBatch *batch,
-                              ULONG *fence)
-{ (void)device; (void)batch; (void)fence; return FALSE; }
 BOOL Radeon3DAllocSurface(struct Radeon3DDevice *device, ULONG width,
                           ULONG height, ULONG format,
                           struct Radeon3DSurface *surface)

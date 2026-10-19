@@ -45,7 +45,8 @@ measured at ~5% (gears quiet 135.1 → profiled 129.9; room-walk 12.0 → 11.8).
 | Precalc gears (prior stack) | same | 134.529–136.363 | validated sessions; the old gates |
 | Gears (non-precalc) | FS 640x480x16 | ~135 | older stack |
 | Windowed CP-emitter gears | 800x600x32, CP emitter, sync off | **68.337–69.444** | validated; 2031 IBs / 511620 dwords / 600 presents |
-| Fullscreen CP-emitter gears | 640x480x16 | 174.418 (single-fence) / **182.926** (pipelined) | 3-run medians; semantic reference 133.928 → +30% / +37% |
+| Fullscreen CP-emitter gears | 640x480x16 | 174.418 (single-fence) / **182.926** (pipelined) | 3-run medians; semantic reference 133.928 → +30% / +37% (historical) |
+| Fullscreen CP-emitter gears, driver 0.41 | 640x480x16, 3 buffers, BLIT, sync off, `-frames 600`, `MGLPPC_NOALTIVEC=1`, `MGLPPC_HOSTPRI=-1` | 189.873 / 191.082 / 193.548, median **191.082** | 2026-10-20, one warm boot (bridge reboot), `InitPPC` once; chip 0.41 `D6C49D32` / card `31D230C4`; warpelf `C07A8319`, DLL `16CB8018`, host `0010B189` (`MGLPPC_HOST_DBG=0`), minigl.library `1680AD09`, client `1F3401F7`; every run error=0, 2031 dispatches / 511620 dwords / 600 presents. Built from a dirty worktree (uncommitted frontend work); same band as the 0.40-era 188.7–196.1 cold-boot series |
 | Silent Hill intro | fullscreen, `--frames 300` | **63.829** | current-source rebuild; stale pair measured 20.4–22.4 |
 | Texture upload suite | fullscreen, `--frames 300` | **44.642** | current-source rebuild; stale pair 19.4 |
 | Quake room walk | 800x600x32 | **59.405** | current-source rebuild, nosync, bind-deferral era; was 12.0 before bind deferral (4.9x) |
