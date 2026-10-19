@@ -261,7 +261,10 @@ keeps the control plane (textures, surfaces, presentation). Requires
 - Lease commands travel the mailbox when the host advertises
   `MGLPPC_CAP_MAILBOX_LEASE` ([transport-protocol.md](transport-protocol.md#5-mailbox)).
 - Each batch still ends with a `WAIT_IDLE` fence tail and a local
-  retirement wait; lazy retirement is the next step.
+  retirement wait. `MGLPPC_LEASE_NOIDLE`/`NOPRESENT` exist to measure the
+  ceiling. The 2026-10-20 result: with no presents and one batch in flight
+  gears reaches ~200-210 fps, limited by ~4.3 ms of PPC CPU per frame, not
+  by the 68k or the GPU. See [performance.md](performance.md).
 - Teardown writes one `LEASESTAT` line (batches, handovers, parks and
   fence/end/begin/resume microseconds) to `DH2:leasestat.log`; a failed lease
   emit appends its emitter stage and descriptor-resolve reason to
@@ -292,6 +295,8 @@ sequenceDiagram
 | `MGLPPC_VERBOSE` | console output |
 | `MGLPPC_CPEMIT` | CP-emitter mode |
 | `MGLPPC_LEASE` | take the interface-20 PPC engine lease (needs `MGLPPC_CPEMIT`; section 10.1) |
+| `MGLPPC_LEASE_NOPRESENT` | diagnostic: skip presents while the lease is held (ceiling test) |
+| `MGLPPC_LEASE_NOIDLE` | diagnostic: `1` drops the per-batch `WAIT_IDLE`, `2` also keeps one batch in flight (release submits a full idle fence first) |
 | `MGLPPC_IBSMOKE` | IB smoke probe after ring registration (never with CPEMIT) |
 | `MGLPPC_BATCH` | opt-in batched two-tile direct upload |
 | `MGLPPC_BATCHDIAG` | batch diagnostics to `DH2:wosbuild/batchdiag.txt` |
