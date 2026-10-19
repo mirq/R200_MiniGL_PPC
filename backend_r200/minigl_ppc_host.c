@@ -192,6 +192,11 @@ typedef struct MGLPPCHostState {
     int mailboxDisabled;
     ULONG ringSegmentId;
     int ringSegmentLeased;
+    /* MGLPPC_CPPRESENT: fullscreen BLIT presents are queued on the CP as a
+     * 2D-blit IB (see PresentViaCp) instead of drain + CPU-waited blit. */
+    int cpPresent;
+    ULONG presentIbSerial;
+    ULONG presentIbFence[4];
     ULONG ringDeviceEpoch;
     ULONG ringDeviceGeneration;
     ULONG ringDeviceToken;
@@ -1713,6 +1718,192 @@ static void PollContextEvents(MGLPPCHostState *state)
  * are cacheable and get the same dcbf/CacheClearE discipline as the v10
  * message path. Returns elapsed ticks (at least one for processed work) with
  * profiling, or the processed count without it; zero means no work. */
+/* Host-owned present IBs inside the leased ring segment, above the startup
+ * IB smoke (8192 + 32 bytes) and below the end of the 64 KiB segment. Four
+ * fenced slots: a slot is rewritten only after the present four frames
+ * back has retired. */
+#define MGLPPC_PRESENT_IB_OFFSET 12288UL
+#define MGLPPC_PRESENT_IB_BYTES  256UL
+#define MGLPPC_PRESENT_IB_SLOTS  4UL
+typedef char MGLPPCPresentIbLayoutCheck[
+    MGLPPC_PRESENT_IB_OFFSET >= MGLPPC_IB_OFFSET +
+        MGLPPC_IB_SMOKE_DWORDS * sizeof(ULONG) &&
+    MGLPPC_PRESENT_IB_OFFSET + MGLPPC_PRESENT_IB_SLOTS *
+        MGLPPC_PRESENT_IB_BYTES <= MGLPPC_RING_SEGMENT_BYTES ? 1 : -1];
+
+/* Radeon 2D blit registers (p96-driver src/radeon_regs.h; the same
+ * programming as the driver's SubmitCopy). */
+#define HOST_CP_PACKET0(reg)          ((ULONG)(reg) >> 2)
+#define HOST_WAIT_UNTIL               0x1720UL
+#define HOST_WAIT_2D_IDLECLEAN        (1UL << 16)
+#define HOST_WAIT_3D_IDLECLEAN        (1UL << 17)
+#define HOST_DP_GUI_MASTER_CNTL       0x146cUL
+#define HOST_DP_WRITE_MASK            0x16ccUL
+#define HOST_DP_CNTL                  0x16c0UL
+#define HOST_SRC_PITCH_OFFSET         0x1428UL
+#define HOST_DST_PITCH_OFFSET         0x142cUL
+#define HOST_SRC_Y_X                  0x1434UL
+#define HOST_DST_Y_X                  0x1438UL
+#define HOST_DST_HEIGHT_WIDTH         0x143cUL
+#define HOST_GMC_COPY_BASE \
+    ((1UL << 0) | (1UL << 1) | (15UL << 4) | (3UL << 12) | \
+     0x00cc0000UL | (2UL << 24) | (1UL << 28))
+#define HOST_GMC_DST_16BPP            (4UL << 8)
+#define HOST_GMC_DST_32BPP            (6UL << 8)
+/* The CP fetches IB dwords little-endian (the IB smoke reads PACKET0
+ * SCRATCH_REG1 back as 0x79050000 on this side). */
+#define HOST_LE32(x) \
+    ((((ULONG)(x)) >> 24) | ((((ULONG)(x)) >> 8) & 0x0000ff00UL) | \
+     ((((ULONG)(x)) << 8) & 0x00ff0000UL) | (((ULONG)(x)) << 24))
+
+/* Fullscreen BLIT present as a CP-queued copy. The library does every
+ * part of mglSwitchDisplay() except the copy; the host writes a 2D blit IB
+ * and dispatches it behind the frame's draws. Each fenced dispatch already
+ * ends in the driver's flush + 2D/3D idle-clean tail, so the copy starts on
+ * a finished frame and the next frame's draws start after the copy; the
+ * leading WAIT_UNTIL only makes that explicit. The present entry's fence
+ * retires it in ring order. No CPU waits for the GPU or the blitter: the
+ * profiled host spent 1.79 ms/frame draining and 1.33 ms blitting here.
+ * FALSE means nothing was submitted; the caller presents normally. */
+/* MGLPPC_CPPRESENT outcome counts, reported at shutdown. */
+static ULONG HostCpPresents, HostCpPresentNotEligible, HostCpPresentCpuCopies;
+/* First CPU-copy fallback: reason (1 layout, 2 slot fence, 3 fence queue,
+ * 4 dispatch) and the descriptor it saw. */
+static ULONG HostCpPresentWhy, HostCpPresentWhyData[6];
+
+static BOOL PresentViaCp(MGLPPCHostState *state)
+{
+    MGLR200PrivatePresentV1 present;
+    MGLR200PrivateIndirectDispatchV1 dispatch;
+    volatile ULONG *words;
+    ULONG slot, offset, datatype, fence = 0, count = 0, why = 0;
+    ULONG bytesPerPixel, srcBias, dstBias, srcX, srcY, dstX, dstY;
+
+    if (!state->cpPresent || !state->cpEnabled || state->cpFailed ||
+        !state->ringSegmentLeased || !state->ringControl ||
+        !(state->ringRadeonCaps & RADEON3D_CAP_MULTI_FENCE))
+        return FALSE;
+    memset(&present, 0, sizeof(present));
+    present.version = MGL_R200_PRIVATE_PRESENT_V1_VERSION;
+    present.structSize = sizeof(present);
+    (void)glGetError();
+    glGetIntegerv(MGL_R200_PRIVATE_PRESENT_V1_QUERY, (GLint *)&present);
+    if (glGetError() != GL_NO_ERROR || !present.prepared ||
+        present.deviceEpoch != state->ringDeviceEpoch) {
+        ++HostCpPresentNotEligible;
+        return FALSE;
+    }
+    if (present.format == RADEON3D_FORMAT_R5G6B5PC)
+        datatype = HOST_GMC_DST_16BPP;
+    else if (present.format == RADEON3D_FORMAT_B8G8R8A8)
+        datatype = HOST_GMC_DST_32BPP;
+    else
+        datatype = 0;
+    /* PITCH_OFFSET takes 64-byte pitch units and a 1 KiB-aligned base;
+     * an unaligned surface start moves into the X/Y origin, as the driver's
+     * own 2D surfaces do (XBias/YBias). P96 screen bitmaps start at
+     * 64-byte, not 1 KiB, boundaries. */
+    bytesPerPixel = datatype == HOST_GMC_DST_16BPP ? 2UL : 4UL;
+    if (!datatype || !present.srcPitch || !present.dstPitch ||
+        (present.srcPitch & 63UL) || (present.dstPitch & 63UL) ||
+        !present.width || !present.height) {
+        why = 1;
+        goto copy_on_cpu;
+    }
+    srcBias = present.srcGpuAddress & 1023UL;
+    dstBias = present.dstGpuAddress & 1023UL;
+    srcY = srcBias / present.srcPitch;
+    dstY = dstBias / present.dstPitch;
+    srcX = srcBias - srcY * present.srcPitch;
+    dstX = dstBias - dstY * present.dstPitch;
+    if ((srcX % bytesPerPixel) || (dstX % bytesPerPixel)) {
+        why = 1;
+        goto copy_on_cpu;
+    }
+    srcX /= bytesPerPixel;
+    dstX /= bytesPerPixel;
+    if (srcX + present.width > 8191UL || dstX + present.width > 8191UL ||
+        srcY + present.height > 8191UL || dstY + present.height > 8191UL) {
+        why = 1;
+        goto copy_on_cpu;
+    }
+    slot = state->presentIbSerial % MGLPPC_PRESENT_IB_SLOTS;
+    if (state->presentIbFence[slot] &&
+        !Radeon3DTestFence((struct Radeon3DDevice *)state->ringDeviceToken,
+                           state->presentIbFence[slot]) &&
+        !Radeon3DWaitFence((struct Radeon3DDevice *)state->ringDeviceToken,
+                           state->presentIbFence[slot], 2000UL)) {
+        why = 2;
+        goto copy_on_cpu;
+    }
+    if (state->fenceCount >= MGLPPC_INFLIGHT_SLOTS &&
+        !DrainSemanticFence(state)) {
+        why = 3;
+        goto copy_on_cpu;
+    }
+    offset = MGLPPC_PRESENT_IB_OFFSET + slot * MGLPPC_PRESENT_IB_BYTES;
+    words = (volatile ULONG *)((UBYTE *)state->ringControl + offset);
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_WAIT_UNTIL));
+    words[count++] = HOST_LE32(HOST_WAIT_2D_IDLECLEAN | HOST_WAIT_3D_IDLECLEAN);
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DP_GUI_MASTER_CNTL));
+    words[count++] = HOST_LE32(HOST_GMC_COPY_BASE | datatype);
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DP_WRITE_MASK));
+    words[count++] = HOST_LE32(0xffffffffUL);
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DP_CNTL));
+    words[count++] = HOST_LE32(3UL); /* left-to-right, top-to-bottom */
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_SRC_PITCH_OFFSET));
+    words[count++] = HOST_LE32(((present.srcPitch >> 6) << 22) |
+                              (present.srcGpuAddress >> 10));
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_PITCH_OFFSET));
+    words[count++] = HOST_LE32(((present.dstPitch >> 6) << 22) |
+                              (present.dstGpuAddress >> 10));
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_SRC_Y_X));
+    words[count++] = HOST_LE32((srcY << 16) | srcX);
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_Y_X));
+    words[count++] = HOST_LE32((dstY << 16) | dstX);
+    words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_HEIGHT_WIDTH));
+    words[count++] = HOST_LE32((present.height << 16) | present.width);
+    CacheClearE((APTR)words, count * sizeof(ULONG), CACRF_ClearD);
+    /* Same dispatch path as the startup IB smoke for this segment. */
+    memset(&dispatch, 0, sizeof(dispatch));
+    dispatch.version = MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_VERSION;
+    dispatch.structSize = sizeof(dispatch);
+    dispatch.segmentId = state->ringSegmentId;
+    dispatch.byteOffset = offset;
+    dispatch.dwordCount = count;
+    (void)glGetError();
+    glGetIntegerv(MGL_R200_PRIVATE_INDIRECT_DISPATCH_V1_QUERY,
+                  (GLint *)&dispatch);
+    fence = dispatch.fenceOut;
+    if (glGetError() != GL_NO_ERROR || !fence) {
+        why = 4;
+        goto copy_on_cpu;
+    }
+    state->presentIbFence[slot] = fence;
+    ++state->presentIbSerial;
+    /* Ring order: retiring this present entry now means the copy is done. */
+    if (!RecordFence(state, state->ringCompleted, fence, 0))
+        (void)DrainSemanticFence(state);
+    ++HostCpPresents;
+    return TRUE;
+
+copy_on_cpu:
+    if (!HostCpPresentCpuCopies++) {
+        HostCpPresentWhy = why;
+        HostCpPresentWhyData[0] = present.srcGpuAddress;
+        HostCpPresentWhyData[1] = present.srcPitch;
+        HostCpPresentWhyData[2] = present.dstGpuAddress;
+        HostCpPresentWhyData[3] = present.dstPitch;
+        HostCpPresentWhyData[4] = present.format;
+        HostCpPresentWhyData[5] = (present.height << 16) | present.width;
+    }
+    /* The library already ran the BLIT branch's bookkeeping; finish the
+     * frame with the CPU copy mglSwitchDisplay() would have made. */
+    (void)DrainSemanticFence(state);
+    mglSwitchDisplay();
+    return TRUE;
+}
+
 static BOOL ExecuteIndirectSmoke(MGLPPCHostState *state,
                                   const MGLPPCRingEntryV1 *entry,
                                   ULONG *slotAddr)
@@ -2567,6 +2758,10 @@ static ULONG RingPoll(MGLPPCHostState *state)
 #endif
             bridgeValid = FALSE;
             HOST_START(stageStart);
+            if (PresentViaCp(state)) {
+                HOST_STAGE(HostPresentTicks, stageStart);
+                goto present_done;
+            }
             if (!DrainSemanticFence(state)) {
                 printf("MiniGLPPC host: present_drain_fail fence=%lu "
                        "completed=%lu head=%lu\n",
@@ -2591,6 +2786,7 @@ static ULONG RingPoll(MGLPPCHostState *state)
             if (afterLease)
                 HostLeaseSwitchTicks += ProbeTicks() - leaseT1;
 #endif
+present_done:
             HostPresentCount++;
             mglUnlockDisplay();
             state->displayLocked = 0;
@@ -4648,6 +4844,15 @@ int main(int argc, char **argv)
         return 20;
     }
     state.fenceGroupSize = ReadFenceGroupSize();
+    {
+        char cpPresent[4];
+
+        cpPresent[0] = 0;
+        state.cpPresent =
+            GetVar((CONST_STRPTR)"MGLPPC_CPPRESENT", (UBYTE *)cpPresent,
+                   sizeof(cpPresent), GVF_GLOBAL_ONLY) > 0 &&
+            cpPresent[0] == '1';
+    }
     if (state.fenceGroupSize > 1UL) {
         printf("MiniGLPPC host: fence group=%lu (driver capability gated)\n",
                (unsigned long)state.fenceGroupSize);
@@ -5085,6 +5290,19 @@ int main(int argc, char **argv)
                (unsigned long)HostPresentCount);
 #endif
     HOST_PACING_REPORT();
+    if (state.cpPresent)
+        printf("CP_PRESENT queued=%lu not_eligible=%lu cpu_copies=%lu "
+               "first_why=%lu src=%08lx/%lu dst=%08lx/%lu fmt=%lu hw=%08lx\n",
+               (unsigned long)HostCpPresents,
+               (unsigned long)HostCpPresentNotEligible,
+               (unsigned long)HostCpPresentCpuCopies,
+               (unsigned long)HostCpPresentWhy,
+               (unsigned long)HostCpPresentWhyData[0],
+               (unsigned long)HostCpPresentWhyData[1],
+               (unsigned long)HostCpPresentWhyData[2],
+               (unsigned long)HostCpPresentWhyData[3],
+               (unsigned long)HostCpPresentWhyData[4],
+               (unsigned long)HostCpPresentWhyData[5]);
 #if MGLPPC_HOST_DBG
     if (HostLeaseCycles) {
         printf("HOST_LEASESTAT cycles=%lu acquire_us=%lu release_us=%lu "

@@ -1006,6 +1006,10 @@ ULONG PerfClock(void);
 ULONG PerfClockRate(void);
 struct MiniGLR200Context *CurrentContext(void);
 /* context must be zero-initialized before frontend defaults are applied. */
+/* Fullscreen BLIT present without the CPU copy; see
+ * MGL_R200_PRIVATE_PRESENT_V1_QUERY (r200_surface.c). */
+BOOL R200PreparePresentCp(struct MiniGLR200Context *context,
+                          MGLR200PrivatePresentV1 *bridge);
 void InitializeFrontendContext(struct MiniGLR200Context *context);
 #if R200_PPC_FRONTEND
 extern struct MiniGLR200Context *R200PPCContext;
