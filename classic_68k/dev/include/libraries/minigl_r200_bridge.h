@@ -138,4 +138,31 @@ typedef struct MGLR200PrivateIndirectDispatchV1 {
 typedef char MGLR200PrivateIndirectDispatchV1SizeCheck[
     sizeof(MGLR200PrivateIndirectDispatchV1) == 28 ? 1 : -1];
 
+/* Fullscreen BLIT-mode present prepared for a CP-queued copy (host-side
+ * MGLPPC_CPPRESENT). The library runs every part of mglSwitchDisplay()'s
+ * BLIT branch except the ClipBlit/WaitBlit and reports the copy: back
+ * buffer (source) onto the screen bitmap (destination), width x height
+ * from the origin. prepared=0 means not eligible (FLIP, windowed, single
+ * buffer, sync on without BLIT, no imported front surface): nothing was
+ * done and the caller presents with mglSwitchDisplay(). */
+#define MGL_R200_PRIVATE_PRESENT_V1_QUERY 0x4d475014UL
+#define MGL_R200_PRIVATE_PRESENT_V1_VERSION 1UL
+
+typedef struct MGLR200PrivatePresentV1 {
+    ULONG version;
+    ULONG structSize;
+    ULONG prepared;
+    ULONG deviceEpoch;
+    ULONG srcGpuAddress;
+    ULONG srcPitch;
+    ULONG dstGpuAddress;
+    ULONG dstPitch;
+    ULONG width;
+    ULONG height;
+    ULONG format;      /* RADEON3D_FORMAT_* of both surfaces */
+} MGLR200PrivatePresentV1;
+
+typedef char MGLR200PrivatePresentV1SizeCheck[
+    sizeof(MGLR200PrivatePresentV1) == 44 ? 1 : -1];
+
 #endif

@@ -392,6 +392,65 @@ static BOOL WaitTargetBufferSafe(struct MiniGLR200Context *context)
     return FALSE;
 }
 
+/* MGL_R200_PRIVATE_PRESENT_V1_QUERY: the fullscreen BLIT branch of
+ * mglSwitchDisplay() minus the ClipBlit/WaitBlit. The host queues the copy
+ * on the CP behind the frame's draws instead, so neither CPU waits for the
+ * GPU to drain or the blitter to finish. BLIT mode keeps a fixed drawing
+ * buffer, so there is no rotation to account for. Eligibility is decided
+ * before any side effect; FALSE leaves the frame untouched for the regular
+ * mglSwitchDisplay(). */
+static void RecordPerfFrame(struct MiniGLR200Context *context);
+
+BOOL R200PreparePresentCp(struct MiniGLR200Context *context,
+                          MGLR200PrivatePresentV1 *bridge)
+{
+    struct BitMap *screenBitmap;
+    const struct Radeon3DSurface *source, *destination;
+    ULONG drawn, front = ~0UL, index;
+
+    if (!context || context->insideBegin || !context->fullscreen ||
+        context->singleBuffer || context->presentFlip ||
+        (!context->presentBlit && context->syncEnabled) ||
+        !context->screen || context->drawBuffer == GL_FRONT)
+        return FALSE;
+    drawn = context->drawingBuffer;
+    screenBitmap = context->screen->RastPort.BitMap;
+    for (index = 0; index < context->screenBufferCount && index < 3UL;
+         ++index)
+        if (context->screenBuffers[index] &&
+            context->screenBuffers[index]->sb_BitMap == screenBitmap) {
+            front = index;
+            break;
+        }
+    if (front == ~0UL || drawn >= 3UL || front == drawn)
+        return FALSE;
+    source = &context->surfaces[drawn];
+    destination = &context->surfaces[front];
+    if (!source->Handle || !destination->Handle ||
+        source->Format != destination->Format ||
+        source->Width < context->width || source->Height < context->height ||
+        destination->Width < context->width ||
+        destination->Height < context->height)
+        return FALSE;
+    if (!FlushScreenVertices(context) ||
+        !WaitTargetBufferSafe(context) || !SubmitAndWait(context))
+        return FALSE;
+    ReapDeferredSurfaces(context);
+    ReapDeferredSegments(context);
+    bridge->prepared = 1;
+    bridge->deviceEpoch = context->deviceEpoch;
+    bridge->srcGpuAddress = source->GpuAddress;
+    bridge->srcPitch = source->Pitch;
+    bridge->dstGpuAddress = destination->GpuAddress;
+    bridge->dstPitch = destination->Pitch;
+    bridge->width = context->width;
+    bridge->height = context->height;
+    bridge->format = source->Format;
+    if (context->perfEnabled)
+        RecordPerfFrame(context);
+    return TRUE;
+}
+
 BOOL ChangeBuffer(struct MiniGLR200Context *context,
                   struct ScreenBuffer *buffer)
 {

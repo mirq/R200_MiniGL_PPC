@@ -134,6 +134,22 @@ re-upload never waits on a flip.
 
 ## 7. Presentation and surfaces
 
+**CP-queued present (`MGLPPC_CPPRESENT=1`, opt-in).** For a fullscreen
+BLIT-mode present the host asks the library (`MGL_R200_PRIVATE_PRESENT_V1_QUERY`)
+to run `mglSwitchDisplay()`'s BLIT branch without the copy and to report
+the back buffer and the screen bitmap. It then writes an 18-dword 2D blit IB
+(`WAIT_UNTIL` 2D/3D idle-clean, `DP_GUI_MASTER_CNTL`, write mask,
+`DP_CNTL`, src/dst `PITCH_OFFSET`, `SRC_Y_X`/`DST_Y_X`, `DST_HEIGHT_WIDTH`)
+into one of four fenced 256-byte slots at ring-segment offset 12288. It
+dispatches the IB like the startup IB smoke, and records its fence under
+the PRESENT entry. A surface start that is not 1 KiB aligned moves into
+the X/Y origin, as in the driver's 2D surfaces. There is no
+`DrainSemanticFence` and no `WaitBlit`; the dispatch tail's idle-clean
+waits order the copy between frames on the GPU, and the driver marks
+`Need2DRestore` so Picasso96 re-syncs its 2D state. FLIP, windowed, sync
+without BLIT, and unaligned layouts take the old path. Shutdown prints
+`CP_PRESENT queued/not_eligible/cpu_copies` with the first fallback reason.
+
 - Windowed present is a bounded P96 blit from the drawn surface.
 - Fullscreen present is BLIT (default) or FLIP when sync is on; FLIP uses
   `ChangeScreenBuffer`, which measured ~22–27 ms per call versus ~0.14 ms for
@@ -156,6 +172,7 @@ Runtime (`GetVar`):
 | `MGLPPC_IBDRY` | IB smoke dry-run |
 | `MGLPPC_UPLOAD_TRACE` | per-upload trace (diagnostic; the name is constructed at runtime so the literal cannot leak into the binary) |
 | `MGLPPC_VERBOSE` | PPC-side console gate |
+| `MGLPPC_CPPRESENT` | `1`: fullscreen BLIT presents are queued on the CP as a 2D-blit IB (section 7) instead of drain + CPU blit; read at host start |
 
 Compile-time (`Makefile.dll.r200.gcc`):
 

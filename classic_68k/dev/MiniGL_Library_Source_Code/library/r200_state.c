@@ -1700,6 +1700,23 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             bridge->surfaceToken = surfaceToken;
             if (!context || !surfaceToken || !context->device ||
                 !context->deviceEpoch) {
+    case MGL_R200_PRIVATE_PRESENT_V1_QUERY:
+        {
+            MGLR200PrivatePresentV1 *bridge =
+                (MGLR200PrivatePresentV1 *)value;
+
+            ZeroMemory(bridge, sizeof(*bridge));
+            bridge->version = MGL_R200_PRIVATE_PRESENT_V1_VERSION;
+            bridge->structSize = sizeof(*bridge);
+            if (!context) {
+                SetError(context, GL_INVALID_OPERATION);
+                break;
+            }
+            /* Not eligible is not an error: prepared stays 0. A failed
+             * flush/submit inside the preparation already set its error. */
+            (void)R200PreparePresentCp(context, bridge);
+        }
+        break;
                 SetError(context, GL_INVALID_OPERATION);
                 break;
             }
