@@ -527,8 +527,10 @@ static void *CreateContext(int width, int height, ULONG requestedMode,
         context->indexCacheStamp = NULL;
         context->indexCacheSize = 0;
     }
+    ZeroMemory(&info, sizeof(info));
     info.Size = sizeof(info);
     context->device = Radeon3DOpen(RADEON3D_IFACE_VERSION, &info);
+    info.Caps = Radeon3DRecordCaps(info.Caps);
     StreamDiagEvent(context, 0x112UL, context->device != NULL, info.Caps);
     context->radeonCaps = info.Caps;
     context->radeonGeneration = info.Generation;

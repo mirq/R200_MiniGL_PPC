@@ -28,6 +28,13 @@
 #define MGLPPC_IDLE_DIAG 0
 #endif
 
+/* Timed hostdbg markers (SLOW handler/ring_poll, ring STALL signature, HB
+ * summaries). Off in quiet builds: they cost up to eight EClock reads per
+ * loop pass on the host's critical path plus DH2: writes during a run. */
+#ifndef MGLPPC_HOST_DBG
+#define MGLPPC_HOST_DBG 0
+#endif
+
 #if MGLPPC_IDLE_DIAG
 static ULONG IdleEmptySleeps, IdleActiveSleeps, IdleRenderSleeps;
 static ULONG IdleActiveTicks, IdleRenderTicks, IdleWakeBacklog;
@@ -50,6 +57,7 @@ static ULONG IdleActiveTicks, IdleRenderTicks, IdleWakeBacklog;
 #include <proto/dos.h>
 #include <libraries/minigl_r200_bridge.h>
 #include <proto/radeon3d.h>
+#include <radeon3d_records.h>
 #include <proto/minigl.h>
 #include <clib/minigl_open_protos.h>
 #include <libraries/minigl_ppc_ib_trace.h>
@@ -1111,8 +1119,9 @@ static void HostTraceLine(const char *line)
 }
 
 /* --- DEBUG (render-path investigation): DH2:hostdbg.log ------------------
- * Always-on, event-gated trace: per-stage slow markers, the ring stall
- * signature (work pending but not consumed) and error transitions. One
+ * Event-gated trace: ring error transitions always; per-stage slow markers
+ * and the ring stall signature (work pending but not consumed) only with
+ * MGLPPC_HOST_DBG. One
  * Open/Seek/Write/Close per emitted line; emission is bounded per run, so
  * the frame loop cost is nil unless something is actually wrong. */
 static void HostDbgLine(const char *line)
@@ -1146,12 +1155,14 @@ static void HostDbgPrintf(const char *fmt, ...)
 }
 
 static const char *HostDbgStage = "init";
-static ULONG HostDbgStageTick;
+static ULONG HostDbgErrSeen;
+#if MGLPPC_HOST_DBG
 static ULONG HostDbgPendingSince;
 static ULONG HostDbgStallReports;
-static ULONG HostDbgErrSeen;
 static ULONG HostDbgSummaryLoops;
+#endif
 static ULONG HostDbgLoop;
+#if MGLPPC_HOST_DBG
 static ULONG HostDbgMsDiv;
 
 static ULONG HostDbgMs(ULONG ticks)
@@ -1160,9 +1171,9 @@ static ULONG HostDbgMs(ULONG ticks)
         HostDbgMsDiv = TimerClockRate / 1000UL;
     return HostDbgMsDiv ? ticks / HostDbgMsDiv : 0UL;
 }
+#endif
 
-#define HOST_DBG_STAGE(s) \
-    do { HostDbgStage = (s); HostDbgStageTick = ProbeTicks(); } while (0)
+#define HOST_DBG_STAGE(s) do { HostDbgStage = (s); } while (0)
 #define HOST_DBG_SLOW_TICKS (TimerClockRate / 10UL) /* 100 ms */
 
 #if MGLPPC_PROFILE
@@ -1402,6 +1413,7 @@ static BOOL RegisterSemanticRing(MGLPPCMessage *message,
         message->status = MGLPPC_STATUS_UNSUPPORTED;
         goto failed;
     }
+    info.Caps = Radeon3DRecordCaps(info.Caps);
     state->ringDeviceGeneration = info.Generation;
     state->ringDeviceToken = bridge.deviceToken;
     state->ringRadeonCaps = info.Caps;
@@ -4673,6 +4685,7 @@ int main(int argc, char **argv)
 #if MGLPPC_PROFILE
                 HostLmBegin(message, handleStart, FALSE);
 #endif
+#if MGLPPC_HOST_DBG
                 {
                     ULONG dbgT0 = ProbeTicks();
                     HandleMessage(message, &state);
@@ -4685,6 +4698,9 @@ int main(int argc, char **argv)
                                           HostDbgStage);
                     }
                 }
+#else
+                HandleMessage(message, &state);
+#endif
                 HOST_LM_HANDLER_END();
             }
 #if MGLPPC_PROFILE
@@ -4704,6 +4720,7 @@ int main(int argc, char **argv)
             workHandled = TRUE;
         }
         HOST_DBG_STAGE("ring_poll");
+#if MGLPPC_HOST_DBG
         {
             ULONG dbgT0 = ProbeTicks();
             ringBusy = RingPoll(&state);
@@ -4718,10 +4735,15 @@ int main(int argc, char **argv)
                                   (unsigned long)(state.ringControl ? state.ringControl->error : 0UL));
             }
         }
+#else
+        ringBusy = RingPoll(&state);
+#endif
         /* --- DEBUG: ring stall signature, error transitions, heartbeat --- */
         if (state.ringControl) {
             volatile MGLPPCRingControlV1 *dbgCtl = state.ringControl;
+#if MGLPPC_HOST_DBG
             ULONG dbgNow = ProbeTicks();
+#endif
 
             if (dbgCtl->error != HostDbgErrSeen) {
                 HostDbgErrSeen = dbgCtl->error;
@@ -4731,6 +4753,7 @@ int main(int argc, char **argv)
                               (unsigned long)state.ringCompleted,
                               (unsigned long)dbgCtl->retired);
             }
+#if MGLPPC_HOST_DBG
             if (dbgCtl->head > state.ringCompleted) {
                 if (!HostDbgPendingSince)
                     HostDbgPendingSince = dbgNow;
@@ -4758,6 +4781,7 @@ int main(int argc, char **argv)
                               (unsigned long)dbgCtl->error,
                               HostDbgStage);
             }
+#endif
         }
 #if MGLPPC_PROFILE
         HostRingTicks += ringBusy;
