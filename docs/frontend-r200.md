@@ -236,12 +236,62 @@ reuses slices only after retirement. Surface descriptors are cached (default
 validated; FLIP has a documented race. Deep spec:
 [reference/CP_EMITTER.md](reference/CP_EMITTER.md).
 
+### 10.1 PPC engine lease (opt-in, `MGLPPC_LEASE=1`)
+
+With the interface-20 lease the frontend writes CP batches straight into the
+Radeon ring and publishes `RB_WPTR` itself (`SubmitLeaseBatch`); the 68k host
+keeps the control plane (textures, surfaces, presentation). Requires
+`MGLPPC_CPEMIT=1` and a driver offering `RADEON3D_CAP_PPC_RING`.
+
+- **Waits** (`R200LeaseWaitStep`, reserve and fence): spin while
+  `RB_RPTR`/`SCRATCH_REG0` move, pump the heartbeat every 256 polls, park
+  (`MGLPPCYield`, a ~20 ms tick) only after `MGLPPC_RING_YIELD_SPINS` polls
+  with no movement, fail only after 1 s of wall time with no movement. The
+  first version yielded on the first unsuccessful poll, which parked every
+  batch for a tick.
+- **Release before present** (C1): the host owns the display switch and the
+  buffer rotation, and only answers `CP_SURFACE` for its live drawing
+  target. A frame rendered under the lease would stamp a target the host has
+  already rotated past (emitter stage 60). So a ring PRESENT first sends
+  `LEASE_END`; the next batch waits (`R200PPCLeaseResume`, same wait policy)
+  until the host has consumed the present (`completed == head`), then takes
+  the lease again. The present entry also carries the frame's sync state:
+  a frame without bounded entries otherwise left the host on the library's
+  sync-on default, a vblank flip per frame.
+- Lease commands travel the mailbox when the host advertises
+  `MGLPPC_CAP_MAILBOX_LEASE` ([transport-protocol.md](transport-protocol.md#5-mailbox)).
+- Each batch still ends with a `WAIT_IDLE` fence tail and a local
+  retirement wait; lazy retirement is the next step.
+- Teardown writes one `LEASESTAT` line (batches, handovers, parks and
+  fence/end/begin/resume microseconds) to `DH2:leasestat.log`; a failed lease
+  emit appends its emitter stage and descriptor-resolve reason to
+  `DH2:cpfail.log`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as PPC frontend
+    participant R as Radeon ring
+    participant H as 68k host
+    P->>H: LEASE_BEGIN (mailbox)
+    loop frame batches
+        P->>R: emit + fence tail, publish RB_WPTR
+        P->>R: wait SCRATCH_REG0 (progress-aware)
+    end
+    P->>H: LEASE_END (mailbox, last fence)
+    P->>H: ring PRESENT entry + sync state
+    H->>H: drain, mglSwitchDisplay, publish colorToken
+    P->>P: wait completed == head
+    P->>H: LEASE_BEGIN for the next frame
+```
+
 ## 11. Frontend environment knobs
 
 | Variable | Effect |
 |---|---|
 | `MGLPPC_VERBOSE` | console output |
 | `MGLPPC_CPEMIT` | CP-emitter mode |
+| `MGLPPC_LEASE` | take the interface-20 PPC engine lease (needs `MGLPPC_CPEMIT`; section 10.1) |
 | `MGLPPC_IBSMOKE` | IB smoke probe after ring registration (never with CPEMIT) |
 | `MGLPPC_BATCH` | opt-in batched two-tile direct upload |
 | `MGLPPC_BATCHDIAG` | batch diagnostics to `DH2:wosbuild/batchdiag.txt` |

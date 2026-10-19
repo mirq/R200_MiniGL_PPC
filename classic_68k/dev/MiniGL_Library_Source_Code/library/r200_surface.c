@@ -1396,6 +1396,45 @@ static void RecordPerfFrame(struct MiniGLR200Context *context)
     CopyWorstFrame(&perf->worstFrames[insert], &frame);
 }
 
+#ifndef MGL_PRESENT_DIAG
+#define MGL_PRESENT_DIAG 0
+#endif
+#if MGL_PRESENT_DIAG
+/* Diagnostic build only: fullscreen blit-present split (PerfClock ticks):
+ * 0 target-safe wait, 1 submit/drain + reaps, 2 ClipBlit, 3 WaitBlit. */
+static ULONG PresentDiagTicks[4], PresentDiagCount, PresentDiagMark;
+
+static void PresentDiagStep(ULONG index)
+{
+    ULONG now = PerfClock();
+    PresentDiagTicks[index] += now - PresentDiagMark;
+    PresentDiagMark = now;
+}
+
+void R200PresentDiagReport(void)
+{
+    ULONG rate = PerfClockRate() / 1000000UL, index;
+
+    if (!PresentDiagCount)
+        return;
+    if (!rate)
+        rate = 1;
+    dbg_puts("[mgl] present_diag n=");
+    dbg_u32(PresentDiagCount);
+    for (index = 0; index < 4; ++index) {
+        dbg_puts(index == 0 ? " safe_us=" : index == 1 ? " submit_us=" :
+                 index == 2 ? " blit_us=" : " waitblit_us=");
+        dbg_u32(PresentDiagTicks[index] / rate);
+    }
+    dbg_puts("\n");
+}
+#define PRESENT_DIAG_START() (PresentDiagMark = PerfClock(), ++PresentDiagCount)
+#define PRESENT_DIAG_STEP(i) PresentDiagStep(i)
+#else
+#define PRESENT_DIAG_START() ((void)0)
+#define PRESENT_DIAG_STEP(i) ((void)0)
+#endif
+
 void Lib_mglSwitchDisplay(void)
 {
     struct MiniGLR200Context *context = CurrentContext();
@@ -1432,12 +1471,14 @@ void Lib_mglSwitchDisplay(void)
      * have left the display. Steady state always satisfies this -- the bit
      * was pumped when the buffer retired -- so this only waits in the rare
      * window right after a rotation. */
+    PRESENT_DIAG_START();
     if (context->fullscreen && !context->singleBuffer) {
         if (!WaitTargetBufferSafe(context)) {
             SetError(context, GL_INVALID_OPERATION);
             return;
         }
     }
+    PRESENT_DIAG_STEP(0);
     if (!SubmitAndWait(context)) {
         SetError(context, GL_INVALID_OPERATION);
         return;
@@ -1447,6 +1488,7 @@ void Lib_mglSwitchDisplay(void)
      * segments parked by async rotation. */
     ReapDeferredSurfaces(context);
     ReapDeferredSegments(context);
+    PRESENT_DIAG_STEP(1);
     if (!context->fullscreen) {
         ClipBlit(&context->source, 0, 0, context->window->RPort,
                  context->window->BorderLeft, context->window->BorderTop,
@@ -1513,7 +1555,9 @@ void Lib_mglSwitchDisplay(void)
                 context->screenBuffers[drawn]->sb_BitMap;
             ClipBlit(&src, 0, 0, &context->screen->RastPort, 0, 0,
                      context->width, context->height, 0xc0);
+            PRESENT_DIAG_STEP(2);
             WaitBlit();
+            PRESENT_DIAG_STEP(3);
             if (context->perfEnabled) {
                 ULONG elapsed = PerfClock() - perfStart;
                 ULONG nested =

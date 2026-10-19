@@ -148,6 +148,11 @@ typedef uint32_t ULONG;
 /* Reserved from early v16 drafts. HELLO cannot advertise a live driver
  * capability; use the reply-only RING_REGISTER_PPC_RING bit instead. */
 #define MGLPPC_CAP_PPC_RING (1UL << 16)
+/* The host serves LEASE_BEGIN/HEARTBEAT/END through the shared mailbox.
+ * The Exec-message round trip cost 2.7-6.8 ms per lease handover on the
+ * reference machine (host handler 0.15-0.4 ms); release-before-present
+ * pays two per frame. Without the bit the client keeps the Exec path. */
+#define MGLPPC_CAP_MAILBOX_LEASE (1UL << 17)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL
@@ -400,7 +405,10 @@ typedef char MGLPPCMailboxLayoutCheck[
      (cmd) == MGLPPC_CMD_TEXTURE_DIRECT_ABORT || \
      (cmd) == MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED || \
      (cmd) == MGLPPC_CMD_READ_PIXELS_SHARED || \
-     (cmd) == MGLPPC_CMD_TEXTURE_UPLOAD_SHARED)
+     (cmd) == MGLPPC_CMD_TEXTURE_UPLOAD_SHARED || \
+     (cmd) == MGLPPC_CMD_LEASE_BEGIN || \
+     (cmd) == MGLPPC_CMD_LEASE_HEARTBEAT || \
+     (cmd) == MGLPPC_CMD_LEASE_END)
 
 typedef struct MGLPPCRingControlV1 {
     ULONG magic;

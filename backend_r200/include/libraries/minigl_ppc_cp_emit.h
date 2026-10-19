@@ -39,4 +39,9 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
                      const struct MGLPPCEmitVertices *vertices,
                      MGLPPCEmitResolve resolve, void *user);
 
+/* Why the last MGLPPCEmitBatch returned 0: the emitter's FailStage, or
+ * 0xffff when the adapter's own pre-checks rejected the batch. Failure
+ * diagnostics only. */
+extern ULONG MGLPPCEmitFailStage;
+
 #endif
