@@ -18,6 +18,7 @@ typedef char MGLPPCHeaderCapacityCheck[
     MGLPPC_EMIT_MAX_HEADER <= MGLPPC_CP_DWORDS ? 1 : -1];
 
 static struct Radeon3DEmitter MGLPPCEmitter;
+ULONG MGLPPCEmitFailStage;
 static ULONG MGLPPCEmitHeader[MGLPPC_EMIT_MAX_HEADER];
 
 struct MGLPPCEmitResolver {
@@ -74,6 +75,7 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     BOOL stateBatch = vertices && vertices->stateBatch;
     BOOL built;
 
+    MGLPPCEmitFailStage = 0xffffUL;
     if (!words || !records || !resolve || !recordDwords ||
         recordDwords > MGLPPC_CP_DWORDS)
         return 0;
@@ -184,5 +186,6 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     emitter->StateValid = FALSE;
     emitter->ResolveUser = NULL;
     emitter->Words = NULL;
+    MGLPPCEmitFailStage = built ? 0 : emitter->FailStage;
     return built ? emitter->Count : 0;
 }

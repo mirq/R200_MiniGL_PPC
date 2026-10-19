@@ -22,7 +22,7 @@ The direct upload path originally spent its time in Exec transitions (measured:
 
 ## 2. Message command set
 
-`MGLPPC_CMD_*` (values as of protocol 15):
+`MGLPPC_CMD_*` (values as of protocol 16):
 
 ```
  1 HELLO                 2 SHUTDOWN              3 CREATE_CONTEXT
@@ -35,7 +35,13 @@ The direct upload path originally spent its time in Exec transitions (measured:
 22 TEXTURE_UPLOAD_SHARED 23 TEXTURE_DIRECT_BEGIN 24 TEXTURE_DIRECT_COMMIT
 25 TEXTURE_DIRECT_ABORT 26 TEXTURE_SUBIMAGE_SHARED 27 READ_PIXELS_SHARED
 28 CP_SURFACE            29 TEXTURE_DIRECT_BEGIN2 30 TEXTURE_DIRECT_COMMIT2
+31 LEASE_BEGIN           32 LEASE_HEARTBEAT      33 LEASE_END
 ```
+
+Commands 31-33 (protocol 16) negotiate the interface-20 PPC engine lease;
+see [frontend-r200.md](frontend-r200.md#101-ppc-engine-lease-opt-in-mglppc_lease1).
+Over Exec, `LEASE_BEGIN` carries the context id as its one payload word; the
+mailbox form has no payload.
 
 Commands 29/30 are the opt-in **batched two-tile** direct upload
 (`TEXTURE_DIRECT_BATCH_V1`, capability bit 14). They are implemented and
@@ -49,7 +55,7 @@ single-tile begin), so the frontend default stays single-tile
 ```c
 struct Message execMessage;   /* 20 bytes, shared with Exec */
 ULONG magic;                  /* MGLPPC_MAGIC 0x4d474c50 */
-ULONG protocolVersion;        /* 15 */
+ULONG protocolVersion;        /* 16 */
 ULONG command;
 ULONG sequence;
 LONG  status;
@@ -96,8 +102,10 @@ optional features are used. Bit assignments:
 | 13 | `MAILBOX_UPLOAD_SHARED` | upload-shared via mailbox |
 | 14 | `TEXTURE_DIRECT_BATCH_V1` | BEGIN2/COMMIT2 |
 | 15 | `FENCE_DRAIN` | explicit fence drain support |
+| 16 | `PPC_RING` | reserved (early v16 draft; the live bit is the ring-register reply) |
+| 17 | `MAILBOX_LEASE` | `LEASE_BEGIN/HEARTBEAT/END` served through the mailbox |
 
-The host accepts protocol 15 and downgrades to 14 for older peers; ring control
+The host speaks protocol 16; a BAD_VERSION HELLO downgrades the DLL to 14; ring control
 v5 peers fail ring registration (v6 adds `colorToken`/`colorSeq`) and fall back.
 
 ## 4. Ring
@@ -176,7 +184,13 @@ MGLPPCMailboxV1 (160 bytes, at ring offset 4096):
 - Commands allowed through the mailbox are whitelisted by
   `MGLPPC_MAILBOX_COMMAND_ALLOWED()`: `CP_SURFACE`, `BIND_TEXTURE`,
   `GET_INTEGER`, `TEXTURE_DIRECT_{BEGIN,COMMIT,ABORT,BEGIN2,COMMIT2}`,
-  `TEXTURE_SUBIMAGE_SHARED`, `READ_PIXELS_SHARED`, `TEXTURE_UPLOAD_SHARED`.
+  `TEXTURE_SUBIMAGE_SHARED`, `READ_PIXELS_SHARED`, `TEXTURE_UPLOAD_SHARED`,
+  and `LEASE_{BEGIN,HEARTBEAT,END}` (only with `MAILBOX_LEASE`; over Exec a
+  lease handover cost 2.7-6.8 ms against a 0.15-0.4 ms host handler).
+- The DLL requests the mailbox at registration only when its peer protocol
+  equals `MGLPPC_PROTOCOL_VERSION`. The DLL assumed 15 through the v16 bump
+  (fixed 2026-10-20), which silently turned the mailbox off and sent every
+  control call over Exec.
 - `MGLPPC_NOMAILBOX` disables it (diagnostic); registration echoes `MAILBOX`
   only after the region is initialized.
 
@@ -259,7 +273,8 @@ host writes `colorToken` first and `colorSeq` last, then flushes; PPC reads
 
 ## 10. Versioning and compatibility
 
-- Protocol 15 is the current wire version; the host accepts 14.
+- Protocol 16 is the current wire version (adds the lease commands); the DLL
+  downgrades to 14 on a BAD_VERSION HELLO.
 - Ring control 6 is current; v5 peers fall back rather than run with a
   mismatched control block.
 - Never change field offsets or add fields to `MGLPPCRingControlV1` —

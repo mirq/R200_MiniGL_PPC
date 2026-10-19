@@ -634,8 +634,15 @@ void Lib_mglDeleteContext(void)
     ObtainSemaphore(&LibraryBase->lock);
     if (LibraryBase->owner == FindTask(NULL)) {
         DestroyContext(LibraryBase->context);
+#if MGL_PRESENT_DIAG
+void R200PresentDiagReport(void);
+#endif
+
         LibraryBase->context = NULL;
         LibraryBase->owner = NULL;
+#if MGL_PRESENT_DIAG
+    R200PresentDiagReport();
+#endif
     }
     ReleaseSemaphore(&LibraryBase->lock);
 }

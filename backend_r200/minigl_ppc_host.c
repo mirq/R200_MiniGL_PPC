@@ -1154,6 +1154,20 @@ static void HostDbgPrintf(const char *fmt, ...)
     HostDbgLine(buf);
 }
 
+#if MGLPPC_HOST_DBG
+/* Lease handover attribution (EClock ticks, shutdown report): driver
+ * acquire/release, and for presents that follow a LEASE_END the gap from
+ * the release to the present entry, its fence drain and display switch. */
+static ULONG HostLeaseAcqTicks, HostLeaseRelTicks, HostLeaseGapTicks;
+static ULONG HostLeaseDrainTicks, HostLeaseSwitchTicks, HostLeaseCycles;
+static ULONG HostLeaseEndStamp;
+/* Lease commands by route, and the host loop period while a lease is
+ * held (max and sum of pass-to-pass gaps). */
+static ULONG HostLeaseMailboxCmds, HostLeaseExecCmds;
+static ULONG HostLeaseLoopPrev, HostLeaseLoopMax, HostLeaseLoopSum;
+static ULONG HostLeaseLoopCount;
+#endif
+
 static const char *HostDbgStage = "init";
 static ULONG HostDbgErrSeen;
 #if MGLPPC_HOST_DBG
@@ -2541,6 +2555,16 @@ static ULONG RingPoll(MGLPPCHostState *state)
         state->ringCompleted++;
         processed++;
         if (entry.flags & MGLPPC_SEMANTIC_FLAG_PRESENT) {
+#if MGLPPC_HOST_DBG
+            ULONG leaseT0 = ProbeTicks(), leaseT1 = 0;
+            BOOL afterLease = HostLeaseEndStamp != 0;
+
+            if (afterLease) {
+                HostLeaseGapTicks += leaseT0 - HostLeaseEndStamp;
+                HostLeaseEndStamp = 0;
+                ++HostLeaseCycles;
+            }
+#endif
             bridgeValid = FALSE;
             HOST_START(stageStart);
             if (!DrainSemanticFence(state)) {
@@ -2554,9 +2578,19 @@ static ULONG RingPoll(MGLPPCHostState *state)
                 break;
             }
             HOST_STAGE(HostPresentWaitTicks, stageStart);
+#if MGLPPC_HOST_DBG
+            if (afterLease) {
+                leaseT1 = ProbeTicks();
+                HostLeaseDrainTicks += leaseT1 - leaseT0;
+            }
+#endif
             HOST_START(stageStart);
             mglSwitchDisplay();
             HOST_STAGE(HostPresentTicks, stageStart);
+#if MGLPPC_HOST_DBG
+            if (afterLease)
+                HostLeaseSwitchTicks += ProbeTicks() - leaseT1;
+#endif
             HostPresentCount++;
             mglUnlockDisplay();
             state->displayLocked = 0;
@@ -3306,6 +3340,7 @@ static void HandleMessage(MGLPPCMessage *message,
                             | (state->mailboxDisabled ? 0UL :
                                (MGLPPC_CAP_MAILBOX_V1 |
                                 MGLPPC_CAP_MAILBOX_UPLOAD_SHARED |
+                                MGLPPC_CAP_MAILBOX_LEASE |
                                 (state->directDisabled ? 0UL :
                                  MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1)))
 #endif
@@ -4290,6 +4325,18 @@ static void HandleMessage(MGLPPCMessage *message,
             if (!state->cpEnabled || state->cpFailed || !state->context ||
                 message->contextId != state->contextId || message->payloadWords ||
                 !QueryCpSurface(state, message->value[0], &surface)) {
+                MGLR200PrivateBridgeV2 liveBridge;
+                BOOL live = state->context && QueryBackendBridgeV2(&liveBridge);
+
+                printf("MiniGLPPC host: cp_surface_fail token=%08lx "
+                       "live=%08lx epoch=%lu/%lu lease=%lu cpen=%lu\n",
+                       (unsigned long)message->value[0],
+                       live ? (unsigned long)liveBridge.colorSurfaceToken : 0UL,
+                       live ? (unsigned long)liveBridge.deviceEpoch : 0UL,
+                       (unsigned long)state->ringDeviceEpoch,
+                       (unsigned long)state->leaseActive,
+                       (unsigned long)state->cpEnabled);
+                fflush(stdout);
                 message->status = MGLPPC_STATUS_UNSUPPORTED;
                 break;
             }
@@ -4324,7 +4371,11 @@ static void HandleMessage(MGLPPCMessage *message,
          * phase-3 gate layout (docs/09). */
         if (!state->cpEnabled || state->cpFailed || !state->context ||
             message->contextId != state->contextId ||
-            message->payloadWords != 1UL ||
+            /* Exec form carries the context id as its one payload word;
+             * the mailbox form has no payload (box->contextId only). */
+            message->payloadWords > 1UL ||
+            (message->payloadWords &&
+             message->payload[0] != state->contextId) ||
             !(state->ringRadeonCaps & RADEON3D_CAP_PPC_RING)) {
             message->status = MGLPPC_STATUS_UNSUPPORTED;
             break;
@@ -4335,11 +4386,18 @@ static void HandleMessage(MGLPPCMessage *message,
         }
         {
             struct Radeon3DLease lease;
+            BOOL acquired;
+#if MGLPPC_HOST_DBG
+            ULONG t0 = ProbeTicks();
+#endif
             memset(&lease, 0, sizeof(lease));
             lease.Size = sizeof(lease);
-            if (!Radeon3DAcquireLease(
-                    (struct Radeon3DDevice *)state->ringDeviceToken,
-                    &lease)) {
+            acquired = Radeon3DAcquireLease(
+                (struct Radeon3DDevice *)state->ringDeviceToken, &lease);
+#if MGLPPC_HOST_DBG
+            HostLeaseAcqTicks += ProbeTicks() - t0;
+#endif
+            if (!acquired) {
                 message->status = MGLPPC_STATUS_GL_ERROR;
                 printf("HOST_LEASE begin FAILED\n");
                 break;
@@ -4354,6 +4412,7 @@ static void HandleMessage(MGLPPCMessage *message,
             message->value[5] = lease.NextFence;
             message->value[6] = lease.MaxBatchDwords;
             message->value[7] = lease.HeartbeatMs;
+            if (MGLPPC_HOST_TRACE || state->verboseUploads)
             printf("HOST_LEASE begin ok ring=%08lx dwords=%lu mask=%08lx "
                    "bar2=%08lx fence=%lu max=%lu hb=%lu\n",
                    (unsigned long)lease.RingCpuAddress,
@@ -4379,6 +4438,12 @@ static void HandleMessage(MGLPPCMessage *message,
         }
         break;
     case MGLPPC_CMD_LEASE_END:
+#if MGLPPC_HOST_DBG
+        if (HostRingMailboxActive)
+            ++HostLeaseMailboxCmds;
+        else
+            ++HostLeaseExecCmds;
+#endif
         if (!state->leaseActive) {
             message->status = MGLPPC_STATUS_BUSY;
             printf("HOST_LEASE end ignored (not active)\n");
@@ -4386,11 +4451,19 @@ static void HandleMessage(MGLPPCMessage *message,
         }
         {
             BOOL ok;
+#if MGLPPC_HOST_DBG
+            ULONG t0 = ProbeTicks();
+#endif
             ok = Radeon3DReleaseLease(
                 (struct Radeon3DDevice *)state->ringDeviceToken,
                 message->value[0]);
+#if MGLPPC_HOST_DBG
+            HostLeaseEndStamp = ProbeTicks();
+            HostLeaseRelTicks += HostLeaseEndStamp - t0;
+#endif
             state->leaseActive = FALSE;
             state->leaseLastFence = 0UL;
+            if (MGLPPC_HOST_TRACE || state->verboseUploads || !ok)
             printf("HOST_LEASE end ok=%lu lastFence=%lu\n",
                    (unsigned long)ok, (unsigned long)message->value[0]);
             if (!ok)
@@ -4666,6 +4739,23 @@ int main(int argc, char **argv)
             pollStart = HostClock();
 #endif
         ++HostDbgLoop;
+#if MGLPPC_HOST_DBG
+        if (state.leaseActive) {
+            ULONG now = ProbeTicks();
+
+            if (HostLeaseLoopPrev) {
+                ULONG gap = now - HostLeaseLoopPrev;
+
+                HostLeaseLoopSum += gap;
+                ++HostLeaseLoopCount;
+                if (gap > HostLeaseLoopMax)
+                    HostLeaseLoopMax = gap;
+            }
+            HostLeaseLoopPrev = now;
+        } else {
+            HostLeaseLoopPrev = 0;
+        }
+#endif
         HOST_DBG_STAGE("poll_mailbox");
         workHandled = PollMailbox(&state);
 #if MGLPPC_PROFILE
@@ -4817,7 +4907,12 @@ int main(int argc, char **argv)
          * must not depend on lastExecutes/lastPresents: those report-coupled
          * latches do not advance with profiling off. Use actual mailbox,
          * message, ring and fence work, including newly published entries. */
+        /* A held PPC lease means the client is rendering without ring
+         * traffic: LEASE_END and the present that follows must not wait
+         * out a Delay(1) tick (measured: 21 fps with the sleep, every
+         * frame parked ~47 ms). */
         if (workHandled || ringBusy || state.semanticFence ||
+            state.leaseActive ||
             (state.ringControl && !state.ringControl->error &&
              state.ringCompleted < state.ringControl->head)) {
             idleLoops = 0;
@@ -4990,6 +5085,27 @@ int main(int argc, char **argv)
                (unsigned long)HostPresentCount);
 #endif
     HOST_PACING_REPORT();
+#if MGLPPC_HOST_DBG
+    if (HostLeaseCycles) {
+        printf("HOST_LEASESTAT cycles=%lu acquire_us=%lu release_us=%lu "
+               "gap_us=%lu drain_us=%lu switch_us=%lu\n",
+               (unsigned long)HostLeaseCycles,
+               (unsigned long)ProbeMicros(0, HostLeaseAcqTicks),
+               (unsigned long)ProbeMicros(0, HostLeaseRelTicks),
+               (unsigned long)ProbeMicros(0, HostLeaseGapTicks),
+               (unsigned long)ProbeMicros(0, HostLeaseDrainTicks),
+               (unsigned long)ProbeMicros(0, HostLeaseSwitchTicks));
+        printf("HOST_LEASESTAT end_mailbox=%lu end_exec=%lu loops=%lu "
+               "loop_avg_us=%lu loop_max_us=%lu\n",
+               (unsigned long)HostLeaseMailboxCmds,
+               (unsigned long)HostLeaseExecCmds,
+               (unsigned long)HostLeaseLoopCount,
+               (unsigned long)(HostLeaseLoopCount ?
+                   ProbeMicros(0, HostLeaseLoopSum) / HostLeaseLoopCount : 0UL),
+               (unsigned long)ProbeMicros(0, HostLeaseLoopMax));
+        fflush(stdout);
+    }
+#endif
 #if MGLPPC_IDLE_DIAG
     printf("HOST_IDLE scope=whole_host render_scope=registered_after_first_execute "
            "empty_sleeps=%lu active_sleeps=%lu active_us=%lu "

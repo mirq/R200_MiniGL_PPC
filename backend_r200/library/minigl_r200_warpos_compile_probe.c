@@ -860,6 +860,9 @@ typedef struct R200PPCFrontendPlatform {
     ULONG leaseNextFence, leaseMaxBatch, leaseHeartbeatMs;
     ULONG leaseLastHeartbeat;       /* PerfClock sample of last heartbeat */
     ULONG leaseWptr;                /* local ring write cursor (masked) */
+    /* Released for a present (C1): re-acquire once the host has consumed
+     * the present, so the next batch stamps the host's new color target. */
+    BOOL leaseResume;
     /* Emit staging for lease batches: batch dwords + 6-dword fence tail
      * + padding to the ring's 16-dword alignment. Kept separate from the
      * transport slot buffers so the lease path never fights the bounded
@@ -1667,6 +1670,9 @@ static BOOL PlatformCallFail(ULONG command, const char *why)
  * plain increments on the emit path; the one-line summary prints at context
  * teardown only when CP is enabled, so quiet benchmarks gain one shutdown
  * console line, exactly like the host's CP_RUN report. */
+/* Last descriptor-resolve failure (token, reason 1-4); failure
+ * diagnostics for the cpfail.log emit line. */
+static ULONG CpSurfFailToken, CpSurfFailReason, CpSurfFailValue;
 static ULONG CpSurfHits, CpSurfMissQueries, CpSurfCapResets,
              CpSurfInvalidate, CpSurfEpochStale, CpSurfDropped, CpSurfCursor;
 
@@ -1978,6 +1984,28 @@ static ULONG R200PPCLeaseHeartbeatMs(void)
     return period;
 }
 
+/* Lease control round trip. A host advertising MGLPPC_CAP_MAILBOX_LEASE
+ * serves it through the shared mailbox, which it polls ahead of Exec
+ * messages; the Exec reply path cost 2.7-6.8 ms per handover against a
+ * 0.15-0.4 ms host handler. Older hosts keep the Exec form, where
+ * LEASE_BEGIN carries the context id as its single payload word. Request
+ * and reply values live in FrontendPlatform.control either way. */
+static BOOL LeaseCall(ULONG command)
+{
+    MGLPPCMessage *message = &FrontendPlatform.control;
+
+    if (FrontendPlatform.mailbox && !FrontendPlatform.mailboxAbandoned &&
+        (FrontendPlatform.capabilities & MGLPPC_CAP_MAILBOX_LEASE))
+        return PlatformCall(command, FrontendPlatform.contextId);
+    message->command = command;
+    message->contextId = FrontendPlatform.contextId;
+    message->payloadWords = command == MGLPPC_CMD_LEASE_BEGIN ? 1UL : 0UL;
+    message->payload[0] = FrontendPlatform.contextId;
+    message->status = MGLPPC_STATUS_BUSY;
+    return MGLPPCTransportCall(&FrontendPlatform.transport, message) &&
+           message->status == MGLPPC_STATUS_OK;
+}
+
 BOOL MGLPPCLeaseBegin(void)
 {
     MGLPPCMessage *message = &FrontendPlatform.control;
@@ -1988,13 +2016,7 @@ BOOL MGLPPCLeaseBegin(void)
         return FALSE;
     if (!PlatformMailboxReady())
         return FALSE;
-    message->command = MGLPPC_CMD_LEASE_BEGIN;
-    message->contextId = FrontendPlatform.contextId;
-    message->payloadWords = 1UL;
-    message->payload[0] = FrontendPlatform.contextId;
-    message->status = MGLPPC_STATUS_BUSY;
-    if (!MGLPPCTransportCall(&FrontendPlatform.transport, message) ||
-        message->status != MGLPPC_STATUS_OK)
+    if (!LeaseCall(MGLPPC_CMD_LEASE_BEGIN))
         return FALSE;
     FrontendPlatform.leaseRing = (volatile ULONG *)message->value[0];
     FrontendPlatform.leaseRingGpu = message->value[1];
@@ -2032,16 +2054,9 @@ BOOL MGLPPCLeaseBegin(void)
 
 BOOL MGLPPCLeaseHeartbeat(void)
 {
-    MGLPPCMessage *message = &FrontendPlatform.control;
-
     if (!FrontendPlatform.leaseActive)
         return FALSE;
-    message->command = MGLPPC_CMD_LEASE_HEARTBEAT;
-    message->contextId = FrontendPlatform.contextId;
-    message->payloadWords = 0UL;
-    message->status = MGLPPC_STATUS_BUSY;
-    if (!MGLPPCTransportCall(&FrontendPlatform.transport, message) ||
-        message->status != MGLPPC_STATUS_OK) {
+    if (!LeaseCall(MGLPPC_CMD_LEASE_HEARTBEAT)) {
         /* Stale lease: the driver already reclaimed the ring. Drop the
          * local ownership so the next Execute falls back to the bounded
          * paths; a later LEASE_BEGIN may re-take the lease. */
@@ -2060,13 +2075,8 @@ BOOL MGLPPCLeaseEnd(void)
 
     if (!FrontendPlatform.leaseActive)
         return TRUE;
-    message->command = MGLPPC_CMD_LEASE_END;
-    message->contextId = FrontendPlatform.contextId;
-    message->payloadWords = 0UL;
     message->value[0] = FrontendPlatform.leaseLastFence;
-    message->status = MGLPPC_STATUS_BUSY;
-    ok = MGLPPCTransportCall(&FrontendPlatform.transport, message) &&
-         message->status == MGLPPC_STATUS_OK;
+    ok = LeaseCall(MGLPPC_CMD_LEASE_END);
     FrontendPlatform.leaseActive = FALSE;
     if (!ok)
         R200PPCConsolePrintf("LEASE end failed status=%lu\n",
@@ -2128,7 +2138,12 @@ BOOL R200PPCPlatformOpen(void)
     PpcLmDumped = FALSE;
 #endif
     R200PPCPlatformResetClientDefaults();
-    FrontendPlatform.peerProtocol = 15UL;
+    /* The transport speaks MGLPPC_PROTOCOL_VERSION; the peer is assumed to
+     * match until a BAD_VERSION HELLO downgrades it. This stayed at 15
+     * through the v16 bump, which silently disabled the shared mailbox
+     * (registration requires peerProtocol == MGLPPC_PROTOCOL_VERSION) and
+     * sent every control call over the Exec round trip. */
+    FrontendPlatform.peerProtocol = MGLPPC_PROTOCOL_VERSION;
     /* The mirror borrows the host-created window, and the ABI-3 input
      * path (mglKeyFunc -> UpdateInputIDCMP, plus SetPointer/ClearPointer)
      * calls Intuition on it. The 68k native backend opens intuition in
@@ -2285,8 +2300,11 @@ static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
     struct MiniGLR200Context *context = user;
     ULONG index;
     ULONG insertIndex = MGLPPC_CP_SURFACE_SLOTS; /* sentinel: append/ring */
-    if (!token || !FrontendPlatform.cpEnabled || FrontendPlatform.cpFailed)
+    CpSurfFailToken = token;
+    if (!token || !FrontendPlatform.cpEnabled || FrontendPlatform.cpFailed) {
+        CpSurfFailReason = 1;
         return FALSE;
+    }
     for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index)
         if (FrontendPlatform.cpSurfaces[index].token == token) {
             if (FrontendPlatform.cpSurfaces[index].epoch == context->deviceEpoch) {
@@ -2301,10 +2319,18 @@ static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
     ++CpSurfMissQueries;
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
     FrontendPlatform.control.value[0] = token;
-    if (!PlatformCall(MGLPPC_CMD_CP_SURFACE, FrontendPlatform.contextId) ||
-        FrontendPlatform.control.value[0] != GL_NO_ERROR ||
-        FrontendPlatform.control.value[7] != context->deviceEpoch)
+    if (!PlatformCall(MGLPPC_CMD_CP_SURFACE, FrontendPlatform.contextId)) {
+        CpSurfFailReason = 2;
+        CpSurfFailValue = FrontendPlatform.control.status;
         return FALSE;
+    }
+    if (FrontendPlatform.control.value[0] != GL_NO_ERROR ||
+        FrontendPlatform.control.value[7] != context->deviceEpoch) {
+        CpSurfFailReason = FrontendPlatform.control.value[0] != GL_NO_ERROR
+                               ? 3UL : 4UL;
+        CpSurfFailValue = FrontendPlatform.control.value[0];
+        return FALSE;
+    }
     out->cpuAddress = FrontendPlatform.control.value[1];
     out->gpuAddress = FrontendPlatform.control.value[2];
     out->pitch = FrontendPlatform.control.value[3];
@@ -2415,7 +2441,10 @@ static void RefreshCpColorTarget(volatile MGLPPCRingControlV1 *control,
 #define R200_LEASE_SCRATCH_REG0     0x15e0UL
 #define R200_LEASE_FENCE_TAIL       6UL
 #define R200_LEASE_ALIGN            16UL
-#define R200_LEASE_RESERVE_TIMEOUT  200000UL
+/* Both lease waits fail only after this much wall time with no RB_RPTR /
+ * SCRATCH movement; any movement re-arms the deadline. */
+#define R200_LEASE_WAIT_MS          1000UL
+#define R200_LEASE_PUMP_MASK        255UL
 
 /* BAR2 register offsets (phase-3 validated). */
 #define R200_LEASE_RB_RPTR          0x0710UL
@@ -2425,6 +2454,56 @@ static volatile void *R200LeaseReg(ULONG offset)
 {
     return (volatile void *)((volatile UBYTE *)FrontendPlatform.leaseBar2 +
                              offset);
+}
+
+/* Lease wait policy, one step per poll. The previous loops tested
+ * !(poll & 1023) from poll 0, so any batch whose fence had not landed on
+ * the first read parked a full ~20 ms WaitTime tick (PublishCpSlot notes
+ * the same kernel quantum) -- a ~15 fps ceiling at gears' 3.4 batches per
+ * frame. Spin while the hardware moves; pump the heartbeat every 256 polls
+ * (time-scheduled inside the pump); park only after
+ * MGLPPC_RING_YIELD_SPINS polls with no movement; fail only after
+ * R200_LEASE_WAIT_MS of wall time with no movement. */
+struct R200LeaseWait {
+    ULONG seen, spin, deadline;
+};
+
+/* Lease handover timing (PerfClock ticks), written once at context
+ * teardown to DH2:leasestat.log. RAM counters only on the frame path. */
+static ULONG LeaseStatEndTicks, LeaseStatBeginTicks, LeaseStatResumeTicks;
+static ULONG LeaseStatFenceTicks, LeaseStatHandovers, LeaseStatParks;
+static ULONG LeaseStatBatches;
+
+static void R200LeaseWaitBegin(struct R200LeaseWait *wait, ULONG value)
+{
+    wait->seen = value;
+    wait->spin = 0;
+    wait->deadline = PerfClock() +
+                     PlatformClockRate / 1000UL * R200_LEASE_WAIT_MS;
+}
+
+static const char *R200LeaseWaitStep(struct R200LeaseWait *wait, ULONG value,
+                                     const char *timeout, BOOL leaseHeld)
+{
+    if (value != wait->seen) {
+        R200LeaseWaitBegin(wait, value);
+        return NULL;
+    }
+    if (!(++wait->spin & R200_LEASE_PUMP_MASK)) {
+        if ((LONG)(PerfClock() - wait->deadline) >= 0)
+            return timeout;
+        if (leaseHeld) {
+            R200PPCLeasePump();
+            if (!FrontendPlatform.leaseActive)
+                return "stalelease";
+        }
+    }
+    if (wait->spin >= MGLPPC_RING_YIELD_SPINS) {
+        wait->spin = 0;
+        ++LeaseStatParks;
+        MGLPPCYield();
+    }
+    return NULL;
 }
 
 static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
@@ -2441,7 +2520,8 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
     ULONG maxBatch = FrontendPlatform.leaseMaxBatch;
     ULONG segmentIx = 0xffffffffUL;
     ULONG wptr, space, count, index, total, firstRun;
-    ULONG sequence = 0, readback, newWptr, poll;
+    ULONG sequence = 0, readback, newWptr, value, fenceStart;
+    struct R200LeaseWait wait;
     ULONG start = PerfClock();
     const char *failure = "ring";
 
@@ -2474,6 +2554,19 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
                             vertices.drawCount ? &vertices : NULL,
                             ResolveCpSurface, context);
     if (!count || count > MGLPPC_CP_DWORDS) {
+        char line[128];
+
+        sprintf(line, "LEASE emit stage=%lu surf=%lu/%08lx/%lu rec=%lu "
+                "draws=%lu sb=%lu fence=%lu\n",
+                (unsigned long)MGLPPCEmitFailStage,
+                (unsigned long)CpSurfFailReason,
+                (unsigned long)CpSurfFailToken,
+                (unsigned long)CpSurfFailValue,
+                (unsigned long)slot->recordCount,
+                (unsigned long)slot->drawCount,
+                (unsigned long)slot->stateBatch,
+                (unsigned long)FrontendPlatform.leaseNextFence);
+        MGLPPCIBTrace("DH2:cpfail.log", line);
         failure = "emit";
         goto failed;
     }
@@ -2513,25 +2606,16 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
 
     wptr = FrontendPlatform.leaseWptr;
     /* Reserve: available = (rptr - wptr - 1) & mask; the CP advances
-     * RB_RPTR as it consumes dwords. Bounded spin, hardware-validated
-     * budget. */
-    for (poll = 0;; ++poll) {
-        space = R200PPCMmioRead32(rbRptr) & mask;
-        space = (space - wptr - 1UL) & mask;
+     * RB_RPTR as it consumes dwords. */
+    value = R200PPCMmioRead32(rbRptr) & mask;
+    R200LeaseWaitBegin(&wait, value);
+    for (;;) {
+        space = (value - wptr - 1UL) & mask;
         if (space >= total)
             break;
-        if (poll >= R200_LEASE_RESERVE_TIMEOUT) {
-            failure = "reserve";
+        if ((failure = R200LeaseWaitStep(&wait, value, "reserve", TRUE)) != NULL)
             goto failed;
-        }
-        if (!(poll & 1023UL)) {
-            MGLPPCYield();
-            R200PPCLeasePump();
-            if (!FrontendPlatform.leaseActive) {
-                failure = "stalelease";
-                goto failed;
-            }
-        }
+        value = R200PPCMmioRead32(rbRptr) & mask;
     }
 
     /* Write the stream at wptr, splitting at the ring wrap. The ring
@@ -2561,23 +2645,18 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
     FrontendPlatform.leaseNextFence = sequence + 1UL;
     FrontendPlatform.leaseLastFence = sequence;
 
-    /* Local retirement: SCRATCH_REG0 advances in ring order. Bounded. */
-    for (poll = 0;; ++poll) {
-        if (R200PPCMmioRead32(scratch0) == sequence)
-            break;
-        if (poll >= R200_LEASE_RESERVE_TIMEOUT) {
-            failure = "fence";
+    /* Local retirement: SCRATCH_REG0 advances in ring order, so the
+     * test is wrap-safe "at or past". */
+    value = R200PPCMmioRead32(scratch0);
+    R200LeaseWaitBegin(&wait, value);
+    ++LeaseStatBatches;
+    fenceStart = PerfClock();
+    while ((LONG)(value - sequence) < 0) {
+        if ((failure = R200LeaseWaitStep(&wait, value, "fence", TRUE)) != NULL)
             goto failed;
-        }
-        if (!(poll & 1023UL)) {
-            MGLPPCYield();
-            R200PPCLeasePump();
-            if (!FrontendPlatform.leaseActive) {
-                failure = "stalelease";
-                goto failed;
-            }
-        }
+        value = R200PPCMmioRead32(scratch0);
     }
+    LeaseStatFenceTicks += PerfClock() - fenceStart;
     ++CpPhasePublishes;
     CpPhasePublishTicks += PerfClock() - start;
     return TRUE;
@@ -2591,6 +2670,58 @@ failed:
     (void)MGLPPCLeaseEnd();
     FrontendPlatform.cpFailed = TRUE;
     return FALSE;
+}
+
+/* LEASE_BEGIN plus local write-cursor sync from the live RB_WPTR. */
+static BOOL R200PPCLeaseAcquire(void)
+{
+    if (!MGLPPCLeaseBegin())
+        return FALSE;
+    FrontendPlatform.leaseWptr =
+        R200PPCMmioRead32(R200LeaseReg(R200_LEASE_RB_WPTR)) &
+        FrontendPlatform.leaseRingMask;
+    return TRUE;
+}
+
+/* C1 re-acquire: the lease was handed back for a present. Wait for the
+ * host to consume the present (completed == head): it has then switched
+ * the display and published the new color target, so the next batch
+ * stamps the surface the host owns. Falling back to the bounded path
+ * instead kept ~94% of gears' batches off the lease (1899 of 2031). The
+ * wait is progress-aware like the lease waits; a host that stops
+ * consuming for R200_LEASE_WAIT_MS leaves this batch on the bounded path. */
+static void R200PPCLeaseResume(volatile MGLPPCRingControlV1 *control)
+{
+    struct R200LeaseWait wait;
+    ULONG completed, t0;
+
+    if (!FrontendPlatform.leaseResume || FrontendPlatform.leaseActive ||
+        FrontendPlatform.cpFailed || !control)
+        return;
+    t0 = PerfClock();
+    MGLPPCInvalidateLine32((APTR)&control->head);
+    MGLPPCInvalidateLine32((APTR)&control->completed);
+    completed = control->completed;
+    R200LeaseWaitBegin(&wait, completed);
+    while (completed != control->head) {
+        if (control->error)
+            return;
+        if (R200LeaseWaitStep(&wait, completed, "present", FALSE) != NULL)
+            return;
+        MGLPPCInvalidateLine32((APTR)&control->head);
+        MGLPPCInvalidateLine32((APTR)&control->completed);
+        completed = control->completed;
+    }
+    LeaseStatResumeTicks += PerfClock() - t0;
+    t0 = PerfClock();
+    if (R200PPCLeaseAcquire()) {
+        LeaseStatBeginTicks += PerfClock() - t0;
+        ++LeaseStatHandovers;
+    } else {
+        /* Refused: stay on the bounded path for the rest of the run. */
+        FrontendPlatform.leaseResume = FALSE;
+        R200PPCConsolePrintf("LEASE re-acquire refused; bounded path\n");
+    }
 }
 
 static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *slot)
@@ -2610,6 +2741,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     const char *failure = "ring";
     /* Interface-20 lease: the frontend owns the ring; the bounded-path
      * wait/publish machinery below must not run. */
+    R200PPCLeaseResume(control);
     if (FrontendPlatform.leaseActive && !FrontendPlatform.cpFailed)
         return SubmitLeaseBatch(context, slot);
     if (!control) {
@@ -3214,6 +3346,19 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
         if (present) {
             volatile MGLPPCRingEntryV1 *entry;
             ULONG ringSlot;
+
+            /* C1: presentation stays on the 68k (display switch, P96 blit,
+             * buffer rotation). Hand the engine back first: every lease
+             * batch already retired through its WAIT_IDLE fence, and
+             * LEASE_END travels the mailbox, which the host polls before
+             * the ring entry published below. */
+            if (FrontendPlatform.leaseActive) {
+                ULONG t0 = PerfClock();
+
+                (void)MGLPPCLeaseEnd();
+                LeaseStatEndTicks += PerfClock() - t0;
+                FrontendPlatform.leaseResume = TRUE;
+            }
 #if MGLPPC_CLIENT_TRACE
             static ULONG pwWaits;
             ++pwWaits;
@@ -3290,6 +3435,15 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
                 entry->flags = MGLPPC_SEMANTIC_FLAG_PRESENT;
                 entry->crc = 0;
                 MGLPPCFlushDataRange((APTR)entry, sizeof(*entry));
+                /* The present selects blit vs flip from the published
+                 * sync state. PublishCpSlot carries it on every bounded
+                 * entry, but a frame rendered entirely under the lease
+                 * posts none, which left the host on the library's
+                 * sync-on default: a vblank flip per frame (~22 ms). */
+                control->syncEnabled = FrontendPlatform.syncEnabled;
+                control->syncSeq = FrontendPlatform.syncSeq;
+                MGLPPCFlushDataRange((APTR)&control->syncEnabled,
+                                     2UL * sizeof(ULONG));
                 control->head = control->head + 1;
                 MGLPPCFlushDataRange((APTR)&control->head,
                                      sizeof(control->head));
@@ -3670,6 +3824,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     FrontendPlatform.hostEventsConfirmed = FALSE;
     FrontendPlatform.leaseAvailable = FALSE;
     FrontendPlatform.leaseActive = FALSE;
+    FrontendPlatform.leaseResume = FALSE;
     FrontendPlatform.leaseLastFence = 0;
     if (FrontendPlatform.capabilities & MGLPPC_CAP_SEMANTIC_RING) {
         MGLPPCMessage *registerMessage =
@@ -3915,13 +4070,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
      * the fallback whenever the lease is not live. */
     if (FrontendPlatform.leaseRequested) {
         if (FrontendPlatform.leaseAvailable) {
-            if (MGLPPCLeaseBegin()) {
-                FrontendPlatform.leaseWptr =
-                    R200PPCMmioRead32(
-                        (volatile void *)((volatile UBYTE *)
-                            FrontendPlatform.leaseBar2 +
-                            R200_LEASE_RB_WPTR)) &
-                    FrontendPlatform.leaseRingMask;
+            if (R200PPCLeaseAcquire()) {
                 R200PPCConsolePrintf(
                     "LEASE active wptr=%lu nextfence=%lu\n",
                     (unsigned long)FrontendPlatform.leaseWptr,
@@ -4206,6 +4355,27 @@ void R200PPCDispatchDeleteContext(void)
     if (FrontendPlatform.leaseActive) {
         (void)MGLPPCLeaseEnd();
         R200PPCTraceUL("delctx lease end", FrontendPlatform.leaseLastFence);
+    }
+    if (LeaseStatBatches) {
+        char line[192];
+        ULONG us = PlatformClockRate / 1000000UL;
+
+        if (!us)
+            us = 1;
+        sprintf(line, "LEASESTAT batches=%lu handovers=%lu parks=%lu "
+                "fence_us=%lu end_us=%lu begin_us=%lu resume_us=%lu "
+                "mbox=%lu/%lu caps=%08lx\n",
+                (unsigned long)LeaseStatBatches,
+                (unsigned long)LeaseStatHandovers,
+                (unsigned long)LeaseStatParks,
+                (unsigned long)(LeaseStatFenceTicks / us),
+                (unsigned long)(LeaseStatEndTicks / us),
+                (unsigned long)(LeaseStatBeginTicks / us),
+                (unsigned long)(LeaseStatResumeTicks / us),
+                (unsigned long)(FrontendPlatform.mailbox != NULL),
+                (unsigned long)FrontendPlatform.mailboxAbandoned,
+                (unsigned long)FrontendPlatform.capabilities);
+        MGLPPCIBTrace("DH2:leasestat.log", line);
     }
     if (!deadPipe && FrontendPlatform.registered &&
         !R200PPCPlatformBarrier(&proofContext, FALSE)) {
