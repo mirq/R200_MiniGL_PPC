@@ -863,6 +863,11 @@ typedef struct R200PPCFrontendPlatform {
     /* Released for a present (C1): re-acquire once the host has consumed
      * the present, so the next batch stamps the host's new color target. */
     BOOL leaseResume;
+    /* Ceiling diagnostics (default off): NOPRESENT skips presents while
+     * the lease is held; NOIDLE 1 drops the per-batch WAIT_IDLE, 2 also
+     * waits only for the previous batch's fence (one batch in flight). */
+    BOOL leaseNoPresent;
+    ULONG leaseNoIdle;
     /* Emit staging for lease batches: batch dwords + 6-dword fence tail
      * + padding to the ring's 16-dword alignment. Kept separate from the
      * transport slot buffers so the lease path never fights the bounded
@@ -2068,6 +2073,8 @@ BOOL MGLPPCLeaseHeartbeat(void)
     return TRUE;
 }
 
+static BOOL R200LeaseIdleFence(void);
+
 BOOL MGLPPCLeaseEnd(void)
 {
     MGLPPCMessage *message = &FrontendPlatform.control;
@@ -2075,6 +2082,11 @@ BOOL MGLPPCLeaseEnd(void)
 
     if (!FrontendPlatform.leaseActive)
         return TRUE;
+    /* Without per-batch WAIT_IDLE the last fence only proves the CP read
+     * the stream; hand the engine back idle as the driver's 2D restore
+     * expects. */
+    if (FrontendPlatform.leaseNoIdle && !FrontendPlatform.cpFailed)
+        (void)R200LeaseIdleFence();
     message->value[0] = FrontendPlatform.leaseLastFence;
     ok = LeaseCall(MGLPPC_CMD_LEASE_END);
     FrontendPlatform.leaseActive = FALSE;
@@ -2520,7 +2532,7 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
     ULONG maxBatch = FrontendPlatform.leaseMaxBatch;
     ULONG segmentIx = 0xffffffffUL;
     ULONG wptr, space, count, index, total, firstRun;
-    ULONG sequence = 0, readback, newWptr, value, fenceStart;
+    ULONG sequence = 0, readback, newWptr, value, fenceStart, retire;
     struct R200LeaseWait wait;
     ULONG start = PerfClock();
     const char *failure = "ring";
@@ -2589,8 +2601,10 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
         sequence = 1UL;
     staging[count++] = R200_LEASE_PACKET0(R200_LEASE_DSTCACHE_CTLSTAT);
     staging[count++] = R200_LEASE_CACHE_FLUSH_ALL;
-    staging[count++] = R200_LEASE_PACKET0(R200_LEASE_WAIT_UNTIL);
-    staging[count++] = R200_LEASE_WAIT_IDLE;
+    if (!FrontendPlatform.leaseNoIdle) {
+        staging[count++] = R200_LEASE_PACKET0(R200_LEASE_WAIT_UNTIL);
+        staging[count++] = R200_LEASE_WAIT_IDLE;
+    }
     staging[count++] = R200_LEASE_PACKET0(R200_LEASE_SCRATCH_REG0);
     staging[count++] = sequence;
     while (count & (R200_LEASE_ALIGN - 1UL))
@@ -2651,7 +2665,10 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
     R200LeaseWaitBegin(&wait, value);
     ++LeaseStatBatches;
     fenceStart = PerfClock();
-    while ((LONG)(value - sequence) < 0) {
+    /* NOIDLE=2: the next build writes the other vertex half, last read by
+     * the previous batch; one batch may stay in flight. */
+    retire = FrontendPlatform.leaseNoIdle == 2UL ? sequence - 1UL : sequence;
+    while ((LONG)(value - retire) < 0) {
         if ((failure = R200LeaseWaitStep(&wait, value, "fence", TRUE)) != NULL)
             goto failed;
         value = R200PPCMmioRead32(scratch0);
@@ -2670,6 +2687,58 @@ failed:
     (void)MGLPPCLeaseEnd();
     FrontendPlatform.cpFailed = TRUE;
     return FALSE;
+}
+
+/* Flush + WAIT_IDLE + SCRATCH tail as its own submission, waited to
+ * retirement: the engine is idle afterwards. */
+static BOOL R200LeaseIdleFence(void)
+{
+    ULONG words[R200_LEASE_ALIGN];
+    volatile void *rbRptr = R200LeaseReg(R200_LEASE_RB_RPTR);
+    volatile void *scratch0 = R200LeaseReg(R200_LEASE_SCRATCH_REG0);
+    ULONG mask = FrontendPlatform.leaseRingMask;
+    ULONG wptr = FrontendPlatform.leaseWptr, value, count = 0, firstRun;
+    ULONG sequence = FrontendPlatform.leaseNextFence;
+    struct R200LeaseWait wait;
+
+    if (!sequence)
+        sequence = 1UL;
+    words[count++] = R200_LEASE_PACKET0(R200_LEASE_DSTCACHE_CTLSTAT);
+    words[count++] = R200_LEASE_CACHE_FLUSH_ALL;
+    words[count++] = R200_LEASE_PACKET0(R200_LEASE_WAIT_UNTIL);
+    words[count++] = R200_LEASE_WAIT_IDLE;
+    words[count++] = R200_LEASE_PACKET0(R200_LEASE_SCRATCH_REG0);
+    words[count++] = sequence;
+    while (count < R200_LEASE_ALIGN)
+        words[count++] = R200_LEASE_PACKET2;
+    value = R200PPCMmioRead32(rbRptr) & mask;
+    R200LeaseWaitBegin(&wait, value);
+    while (((value - wptr - 1UL) & mask) < count) {
+        if (R200LeaseWaitStep(&wait, value, "idle", TRUE) != NULL)
+            return FALSE;
+        value = R200PPCMmioRead32(rbRptr) & mask;
+    }
+    firstRun = FrontendPlatform.leaseRingDwords - wptr;
+    if (firstRun > count)
+        firstRun = count;
+    R200PPCCopyRingBr(FrontendPlatform.leaseRing + wptr, words, firstRun);
+    if (firstRun < count)
+        R200PPCCopyRingBr(FrontendPlatform.leaseRing, words + firstRun,
+                          count - firstRun);
+    wptr = (wptr + count) & mask;
+    if (R200PPCMmioWriteCommit(R200LeaseReg(R200_LEASE_RB_WPTR), wptr) != wptr)
+        return FALSE;
+    FrontendPlatform.leaseWptr = wptr;
+    FrontendPlatform.leaseNextFence = sequence + 1UL;
+    FrontendPlatform.leaseLastFence = sequence;
+    value = R200PPCMmioRead32(scratch0);
+    R200LeaseWaitBegin(&wait, value);
+    while ((LONG)(value - sequence) < 0) {
+        if (R200LeaseWaitStep(&wait, value, "idle", TRUE) != NULL)
+            return FALSE;
+        value = R200PPCMmioRead32(scratch0);
+    }
+    return TRUE;
 }
 
 /* LEASE_BEGIN plus local write-cursor sync from the live RB_WPTR. */
@@ -3325,6 +3394,9 @@ BOOL R200PPCPlatformBarrier(struct MiniGLR200Context *context, BOOL present)
         return FALSE;
     if (present && context)
         context->mismatchSubmits = 0;
+    if (present && FrontendPlatform.leaseNoPresent &&
+        FrontendPlatform.leaseActive)
+        return TRUE;
     if (!PlatformMailboxReady())
         return FALSE;
 #if MGLPPC_PROFILE
@@ -3818,6 +3890,15 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
         FrontendPlatform.leaseRequested =
             GetVar((CONST_STRPTR)"MGLPPC_LEASE", flag, sizeof(flag),
                    GVF_GLOBAL_ONLY) > 0 && flag[0] == '1';
+        flag[0] = 0;
+        FrontendPlatform.leaseNoPresent =
+            GetVar((CONST_STRPTR)"MGLPPC_LEASE_NOPRESENT", flag, sizeof(flag),
+                   GVF_GLOBAL_ONLY) > 0 && flag[0] == '1';
+        flag[0] = 0;
+        FrontendPlatform.leaseNoIdle =
+            GetVar((CONST_STRPTR)"MGLPPC_LEASE_NOIDLE", flag, sizeof(flag),
+                   GVF_GLOBAL_ONLY) > 0 && flag[0] >= '1' && flag[0] <= '2'
+                ? (ULONG)(flag[0] - '0') : 0UL;
     }
     /* The host verifies the first Execute of EACH registration, not DLL open. */
     FrontendPlatform.crcArmed = TRUE;
