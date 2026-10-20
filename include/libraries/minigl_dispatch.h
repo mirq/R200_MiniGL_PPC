@@ -13,6 +13,7 @@
 #define MINIGL_DIRECT_RESTORE_USE_MGLAPI
 #endif
 #include <mgl/gl.h>
+#include <libraries/minigl_fastpath.h>
 #ifdef MINIGL_DIRECT_RESTORE_USE_MGLAPI
 #undef USE_MGLAPI
 #undef MINIGL_DIRECT_RESTORE_USE_MGLAPI
@@ -175,6 +176,13 @@ typedef struct MGLDispatchTable {
     void (*GLMultiDrawArrays)(GLcontext context, GLenum mode, const GLint *first, const GLsizei *count, GLsizei primcount);
     void (*MGLEmergencyCloseScreen)(GLcontext context);
     void (*MGLForceNewRenderPass)(GLcontext context);
+
+    /* FastPath direct vertex-buffer submission (V19; see
+     * libraries/minigl_fastpath.h). These entry points keep the DLL's
+     * implicit-current-context model: no GLcontext argument. */
+    GLboolean (*mglBeginFastPath)(GLenum primitive, ULONG attributes, MGLFastPath *fp);
+    void (*mglEndFastPath)(MGLFastPath *fp);
+    ULONG (*mglGetFastPathCapabilities)(void);
 } MGLDispatchTable;
 
 extern const MGLDispatchTable *MiniGLDispatch;
@@ -1100,6 +1108,26 @@ static __inline__ void * MGLD_mglGetInputWindowHandle(void)
     return MiniGLDispatch->MGLGetInputWindowHandle(MGLD_CTX);
 }
 #define mglGetInputWindowHandle MGLD_mglGetInputWindowHandle
+
+static __inline__ GLboolean MGLD_mglBeginFastPath(GLenum primitive,
+                                                  ULONG attributes,
+                                                  MGLFastPath *fp)
+{
+    return MiniGLDispatch->mglBeginFastPath(primitive, attributes, fp);
+}
+#define mglBeginFastPath MGLD_mglBeginFastPath
+
+static __inline__ void MGLD_mglEndFastPath(MGLFastPath *fp)
+{
+    MiniGLDispatch->mglEndFastPath(fp);
+}
+#define mglEndFastPath MGLD_mglEndFastPath
+
+static __inline__ ULONG MGLD_mglGetFastPathCapabilities(void)
+{
+    return MiniGLDispatch->mglGetFastPathCapabilities();
+}
+#define mglGetFastPathCapabilities MGLD_mglGetFastPathCapabilities
 
 #endif /* !MINIGL_LIBRARY_BUILD */
 

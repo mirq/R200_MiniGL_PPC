@@ -151,6 +151,9 @@ void Lib_mglProposeCloseDesktop(GLboolean closeme);
 void Lib_glPolygonOffset(GLfloat factor, GLfloat units);
 void Lib_glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer);
 void Lib_mglEmergencyCloseScreen(void);
+GLboolean Lib_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp);
+void Lib_mglEndFastPath(MGLFastPath *fp);
+ULONG Lib_mglGetFastPathCapabilities(void);
 
 /* 0 fields the R200 backend does not implement:
 
@@ -954,6 +957,21 @@ static void R200_MGLForceNewRenderPass(GLcontext context)
     (void)context;
 }
 
+static GLboolean R200_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp)
+{
+    return Lib_mglBeginFastPath(primitive, attributes, fp);
+}
+
+static void R200_mglEndFastPath(MGLFastPath *fp)
+{
+    Lib_mglEndFastPath(fp);
+}
+
+static ULONG R200_mglGetFastPathCapabilities(void)
+{
+    return Lib_mglGetFastPathCapabilities();
+}
+
 /* Overridable ABI-bridge slots (see OVERRIDABLE_ENTRIES). */
 #ifndef R200_TABLE_GLTexImage2D
 #define R200_TABLE_GLTexImage2D R200_GLTexImage2D
@@ -1102,4 +1120,7 @@ const MGLDispatchTable MiniGLDispatchTable = {
     R200_GLMultiDrawArrays,
     R200_MGLEmergencyCloseScreen,
     R200_MGLForceNewRenderPass,
+    R200_mglBeginFastPath,
+    R200_mglEndFastPath,
+    R200_mglGetFastPathCapabilities,
 };
