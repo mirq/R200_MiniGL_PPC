@@ -51,6 +51,16 @@ static void PPC_GLMultiDrawArrays(GLcontext context, GLenum mode,
 static void PPCStub_MGLEmergencyCloseScreen(GLcontext context) { (void)context; }
 static void PPCStub_MGLForceNewRenderPass(GLcontext context) { (void)context; }
 
+/* The bundled mglQ3 core has no FastPath direct vertex buffer. */
+static GLboolean PPCStub_mglBeginFastPath(GLenum primitive, ULONG attributes,
+                                          MGLFastPath *fp)
+{
+    (void)primitive; (void)attributes; (void)fp;
+    return GL_FALSE;
+}
+static void PPCStub_mglEndFastPath(MGLFastPath *fp) { (void)fp; }
+static ULONG PPCStub_mglGetFastPathCapabilities(void) { return 0; }
+
 #ifndef MINIGL_PPC_BACKEND_FLAGS
 #define MINIGL_PPC_BACKEND_FLAGS MINIGL_BACKEND_FLAG_PPC
 #endif
@@ -195,6 +205,9 @@ static const MGLDispatchTable PPCDispatchTable = {
     PPC_GLMultiDrawArrays,
     PPCStub_MGLEmergencyCloseScreen,
     PPCStub_MGLForceNewRenderPass,
+    PPCStub_mglBeginFastPath,
+    PPCStub_mglEndFastPath,
+    PPCStub_mglGetFastPathCapabilities,
 };
 
 /* The only MiniGL bootstrap symbol the WarpOS client resolves by name. */

@@ -104,7 +104,7 @@ extern void R200PowerTexSubImage2D(void);
 #include "../backend_r200/generated/dispatch_table_abi3.c"
 
 typedef char R200DispatchABI3SizeCheck[
-    sizeof(MGLDispatchTable) == 0x22c ? 1 : -1];
+    sizeof(MGLDispatchTable) == 0x238 ? 1 : -1];
 
 /* PowerOpen (vbcc) client ABI bridge -- see MGLTexImage2DArgs in
  * include/libraries/minigl_dispatch.h. PowerOpen places arguments 9+

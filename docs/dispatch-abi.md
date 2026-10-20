@@ -25,6 +25,15 @@ PPC tree; the classic 68k library has its own, independently versioned table
 The ABI version and the API version move independently: ABI stayed `3` when the
 API level went 10 → 19 because the V10 layout is preserved as a prefix.
 
+**Regression note (fixed 2026-10-20).** The three FastPath V2 slots were
+missing from the committed tree, which built a `0x22c` table. They existed
+only in the parked WIP snapshot `cae45a0`. A client compiled against the
+`0x238` header, such as the A1b Quake build `glqfinal`, reads its FastPath
+pointers past the end of such a DLL's table. It dies with a PowerPC Data
+Storage exception at DAR `0x10`, at the same code offset on every load. If a
+FastPath client shows that signature, check the DLL's table size before
+anything else.
+
 ## 2. Table layout
 
 ```
