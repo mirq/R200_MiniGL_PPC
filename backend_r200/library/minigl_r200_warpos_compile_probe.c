@@ -304,6 +304,7 @@ static ULONG FrontendConsoleVerbose;
 static ULONG FrontendNoPark;
 /* MGLPPC_NOPOOL=1: no PPC-owned lightmap surface pools (A/B). */
 static ULONG FrontendNoPool;
+ULONG MGLPPCClearBlend;
 static void FrontendLmPoolReset(void);
 
 /* EXP-FORCENORMAL: A/B switch (MGLPPC_FORCENORMAL env) that puts
@@ -2251,6 +2252,17 @@ BOOL R200PPCPlatformOpen(void)
         GetVar((CONST_STRPTR)"MGLPPC_NOPOOL", verbose, (LONG)sizeof(verbose),
                GVF_GLOBAL_ONLY);
         FrontendNoPool = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_FORCEMIP", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        {
+            extern ULONG MGLPPCForceMip;
+            MGLPPCForceMip = verbose[0] == '1' ? 1UL : 0UL;
+        }
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_CLEARBLEND", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCClearBlend = verbose[0] == '1' ? 1UL : 0UL;
         FrontendLmPoolReset();
         /* EXP-FORCENORMAL: A/B switch for the 2D layout investigation.
          * Forces hardware-TCL draws onto the normal-vertex layout (13 or
@@ -4058,6 +4070,15 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     if (!proofContext.batchDwords ||
         proofContext.batchDwords > MGLPPC_SEMANTIC_SLOT_DWORDS)
         proofContext.batchDwords = MGLPPC_SEMANTIC_SLOT_DWORDS;
+    {   /* EXPERIMENT (not for commit): MGLPPC_BATCHDW caps the batch budget. */
+        UBYTE value[12];
+        LONG cap;
+        value[0] = 0;
+        if (GetVar((CONST_STRPTR)"MGLPPC_BATCHDW", value, (LONG)sizeof(value),
+                   GVF_GLOBAL_ONLY) > 0 && StrToLong(value, &cap) > 0 &&
+            cap >= 1024L && (ULONG)cap < proofContext.batchDwords)
+            proofContext.batchDwords = (ULONG)cap;
+    }
     InitializeFrontendContext(&proofContext);
     R200PPCContext = &proofContext;
     FrontendPlatform.contextId = FrontendPlatform.control.contextId;
@@ -4543,6 +4564,15 @@ static void FrontendAttributionDump(void)
             (unsigned long)perf->snapshotFastHits,
             (unsigned long)perf->captureCacheHits,
             (unsigned long)perf->deferredSplits);
+    {
+        extern ULONG R200FlushSplit[8];
+        fprintf(file, "FE split rotate=%lu mode=%lu mismatch=%lu sbfull=%lu "
+                "records=%lu generated=%lu draws=%lu\n",
+                (unsigned long)R200FlushSplit[0], (unsigned long)R200FlushSplit[1],
+                (unsigned long)R200FlushSplit[2], (unsigned long)R200FlushSplit[3],
+                (unsigned long)R200FlushSplit[4], (unsigned long)R200FlushSplit[5],
+                (unsigned long)R200FlushSplit[6]);
+    }
     fclose(file);
 }
 #endif
@@ -4964,13 +4994,65 @@ void R200PPCPlatformClose(void)
 static ULONG R200PPCOutsideTicks;
 #endif
 
+/* Defined later in this TU; used by the MGLPPC_SHOT_EVERY present
+ * diagnostic in R200PPCDispatchSwitchDisplay. */
+void R200PPCDispatchWriteShotPPM(char *filename);
+
 void R200PPCDispatchSwitchDisplay(void)
 {
+    /* MGLPPC_SHOT_EVERY diagnostic (default OFF, benchmark-safe): dump
+     * the surface this present is about to blit to a PPM, so
+     * render-vs-present divergence can be observed from inside a running
+     * client (Quake3 black-window investigation, 2026-10-01).
+     * SAFETY (first attempt wedged a real-hardware Q3 PPC task into an
+     * exception): value 1 dumps ONLY the first present; N>1 dumps every
+     * Nth present but at most one per 15 s wall clock, and all dumps go
+     * to T: (never DH2:, which is slow under SFS). Dumps never run twice
+     * concurrently. */
+    static ULONG presentCount;
+    static ULONG shotEvery;
+    static ULONG lastShotTick;
+    static int shotEnvRead;
+    static int shotInProgress;
+
+    if (!shotEnvRead) {
+        TEXT buf[16];
+        shotEnvRead = 1;
+        buf[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_SHOT_EVERY", buf, (LONG)sizeof(buf),
+               GVF_GLOBAL_ONLY);
+        shotEvery = 0;
+        if (buf[0]) {
+            const TEXT *p = buf;
+            while (*p >= '0' && *p <= '9')
+                shotEvery = shotEvery * 10UL + (ULONG)(*p++ - '0');
+        }
+        presentCount = 0;
+    }
+    if (shotEvery && !shotInProgress && ++presentCount % shotEvery == 0) {
+        char shotName[80];
+        /* 1 = first present only; N>1 throttled to one dump per 15 s */
+        int take = (shotEvery == 1UL)
+            ? (presentCount == 1UL)
+            : PerfClockDeltaMs(lastShotTick) >= 15000UL;
+        if (take) {
+            lastShotTick = PerfClock();
+            shotInProgress = 1;
+            sprintf(shotName, "T:present_%lu.ppm",
+                    (unsigned long)presentCount);
+            R200PPCDispatchWriteShotPPM(shotName);
+            shotInProgress = 0;
+        }
+    }
 #if MGLPPC_PROFILE && R200_PERF_AUTOREPORT
     static ULONG lastLiveWall, lastLivePrintEnd;
     static ULONG lastFe, lastSer, lastExec, lastWait, lastPres;
     static ULONG lastDraw, lastStall, lastDrain, lastVerts, lastPrims;
     static ULONG lastSubmits, lastPublish;
+#endif
+#if MGLPPC_PROFILE
+    if (!FrontendFirstPresentTick)
+        FrontendFirstPresentTick = PerfClock();
 #endif
     Lib_mglSwitchDisplay();
 #if MGLPPC_PROFILE && R200_PERF_AUTOREPORT
@@ -6865,18 +6947,27 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         return;
     }
     /* Internalformat accepts the same resolved list as the native
-     * backend (raw component counts 3/4 included, GL 1.0 style), plus
-     * the EXT_paletted_texture internalformat for paletted uploads
+     * backend (raw component counts 3/4 included, GL 1.0 style, plus
+     * the sized aliases the native gate accepts -- storage is always
+     * canonical BGRA32, so sized aliases widen to their unsized class),
+     * and the EXT_paletted_texture internalformat for paletted uploads
      * (always expanded PPC-side; never forwarded). The DIRECT path
      * never forwards it, the shared/chunked paths pass it through to
      * native glTexImage2D; validating here gives the client the
-     * documented error code at the documented call. */
-    if (internalFormat != GL_RGB && internalFormat != GL_RGB5_A1 &&
+     * documented error code at the documented call. GL_RGBA4 has no
+     * enumerator in mgl/gl.h, so the real-GL value is matched
+     * literally, exactly like the native gate. */
+    if (internalFormat != GL_RGB && internalFormat != GL_RGB5 &&
+        internalFormat != GL_RGB8 &&
+        internalFormat != GL_RGB5_A1 &&
+        internalFormat != (GLint)0x8052 /* GL_RGBA4 */ &&
         internalFormat != GL_RGBA &&
+        internalFormat != GL_RGBA8 &&
         internalFormat != 3 && internalFormat != 4 &&
-        internalFormat != GL_ALPHA &&
-        internalFormat != GL_LUMINANCE &&
+        internalFormat != GL_ALPHA && internalFormat != GL_ALPHA8 &&
+        internalFormat != GL_LUMINANCE && internalFormat != GL_LUMINANCE8 &&
         internalFormat != GL_LUMINANCE_ALPHA &&
+        internalFormat != GL_LUMINANCE8_ALPHA8 &&
         internalFormat != GL_COLOR_INDEX &&
         internalFormat != (GLint)MGL_COLOR_INDEX8_EXT) {
         SetError(context, GL_INVALID_ENUM);

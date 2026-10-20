@@ -1481,6 +1481,21 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
     case GL_MAX_LIGHTS:
         *value = (GLint)R200_MAX_LIGHTS;
         break;
+    case GL_MAX_TEXTURE_SIZE:
+        /* Same limit Lib_glTexImage2D enforces. This case is mandatory:
+         * the default path leaves *value untouched and only raises
+         * GL_INVALID_ENUM, so clients trusting the query (Quake3 bakes
+         * it into glConfig.maxTextureSize at init) read stack garbage
+         * and can collapse every texture to 0x0. */
+        *value = (GLint)R200_MAX_TEXTURE_DIMENSION;
+        break;
+    case GL_MAX_TEXTURE_UNITS_ARB:
+        /* Two TMUs: the frontend drives unit 0 and unit 1 and the
+         * semantic service textures both (hardware-verified by the
+         * texture_format_probe multitexture section). Quake3 gates its
+         * multitexture path on this query answering > 1. */
+        *value = 2;
+        break;
     case MGL_R200_PRIVATE_TEXTURE_V1_QUERY:
         {
             MGLR200PrivateTextureV1 *bridge =

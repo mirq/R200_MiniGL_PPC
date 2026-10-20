@@ -349,3 +349,21 @@ sequenceDiagram
   vector stores and segment bases.
 - No raw hardware access: no PCI, MMIO, CP ring or VRAM addressing from PPC.
 - Every new record/batch respects the 8192-dword and 192-draw bounds.
+
+### 4.3 Scalar serializers use register-swap stores, not stwbrx (2026-10-15)
+
+`minigl_ppc_serial.s` no longer uses `stwbrx`: all 40 store sites now
+byte-reverse in registers (`rlwinm`/`rlwimi` into `r0`, a volatile scratch)
+and store with plain `stw`. Measured on the reference machine
+(p96-driver docs/10, tools/phase4): `stwbrx` to the VRAM aperture ~60 ns/dword,
+register-swapped plain stores ~42 ns/dword — adjacent normal stores are
+write-gathered by the 60x bus/bridge, byte-reversed stores are not. The
+AltiVec double-pass path (`minigl_ppc_serial_altivec.*`) is unchanged and
+remains off by default (`MGLPPC_NOALTIVEC=1` from `mglhost`); enable with
+`MGLPPC_ALTIVEC=1` for machines where the vector move wins.
+
+Client environment protocol (measured the hard way): `mglhost` (re)writes its
+defaults into `ENV:` at startup (`MGLPPC_CPEMIT=1`, `MGLPPC_NOALTIVEC=1`,
+`MGLPPC_HOSTPRI=-1`), so set client env vars AFTER the host is up; and on
+this OS build `UnSet` does not reliably remove a variable — use
+`Delete ENV:<name>` and verify with `GetEnv`.

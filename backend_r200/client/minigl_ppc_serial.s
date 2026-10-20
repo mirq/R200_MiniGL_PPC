@@ -8,6 +8,14 @@
 # segment half, with disabled texture/fog attributes collapsed by AND
 # masks (0x00000000 or 0xffffffff, symmetric under byte reversal).
 #
+# Byte reversal is done in registers (rlwinm/rlwimi) followed by plain
+# stw stores, NOT stwbrx: measured on the reference 7410/Prometheus
+# machine (p96-driver docs/10, tools/phase4), stwbrx to the VRAM aperture
+# costs ~60 ns/dword while register-swapped plain stores reach ~42 ns/dw
+# (write-gathering covers adjacent normal stores; byte-reversed stores
+# are not gathered). r0 is used as the swap scratch; it is volatile in
+# the SysV ABI and unused by these kernels.
+#
 # ScreenVertex layout (13 dwords): x,y,z,rhw,nx,ny,nz,color,s,t,s1,t1,fog
 # Record layouts (little-endian words, what the VAP fetches):
 #   lit full    13 dwords: 0..12 in place,      d8,d9<-m0 d10,d11<-m1 d12<-mf
@@ -58,31 +66,70 @@ MGLPPCSwapLit13:
         and     r20,r20,r7
         lwz     r21,48(r10)
         and     r21,r21,r8
-        stwbrx  r11,0,r9
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r12,0,r9
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r3,0,r9
+        rlwinm  r0,r3,8,0,31
+        rlwimi  r0,r3,24,0,7
+        rlwimi  r0,r3,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r4,0,r9
+        rlwinm  r0,r4,8,0,31
+        rlwimi  r0,r4,24,0,7
+        rlwimi  r0,r4,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r5,0,r9
+        rlwinm  r0,r5,8,0,31
+        rlwimi  r0,r5,24,0,7
+        rlwimi  r0,r5,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r14,0,r9
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r15,0,r9
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r16,0,r9
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r17,0,r9
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r18,0,r9
+        rlwinm  r0,r18,8,0,31
+        rlwimi  r0,r18,24,0,7
+        rlwimi  r0,r18,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r19,0,r9
+        rlwinm  r0,r19,8,0,31
+        rlwimi  r0,r19,24,0,7
+        rlwimi  r0,r19,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r20,0,r9
+        rlwinm  r0,r20,8,0,31
+        rlwimi  r0,r20,24,0,7
+        rlwimi  r0,r20,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r21,0,r9
+        rlwinm  r0,r21,8,0,31
+        rlwimi  r0,r21,24,0,7
+        rlwimi  r0,r21,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
         addi    r10,r10,52
         bdnz    .l13
@@ -113,25 +160,55 @@ MGLPPCSwapLit10:
         and     r17,r17,r6
         lwz     r18,36(r10)
         and     r18,r18,r6
-        stwbrx  r11,0,r9
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r12,0,r9
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r3,0,r9
+        rlwinm  r0,r3,8,0,31
+        rlwimi  r0,r3,24,0,7
+        rlwimi  r0,r3,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r4,0,r9
+        rlwinm  r0,r4,8,0,31
+        rlwimi  r0,r4,24,0,7
+        rlwimi  r0,r4,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r5,0,r9
+        rlwinm  r0,r5,8,0,31
+        rlwimi  r0,r5,24,0,7
+        rlwimi  r0,r5,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r14,0,r9
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r15,0,r9
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r16,0,r9
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r17,0,r9
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r18,0,r9
+        rlwinm  r0,r18,8,0,31
+        rlwimi  r0,r18,24,0,7
+        rlwimi  r0,r18,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
         addi    r10,r10,52
         bdnz    .l10
@@ -167,25 +244,55 @@ MGLPPCSwapTCL10:
         and     r20,r20,r7
         lwz     r21,48(r10)
         and     r21,r21,r8
-        stwbrx  r11,0,r9
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r12,0,r9
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r3,0,r9
+        rlwinm  r0,r3,8,0,31
+        rlwimi  r0,r3,24,0,7
+        rlwimi  r0,r3,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r4,0,r9
+        rlwinm  r0,r4,8,0,31
+        rlwimi  r0,r4,24,0,7
+        rlwimi  r0,r4,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r16,0,r9
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r17,0,r9
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r18,0,r9
+        rlwinm  r0,r18,8,0,31
+        rlwimi  r0,r18,24,0,7
+        rlwimi  r0,r18,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r19,0,r9
+        rlwinm  r0,r19,8,0,31
+        rlwimi  r0,r19,24,0,7
+        rlwimi  r0,r19,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r20,0,r9
+        rlwinm  r0,r20,8,0,31
+        rlwimi  r0,r20,24,0,7
+        rlwimi  r0,r20,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r21,0,r9
+        rlwinm  r0,r21,8,0,31
+        rlwimi  r0,r21,24,0,7
+        rlwimi  r0,r21,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
         addi    r10,r10,52
         bdnz    .tcl10
@@ -213,19 +320,40 @@ MGLPPCSwapTCL7:
         and     r17,r17,r6
         lwz     r18,36(r10)
         and     r18,r18,r6
-        stwbrx  r11,0,r9
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r12,0,r9
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r3,0,r9
+        rlwinm  r0,r3,8,0,31
+        rlwimi  r0,r3,24,0,7
+        rlwimi  r0,r3,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r4,0,r9
+        rlwinm  r0,r4,8,0,31
+        rlwimi  r0,r4,24,0,7
+        rlwimi  r0,r4,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r16,0,r9
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r17,0,r9
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
-        stwbrx  r18,0,r9
+        rlwinm  r0,r18,8,0,31
+        rlwimi  r0,r18,24,0,7
+        rlwimi  r0,r18,24,16,23
+        stw     r0,0(r9)
         addi    r9,r9,4
         addi    r10,r10,52
         bdnz    .tcl7

@@ -478,3 +478,33 @@ value, unit, method, configuration (mode/depth/buffers/sync), stack identity
 derived or estimated. Delete or mark superseded numbers instead of leaving two
 incompatible values. Never copy a number from another stack or session without
 its conditions.
+
+## 11. 2026-10-14/15: scalar serializer stwbrx -> swap+stw, AltiVec A/B
+
+Measured on the physical 7410/Prometheus machine, precalc gears 600 frames,
+fullscreen 640x480x16, 3 buffers, nosync, error=0, MGLPPC_HOSTPRI=-1. Three
+runs per configuration, median reported. Microbenchmark context:
+`~/p96-driver/docs/10` + `~/p96-driver/tools/phase4` (stwbrx to the VRAM
+aperture ~60 ns/dword; register-swap+stw and AltiVec vperm+stvx ~42; cached
+RAM staging scalar 6 / vec 1).
+
+| Configuration | median FPS | note |
+|---|---:|---|
+| scalar serializers, stwbrx (old build) | 189.9 | prior deployed DLL |
+| scalar serializers, swap+stw (new build `CAC16C24`) | 192.3 | 40 stwbrx sites converted |
+| AltiVec double-pass (override, clean) | 186.3 | scratch pass + vector move |
+| AltiVec double-pass + VERIFY=1 | 172.4 | verify replay/read-back cost ~7% |
+
+Findings:
+
+1. Gears at 640x480x16 is **not staging-bound**: the 43% staging-bandwidth
+   microbenchmark win dilutes to ~1% at frame level (192.3 vs 189.9, within
+   run noise). Do not expect staging changes to move this workload.
+2. With correct (single-pass swap+stw) scalar serializers, the scalar path
+   is the fastest gears configuration measured; the AltiVec double-pass
+   (scalar-to-scratch, then vector move) gives the scratch pass back and
+   measures ~3% slower. `mglhost`'s `MGLPPC_NOALTIVEC=1` default is
+   therefore correct on this machine and stays.
+3. The AltiVec path itself is functionally verified end-to-end:
+   SELFTEST=1 and `VERIFY_OK` on 16k+ flushes through the aperture with
+   `MGLPPC_ALTIVEC_VERIFY=1` (log `DH2:mglppc_av.txt`).

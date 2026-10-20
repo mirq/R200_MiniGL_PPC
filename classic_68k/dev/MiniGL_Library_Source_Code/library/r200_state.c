@@ -1463,6 +1463,21 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
     case GL_MAX_LIGHTS:
         *value = (GLint)R200_MAX_LIGHTS;
         break;
+    case GL_MAX_TEXTURE_SIZE:
+        /* Same limit Lib_glTexImage2D enforces. This case is mandatory:
+         * the default path leaves *value untouched and only raises
+         * GL_INVALID_ENUM, so clients trusting the query (Quake3 bakes
+         * it into glConfig.maxTextureSize at init) read stack garbage
+         * and can collapse every texture to 0x0. */
+        *value = (GLint)R200_MAX_TEXTURE_DIMENSION;
+        break;
+    case GL_MAX_TEXTURE_UNITS_ARB:
+        /* Two TMUs: the backend drives unit 0 and unit 1 and the
+         * semantic service textures both (hardware-verified by the
+         * texture_format_probe multitexture section). Quake3 gates its
+         * multitexture path on this query answering > 1. */
+        *value = 2;
+        break;
     case MGL_R200_PRIVATE_TEXTURE_V1_QUERY:
         {
             MGLR200PrivateTextureV1 *bridge =
@@ -1696,21 +1711,6 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             bridge->structSize = sizeof(*bridge);
         }
         break;
-    case MGL_R200_PRIVATE_SURFACE_V1_QUERY:
-        {
-            MGLR200PrivateSurfaceV1 *bridge =
-                (MGLR200PrivateSurfaceV1 *)value;
-            ULONG surfaceToken = bridge->surfaceToken;
-            const struct Radeon3DSurface *surface;
-            struct Radeon3DInfo info;
-            ULONG index, bytesPerPixel, rowBytes, span;
-
-            ZeroMemory(bridge, sizeof(*bridge));
-            bridge->version = MGL_R200_PRIVATE_SURFACE_V1_VERSION;
-            bridge->structSize = sizeof(*bridge);
-            bridge->surfaceToken = surfaceToken;
-            if (!context || !surfaceToken || !context->device ||
-                !context->deviceEpoch) {
     case MGL_R200_PRIVATE_PRESENT_V1_QUERY:
         {
             MGLR200PrivatePresentV1 *bridge =
@@ -1728,6 +1728,21 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             (void)R200PreparePresentCp(context, bridge);
         }
         break;
+    case MGL_R200_PRIVATE_SURFACE_V1_QUERY:
+        {
+            MGLR200PrivateSurfaceV1 *bridge =
+                (MGLR200PrivateSurfaceV1 *)value;
+            ULONG surfaceToken = bridge->surfaceToken;
+            const struct Radeon3DSurface *surface;
+            struct Radeon3DInfo info;
+            ULONG index, bytesPerPixel, rowBytes, span;
+
+            ZeroMemory(bridge, sizeof(*bridge));
+            bridge->version = MGL_R200_PRIVATE_SURFACE_V1_VERSION;
+            bridge->structSize = sizeof(*bridge);
+            bridge->surfaceToken = surfaceToken;
+            if (!context || !surfaceToken || !context->device ||
+                !context->deviceEpoch) {
                 SetError(context, GL_INVALID_OPERATION);
                 break;
             }

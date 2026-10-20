@@ -157,6 +157,10 @@ ULONG DepthStorageWidth(ULONG width);
  */
 #define MAX_TEXTURES 2048UL
 #define MAX_TEXTURE_LEVELS 12UL
+/* Largest accepted glTexImage2D dimension (Lib_glTexImage2D rejects
+ * anything bigger); GL_MAX_TEXTURE_SIZE answers this same limit so
+ * clients that clamp to the query (Quake3) stay inside the gate. */
+#define R200_MAX_TEXTURE_DIMENSION 2048UL
 #define MIN_NATIVE_PRIMITIVE_VERTICES 12UL
 
 #if R200_SPHEREMAP_CACHE

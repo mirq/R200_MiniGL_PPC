@@ -273,6 +273,7 @@
 #define R200_COLOR_FORMAT_RGB332            (7UL << 10)
 #define R200_DITHER_ENABLE                  (1UL << 2)
 #define R200_ALPHA_BLEND_ENABLE              (1UL << 0)
+#define R200_PLANE_MASK_ENABLE               (1UL << 1)
 #define R200_Z_ENABLE                        (1UL << 8)
 #define R200_SE_VAP_CNTL                    0x2080UL
 #define R200_VAP_TCL_ENABLE                 0x00000001UL

@@ -35,6 +35,10 @@ struct MGLPPCEmitVertices {
  * ANY failure. Discard partial words on failure; never publish them. This
  * only builds commands, without submission, MMIO or OS calls. Static scratch
  * is single-context/process and nonreentrant, including resolve callbacks. */
+/* MGLPPC_CLEARBLEND=1: depth-only clears keep colour with a no-op blend
+ * instead of a zero plane mask (frontend, set at platform open). */
+extern ULONG MGLPPCClearBlend;
+
 ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
                      const struct MGLPPCEmitVertices *vertices,
                      MGLPPCEmitResolve resolve, void *user);

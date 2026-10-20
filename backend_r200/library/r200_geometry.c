@@ -2,6 +2,14 @@
 #include "r200_batch_budget.h"
 #include <math.h>
 #include "debug_output.h"
+#if MGLPPC_PROFILE
+/* EXPERIMENT: FlushScreenVertices submit reasons (rotate, mode, mismatch,
+ * statebatch-full, records, generated, maxdraws). */
+ULONG R200FlushSplit[8];
+#define FLUSH_SPLIT(n) (++R200FlushSplit[n])
+#else
+#define FLUSH_SPLIT(n) ((void)0)
+#endif
 
 
 /* The VAP fetches vertex records from the segment in little-endian, while
@@ -364,6 +372,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                        hardwareTransform)
                     : FALSE;
     if (useCommit && !SegmentHalfFits(context, slot, vertexBytes)) {
+        FLUSH_SPLIT(0);
         if (RotateStreamSegment(context, vertexBytes)) {
             slot = BuildSubmitSlot(context);
             /* Rotation submitted the pending records (the old segment's
@@ -380,6 +389,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
      * primitives, so a mode change must close the current homogeneous slot
      * rather than forcing the later draw into the earlier mode. */
     if (slot->modeDecided && slot->commitMode != useCommit) {
+        FLUSH_SPLIT(1);
         if (!Submit(context))
             return FALSE;
         slot = BuildSubmitSlot(context);
@@ -452,6 +462,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
             if (!slot->drawCount)
                 slot->commitMode = FALSE;
             ++context->mismatchSubmits;
+            FLUSH_SPLIT(2);
             if (context->perfEnabled)
                 context->perf.deferredSplits++;
             if (!Submit(context))
@@ -488,6 +499,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                                  slot->drawCount + 1UL, TRUE, R200_PPC_FRONTEND) ||
             slot->generatedDwordCount + generatedGrowth >
                 context->batchDwords) {
+            FLUSH_SPLIT(3);
             if (!Submit(context))
                 return FALSE;
             slot = BuildSubmitSlot(context);
@@ -573,6 +585,16 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         slot->generatedDwordCount + generatedGrowth >
             context->batchDwords ||
         (useCommit && slot->drawCount >= MAX_SLOT_DRAWS)) {
+        if (!R200SlotPayloadFits(context->batchDwords,
+                                slot->recordCount + growthRequired,
+                                useCommit ? slot->drawCount + (merge ? 0UL : 1UL) : 0UL,
+                                FALSE, R200_PPC_FRONTEND))
+            FLUSH_SPLIT(4);
+        else if (slot->generatedDwordCount + generatedGrowth >
+                 context->batchDwords)
+            FLUSH_SPLIT(5);
+        else
+            FLUSH_SPLIT(6);
         if (!Submit(context)) return FALSE;
         slot = BuildSubmitSlot(context);
         /* The landed sibling's half has its own monotonic cursor: degrade

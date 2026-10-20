@@ -17,22 +17,39 @@
 #endif
 #if MGLPPC_PROFILE
 static ULONG YieldCalls, YieldTicks, YieldMaximum;
+#endif
+static ULONG YieldBurstStart, YieldLast;
+
 static ULONG YieldClock(void)
 {
     ULONG value;
     __asm__ volatile ("mftb %0" : "=r" (value));
     return value;
 }
-#endif
 
+/* The requested 100 us sleep parks for a whole scheduler quantum on this
+ * kernel (~15 ms measured; 150 parks cost 2.2 s of a 19.8 s Quake demo3 at
+ * 800x600), while a GPU batch the caller waits on retires in well under
+ * that. Calls arriving back to back belong to one wait: keep spinning until
+ * that wait has lasted MGLPPC_RING_YIELD_SPIN_TICKS, then park as before.
+ * The time base is bus/4 (25-35 MHz on the reference machines), so the
+ * tick constants are conservative wall-time bounds. */
 void MGLPPCYield(void)
 {
+    ULONG now = YieldClock();
 #if MGLPPC_PROFILE
-    ULONG start = YieldClock(), elapsed;
+    ULONG elapsed;
 #endif
+
+    if (now - YieldLast > MGLPPC_RING_YIELD_GAP_TICKS)
+        YieldBurstStart = now;
+    YieldLast = now;
+    if (now - YieldBurstStart < MGLPPC_RING_YIELD_SPIN_TICKS)
+        return;
     (void)WaitTime(0UL, MGLPPC_RING_YIELD_US);
+    YieldLast = YieldClock();
 #if MGLPPC_PROFILE
-    elapsed = YieldClock() - start;
+    elapsed = YieldLast - now;
     ++YieldCalls;
     YieldTicks += elapsed;
     if (elapsed > YieldMaximum) YieldMaximum = elapsed;

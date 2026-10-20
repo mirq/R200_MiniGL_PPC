@@ -505,7 +505,14 @@ const GLubyte *Lib_glGetString(GLenum name)
     static const GLubyte renderer[] = "Radeon3D semantic R200";
     static const GLubyte version[] = "1.1 MiniGL_R200 phase6";
     static const GLubyte extensions[] =
-        "GL_ARB_multitexture GL_MGL_performance_counters";
+        /* GL_MGL_ARB_multitexture: ioq3's Amiga GLimp only enables
+         * vertex-array multitexture when the extensions string contains
+         * THIS MiniGL-specific token (amiga_glimp.c GLW_InitExtensions);
+         * the standard GL_ARB_multitexture token alone leaves Q3 on the
+         * single-texture path. The R200 stack really drives two TMUs
+         * (texture_format_probe multitexture section, hardware-verified). */
+        "GL_ARB_multitexture GL_MGL_ARB_multitexture "
+        "GL_MGL_performance_counters";
     switch (name) {
     case GL_VENDOR: return vendor;
     case GL_RENDERER: return renderer;

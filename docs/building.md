@@ -255,6 +255,18 @@ $(LD) -r -EB -d -x -T warpos-etrel.ld \
 These invariants are not optional: violating them produces an ET_REL that
 `Elf2Exe2` converts incorrectly or rejects on the target.
 
+**`startupwos.o` (the `$(WOS_STARTFILE)` above) must stay the first object on
+the link line — before any client or override objects and before the import
+archive.** Its entry hunks must lead the image: the WarpOS loader starts
+executing at the first text hunk, so a reordered link dies before `main()`
+with a PowerPC Exception (Data Storage, DAR near `0x10`, a fixed LR and an
+SRR0 that moves per load) that looks exactly like a client bug but is purely
+link order. A wrong-order link still passes the `_start at .text+0` nm check
+because `_start`'s section-relative value is unchanged — the discipline is
+manual. When compiling a `MiniGLOpen()` override object
+(`client/minigl_ppc_open.c` with `-DMINIGL_PPC_DLLNAME`), link it *after*
+`startupwos.o`, ahead of the import archive, so it wins the archive member.
+
 ## 6. Conversion and packaging
 
 ```

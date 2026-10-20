@@ -180,6 +180,10 @@ struct Radeon3DEmitter {
      * VBUF_2 packets replace the inline vertex stream. The per-record
      * fetch address comes from CommitVertexOffsets[CommitDrawIndex]. */
     BOOL CommitVbuf;
+    /* Consumer extension (MiniGL, not driver ABI): depth-only clears keep
+     * colour with a no-op blend (the pre-PLANE_MASK_ENABLE workaround)
+     * instead of a zero plane mask. Set for A/B (MGLPPC_CLEARBLEND=1). */
+    BOOL ClearBlend;
     ULONG CommitSegmentGpuBase;
     ULONG CommitSegmentBytes;
     const ULONG *CommitVertexOffsets;
