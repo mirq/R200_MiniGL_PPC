@@ -123,6 +123,9 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_UNSIGNED_SHORT 202U
 #define GL_VERTEX_ARRAY 207U
 #define GL_ALPHA 1U
+/* Sized aliases (numbering follows the shared mgl/gl.h enum; accepted by
+ * the TexImage2D gates, widened to their unsized class on upload). */
+#define GL_ALPHA8 2U
 #define GL_ALPHA_TEST 5U
 #define GL_BACK 10U
 #define GL_BLEND 13U
@@ -157,6 +160,8 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_LINEAR_MIPMAP_LINEAR 95U
 #define GL_LINEAR_MIPMAP_NEAREST 96U
 #define GL_LUMINANCE 100U
+#define GL_LUMINANCE8 101U
+#define GL_LUMINANCE8_ALPHA8 102U
 #define GL_LUMINANCE_ALPHA 103U
 #define GL_MODULATE 110U
 #define GL_NEAREST 112U
@@ -174,8 +179,11 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_REPLACE 149U
 #define GL_REPEAT 150U
 #define GL_RGB 151U
+#define GL_RGB5 152U
 #define GL_RGB5_A1 153U
+#define GL_RGB8 154U
 #define GL_RGBA 155U
+#define GL_RGBA8 156U
 #define GL_SRC_ALPHA 164U
 #define GL_SRC_ALPHA_SATURATE 165U
 #define GL_SRC_COLOR 166U
@@ -238,6 +246,9 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
 #define GL_LIGHT6 252U
 #define GL_LIGHT7 253U
 #define GL_MAX_LIGHTS 254U
+/* Integer queries (numbering follows the shared mgl/gl.h enum). */
+#define GL_MAX_TEXTURE_SIZE 105U
+#define GL_MAX_TEXTURE_UNITS_ARB 223U
 #define GL_AMBIENT 255U
 #define GL_DIFFUSE 256U
 #define GL_SPECULAR 257U

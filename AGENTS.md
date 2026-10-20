@@ -107,6 +107,15 @@
   `-d`, `-x`. Final ET_REL links must have `_start` at `.text+0`, no
   undefined/COMMON symbols, and only `R_PPC_ADDR32`, `R_PPC_ADDR16_LO`,
   `R_PPC_ADDR16_HA`, `R_PPC_REL24` relocations.
+- **`startupwos.o` must be the FIRST object on every WarpOS ET_REL link
+  line** (before any client/override objects and before the import
+  archive): its entry hunks must lead the image or the converted
+  executable dies before `main()` with a PowerPC Exception (Data
+  Storage, DAR near 0x10, LR fixed, SRR0 varying per load) that looks
+  like a client bug but is purely link order. Both `Makefile.import.gcc`
+  and the ioq3 build script follow this; keep manual links identical.
+  A wrong-order link still passes the `_start at .text+0` nm check, so
+  order discipline is manual.
 
 ## Runtime Boundaries
 
@@ -152,6 +161,16 @@
   preserve `DH2:` — keep diagnostic evidence on `DH2:`
   (`DH2:wosbuild/mglppc_client.log`, `DH2:wosbuild/mglppc_host.log`;
   per-line open/append/close). Amiga-side `Status` shows only 68k views.
+- **A bridge command that times out (or is aborted) after launching a
+  PPC client usually means the client raised a PowerPC Exception** —
+  the process sits in an on-screen WarpOS exception requester ("Task
+  name: …_PPC", "Exception: Data Storage" plus SRR0/DAR register dump)
+  and only looks hung from the bridge. Check with `amiga_screenshot`
+  FIRST; read the register dump (faulting PC, DAR, module base) before
+  relaunching anything, dismiss the requester, and re-run the documented
+  launch procedure exactly (InitPPC state, `Stack 1048576`, host
+  running) before concluding the binary itself is broken. The bridge
+  never surfaces this error by itself.
 - DLL console output is gated behind `MGLPPC_VERBOSE` (SetEnv before
   launch); it is silent by default because console.device writes
   dominated frame time. Benchmark runs must leave `MGLPPC_VERBOSE`,
@@ -243,6 +262,10 @@
   in parallel. Serialize all Amiga filesystem and DOS operations;
   concurrent bridge requests collide through shared temp files and
   produce missing or misleading results.
+- Pace Amiga-side sequences with `AmigaDOS Wait <ticks>` through the
+  bridge (e.g. `Wait 50` = 5 s) instead of sleeping on the host between
+  bridge calls — one round trip, no MCP timeout races, and the delay
+  runs where the work is.
 - Amiga-side deployment names at most 16 characters; verify destination
   CRC32 after every transfer (long names can alias after truncation and
   silently overwrite another test build).

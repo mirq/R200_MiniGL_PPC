@@ -157,6 +157,7 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     emitter->ModelViewValid = FALSE;
     emitter->InvModelViewValid = FALSE;
     emitter->CommitVbuf = vertices != NULL;
+    emitter->ClearBlend = MGLPPCClearBlend != 0;
     emitter->CommitSegmentGpuBase = vertices ? vertices->gpuAddress : 0;
     emitter->CommitSegmentBytes = vertices ? vertices->bytes : 0;
     emitter->CommitVertexOffsets = vertices ? vertices->offsets : NULL;

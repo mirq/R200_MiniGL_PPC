@@ -1111,7 +1111,13 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                                      ? 0UL : 0xffffffffUL) ||
         !ExecuteEmitRegister(emitter, R200_RB3D_BLENDCNTL,
                                 blendControl) ||
-        !ExecuteEmitRegister(emitter, RADEON_RB3D_CNTL, rbControl) ||
+        /* RB3D_PLANEMASK only applies with PLANE_MASK_ENABLE set (Mesa
+         * r200 sets it in RB3D_CNTL); without it a zero mask still wrote
+         * colour, which is why depth-only clears used to blend instead. */
+        !ExecuteEmitRegister(emitter, RADEON_RB3D_CNTL,
+                             (options & RADEON3D_EXEC_SUPPRESS_COLOR_WRITE)
+                                 ? rbControl | R200_PLANE_MASK_ENABLE
+                                 : rbControl) ||
         !ExecuteEmitRegister(emitter, R200_RB3D_COLOROFFSET,
                                 color->GpuAddress) ||
         !ExecuteEmitRegister(emitter, R200_RB3D_COLORPITCH,
@@ -1666,7 +1672,7 @@ BOOL Radeon3DEmitClear(                             struct Radeon3DEmitter *emit
     }
     state->Options = (clearMask & RADEON3D_CLEAR_COLOR)
                         ? 0UL : RADEON3D_EXEC_SUPPRESS_COLOR_WRITE;
-    if (!(clearMask & RADEON3D_CLEAR_COLOR)) {
+    if (!(clearMask & RADEON3D_CLEAR_COLOR) && emitter->ClearBlend) {
         /* A depth-only clear must not touch colour. RB3D_PLANEMASK alone does
          * not suppress the write on this hardware (the 6-vertex clear quad
          * painted the clear colour over the rectangle, which is what put the

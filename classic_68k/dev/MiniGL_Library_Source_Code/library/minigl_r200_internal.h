@@ -146,6 +146,10 @@ ULONG DepthStorageWidth(ULONG width);
  */
 #define MAX_TEXTURES 2048UL
 #define MAX_TEXTURE_LEVELS 12UL
+/* Largest accepted glTexImage2D dimension (Lib_glTexImage2D rejects
+ * anything bigger); GL_MAX_TEXTURE_SIZE answers this same limit so
+ * clients that clamp to the query (Quake3) stay inside the gate. */
+#define R200_MAX_TEXTURE_DIMENSION 2048UL
 #define MIN_NATIVE_PRIMITIVE_VERTICES 12UL
 
 #if R200_SPHEREMAP_CACHE
@@ -1007,14 +1011,14 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
 /* ------------------------------------------------------------------ */
 
 void ZeroMemory(APTR memory, ULONG bytes);
-ULONG PerfClock(void);
-ULONG PerfClockRate(void);
-struct MiniGLR200Context *CurrentContext(void);
-/* context must be zero-initialized before frontend defaults are applied. */
 /* Fullscreen BLIT present without the CPU copy; see
  * MGL_R200_PRIVATE_PRESENT_V1_QUERY (r200_surface.c). */
 BOOL R200PreparePresentCp(struct MiniGLR200Context *context,
                           MGLR200PrivatePresentV1 *bridge);
+ULONG PerfClock(void);
+ULONG PerfClockRate(void);
+struct MiniGLR200Context *CurrentContext(void);
+/* context must be zero-initialized before frontend defaults are applied. */
 void InitializeFrontendContext(struct MiniGLR200Context *context);
 #if R200_PPC_FRONTEND
 extern struct MiniGLR200Context *R200PPCContext;

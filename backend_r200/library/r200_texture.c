@@ -231,10 +231,25 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
     return TRUE;
 }
 
+#if R200_PPC_FRONTEND
+/* MGLPPC_FORCEMIP=1 (set at platform open): a GL_LINEAR-minified texture
+ * whose application uploaded a complete mip chain samples it with
+ * GL_LINEAR_MIPMAP_NEAREST, original GLQuake's default. Textures with only
+ * level 0 (2D pictures, lightmaps) keep plain GL_LINEAR. */
+ULONG MGLPPCForceMip;
+#endif
+
 ULONG TextureState(const struct MiniGLR200Context *context,
                           const struct TextureObject *texture, ULONG unit)
 {
     ULONG state = 0, minFilter, levels = 1;
+    ULONG filter = texture->minFilter;
+#if R200_PPC_FRONTEND
+    if (MGLPPCForceMip && filter == GL_LINEAR && texture->levelCount > 1UL &&
+        texture->levelCount < 32UL &&
+        texture->definedLevels == ((1UL << texture->levelCount) - 1UL))
+        filter = GL_LINEAR_MIPMAP_NEAREST;
+#endif
     if (context->textureEnv[unit] == GL_MODULATE)
         state |= RADEON3D_TEX_MODULATE;
     if (texture->wrapS == GL_REPEAT)
@@ -243,7 +258,7 @@ ULONG TextureState(const struct MiniGLR200Context *context,
         state |= RADEON3D_TEX_REPEAT_T;
     if (texture->magFilter == GL_LINEAR)
         state |= RADEON3D_TEX_MAG_LINEAR;
-    switch (texture->minFilter) {
+    switch (filter) {
     case GL_LINEAR: minFilter=RADEON3D_TEX_MIN_LINEAR; break;
     case GL_NEAREST_MIPMAP_NEAREST: minFilter=RADEON3D_TEX_MIN_NEAREST_MIPMAP_NEAREST; break;
     case GL_LINEAR_MIPMAP_NEAREST: minFilter=RADEON3D_TEX_MIN_LINEAR_MIPMAP_NEAREST; break;
@@ -251,7 +266,7 @@ ULONG TextureState(const struct MiniGLR200Context *context,
     case GL_LINEAR_MIPMAP_LINEAR: minFilter=RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR; break;
     default: minFilter=RADEON3D_TEX_MIN_NEAREST; break;
     }
-    if (IsMipFilter(texture->minFilter))
+    if (IsMipFilter(filter))
         levels = texture->levelCount;
     state |= minFilter << RADEON3D_TEX_MIN_SHIFT;
     state |= (levels - 1UL) << RADEON3D_TEX_LEVELS_SHIFT;
@@ -617,16 +632,35 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
         SetError(context,GL_INVALID_ENUM);
         return;
     }
-    if (level<0 || (ULONG)level>=MAX_TEXTURE_LEVELS || width<=0 || height<=0 || width>2048 ||
-        height>2048 || border!=0) {
+    if (level<0 || (ULONG)level>=MAX_TEXTURE_LEVELS || width<=0 || height<=0 ||
+        width>(LONG)R200_MAX_TEXTURE_DIMENSION ||
+        height>(LONG)R200_MAX_TEXTURE_DIMENSION || border!=0) {
         SetError(context,GL_INVALID_VALUE);
         return;
     }
-    if (internalFormat!=GL_RGB && internalFormat!=GL_RGB5_A1 &&
-        internalFormat!=GL_RGBA &&
-        internalFormat!=3 && internalFormat!=4 && internalFormat!=GL_ALPHA &&
-        internalFormat!=GL_LUMINANCE && internalFormat!=GL_LUMINANCE_ALPHA &&
-        internalFormat!=GL_COLOR_INDEX) {
+    /* Unsized base formats plus the sized aliases classic-era clients
+     * request (ioq3 non-AMIGAOS paths pick GL_RGB5/GL_RGB8/GL_RGBA4/
+     * GL_RGBA8; greyscale paths pick GL_LUMINANCE8/GL_LUMINANCE8_ALPHA8;
+     * fonts pick GL_ALPHA8). internalFormat is not stored -- level-0
+     * storage is always 4 bytes/texel BGRA32 -- so every sized alias
+     * widens to its unsized class (RGBx to RGB, RGBA/RGB5_A1 to RGBA,
+     * L8 to L, LA8 to LA, A8 to A). That is a deliberate precision
+     * widening (8888 storage), consistent with the semantic-R200
+     * frontend; Mesa's exact 565/4444 packing is intentionally not
+     * reproduced. GL_RGBA4 has no enumerator in mgl/gl.h (inserting
+     * one would renumber the shared position-valued enum), so the
+     * real-GL value is matched literally. */
+    switch (internalFormat) {
+    case GL_RGB: case 3:
+    case GL_RGB5: case GL_RGB8:
+    case GL_RGBA: case 4:
+    case GL_RGB5_A1: case 0x8052 /* GL_RGBA4 */: case GL_RGBA8:
+    case GL_ALPHA: case GL_ALPHA8:
+    case GL_LUMINANCE: case GL_LUMINANCE8:
+    case GL_LUMINANCE_ALPHA: case GL_LUMINANCE8_ALPHA8:
+    case GL_COLOR_INDEX:
+        break;
+    default:
         SetError(context,GL_INVALID_ENUM);
         return;
     }

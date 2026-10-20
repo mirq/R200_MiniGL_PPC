@@ -195,6 +195,7 @@ typedef struct MGLPPCHostState {
     /* MGLPPC_CPPRESENT: fullscreen BLIT presents are queued on the CP as a
      * 2D-blit IB (see PresentViaCp) instead of drain + CPU-waited blit. */
     int cpPresent;
+    int blitDiag;
     ULONG presentIbSerial;
     ULONG presentIbFence[4];
     ULONG ringDeviceEpoch;
@@ -1899,7 +1900,9 @@ static BOOL PresentViaCp(MGLPPCHostState *state)
     words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_Y_X));
     words[count++] = HOST_LE32((dstY << 16) | dstX);
     words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_HEIGHT_WIDTH));
-    words[count++] = HOST_LE32((present.height << 16) | present.width);
+    /* EXPERIMENT (not for commit): MGLPPC_BLITDIAG=1 copies one pixel. */
+    words[count++] = HOST_LE32(state->blitDiag ? ((1UL << 16) | 1UL) :
+                               ((present.height << 16) | present.width));
     CacheClearE((APTR)words, count * sizeof(ULONG), CACRF_ClearD);
     /* Same dispatch path as the startup IB smoke for this segment. */
     memset(&dispatch, 0, sizeof(dispatch));
@@ -4941,6 +4944,11 @@ int main(int argc, char **argv)
         cpPresent[0] = 0;
         state.cpPresent =
             GetVar((CONST_STRPTR)"MGLPPC_CPPRESENT", (UBYTE *)cpPresent,
+                   sizeof(cpPresent), GVF_GLOBAL_ONLY) > 0 &&
+            cpPresent[0] == '1';
+        cpPresent[0] = 0;
+        state.blitDiag =
+            GetVar((CONST_STRPTR)"MGLPPC_BLITDIAG", (UBYTE *)cpPresent,
                    sizeof(cpPresent), GVF_GLOBAL_ONLY) > 0 &&
             cpPresent[0] == '1';
     }

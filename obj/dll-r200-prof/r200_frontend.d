@@ -6,6 +6,8 @@ obj/dll-r200-prof/r200_frontend.o: \
  backend_r200/third_party/radeon3d/include/proto/radeon3d.h \
  backend_r200/third_party/radeon3d/include/clib/radeon3d_protos.h \
  backend_r200/third_party/radeon3d/include/radeon3d.h \
+ backend_r200/third_party/radeon3d/include/radeon3d_records.h \
+ backend_r200/third_party/radeon3d/include/radeon3d.h \
  backend_r200/third_party/radeon3d/include/p96_bitmap_api.h \
  backend_r200/library/minigl_r200.h \
  backend_r200/include/libraries/minigl_perf.h \
@@ -25,7 +27,8 @@ obj/dll-r200-prof/r200_frontend.o: \
  backend_r200/include/libraries/minigl_ppc_semantic_replay.h \
  backend_r200/include/libraries/minigl_ppc_ib_trace.h \
  backend_r200/include/libraries/minigl_ppc_cp_emit.h \
- backend_r200/include/libraries/minigl_ppc_yield.h
+ backend_r200/include/libraries/minigl_ppc_yield.h \
+ backend_r200/include/libraries/minigl_subimage_timing.h
 
 backend_r200/third_party/radeon3d/include/libraries/Picasso96.h:
 
@@ -38,6 +41,10 @@ backend_r200/library/minigl_r200_internal.h:
 backend_r200/third_party/radeon3d/include/proto/radeon3d.h:
 
 backend_r200/third_party/radeon3d/include/clib/radeon3d_protos.h:
+
+backend_r200/third_party/radeon3d/include/radeon3d.h:
+
+backend_r200/third_party/radeon3d/include/radeon3d_records.h:
 
 backend_r200/third_party/radeon3d/include/radeon3d.h:
 
@@ -86,3 +93,5 @@ backend_r200/include/libraries/minigl_ppc_ib_trace.h:
 backend_r200/include/libraries/minigl_ppc_cp_emit.h:
 
 backend_r200/include/libraries/minigl_ppc_yield.h:
+
+backend_r200/include/libraries/minigl_subimage_timing.h:
