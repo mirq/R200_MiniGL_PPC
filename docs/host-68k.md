@@ -183,6 +183,7 @@ Runtime (`GetVar`):
 | `MGLPPC_UPLOAD_TRACE` | per-upload trace (diagnostic; the name is constructed at runtime so the literal cannot leak into the binary) |
 | `MGLPPC_VERBOSE` | PPC-side console gate |
 | `MGLPPC_CPPRESENT` | `1`: fullscreen BLIT presents are queued on the CP as a 2D-blit IB (section 7) instead of drain + CPU blit; read at host start |
+| `MGLPPC_BLITDIAG` | diagnostic: `1` makes the CP-queued present copy one pixel (measures present-blit cost); read at host start |
 
 Compile-time (`Makefile.dll.r200.gcc`):
 

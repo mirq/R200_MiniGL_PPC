@@ -4070,7 +4070,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     if (!proofContext.batchDwords ||
         proofContext.batchDwords > MGLPPC_SEMANTIC_SLOT_DWORDS)
         proofContext.batchDwords = MGLPPC_SEMANTIC_SLOT_DWORDS;
-    {   /* EXPERIMENT (not for commit): MGLPPC_BATCHDW caps the batch budget. */
+    {   /* Diagnostic: MGLPPC_BATCHDW caps the batch budget (per-IB cost A/B). */
         UBYTE value[12];
         LONG cap;
         value[0] = 0;

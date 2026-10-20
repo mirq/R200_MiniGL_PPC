@@ -416,6 +416,30 @@ host `32DC0FA1`, library `E3A239AC`, DLL `292E67CA`; measured:
 - Fullscreen bridge screenshots show a stale buffer during Quake; use an
   operator check.
 
+### 7.2 demo3 800x600x16 above 60 FPS (2026-10-20)
+
+Quiet timedemo demo3, 800x600x16, stock settings (`gl_flashblend 1`,
+`viewsize 110`, `gl_fake_multitexture 1`), CP present, release 0.41 driver,
+library `E3A239AC`, host `mglhostb` `6E4EC909`, DLL `E97CF905` (warpelf
+`53DC7CAE`, reproducible from this commit with `MGLPPC_EXPAND_MIN=0`);
+measured, failed=0:
+
+| Step | FPS |
+|---|---|
+| Pool commit `824492b`, fresh boot | 54.940 (51.708 without CP present) |
+| + yield only after a real stall (section 10.2 of frontend-r200.md) | 56.128 / 56.128 / 56.712 |
+| + `R200_PLANE_MASK_ENABLE` depth-only clears, `MGLPPC_EXPAND_MIN=0` build | **62.286 / 62.144** |
+| same + `MGLPPC_FORCEMIP=1` | 63.594 |
+
+- Diagnostics behind the clear fix: `gl_ztrick 1` (no depth clear) gave
+  66.3, so the depth-only clear cost ~2.5 ms/frame. Halving the batch budget
+  (`MGLPPC_BATCHDW`, +8.3 IB/frame) cost ~0.29 ms per IB; a 1-pixel present
+  (`MGLPPC_BLITDIAG`) saved 0.5 ms.
+- Archived cvars: `+viewsize`/`+gl_fake_multitexture` on the command line
+  persist into `id1/config.cfg`; restore it after cvar experiments
+  (backup `DH2:p41S/config.orig`).
+- Gears 200.000 on the same pair. Visual check of this build is pending.
+
 ## 8. Regression catalogue
 
 Every row was measured; use this as a checklist when a run looks wrong.
