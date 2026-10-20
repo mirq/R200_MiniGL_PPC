@@ -3065,6 +3065,22 @@ static BOOL AppendResolvedTclVertex(struct MiniGLR200Context *context,
             context->screenHardwareTransform = FALSE;
             return FALSE;
         }
+    } else if (context->pendingSemanticStateSerial !=
+                   context->semanticStateSerial ||
+               !context->pendingHardwareTransformRequest ||
+               context->pendingProjectiveRequest) {
+        /* A state call (glBindTexture, blend, depth...) between two indexed
+         * draws only bumps the serial. Re-check it here like
+         * EmitHardwareBatch does, or the next draw joins the buffered batch
+         * with the previous draw's state (Quake 3 HUD digits sampled the
+         * portrait texture bound before them). PrepareScreenAppend flushes
+         * on a real change and keeps appending when it normalizes away. */
+        context->screenHardwareTransform = TRUE;
+        context->screenProjective = FALSE;
+        if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_TRIANGLES)) {
+            context->screenHardwareTransform = FALSE;
+            return FALSE;
+        }
     }
     CopyHardwareVertex(context, vertex,
                        &context->screenVertices[context->screenVertexCount++],

@@ -440,6 +440,16 @@ measured, failed=0:
   (backup `DH2:p41S/config.orig`).
 - Gears 200.000 on the same pair. Visual check of this build is pending.
 
+### 7.3 Fused indexed append state check (2026-10-20)
+
+Quake 1 gate after the `AppendResolvedTclVertex` state-serial fix
+(frontend-r200.md section 4.1): demo3 800x600x16 stock settings, CP present,
+same pair as 7.2 except DLL `857FB757` (warpelf `891ADEB9`,
+`MGLPPC_EXPAND_MIN=0`); measured 61.932 / 61.582 / 61.652, **median 61.652**
+(7.2 baseline 62.286 / 62.144; within noise). failed=0. Quake 3 (q3dm1,
+640x480x16, native modules, `r_primitives 0`) renders the world and HUD
+correctly with this DLL (frame readback via `glReadPixels`).
+
 ## 8. Regression catalogue
 
 Every row was measured; use this as a checklist when a run looks wrong.
