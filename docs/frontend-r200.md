@@ -106,6 +106,17 @@ flowchart LR
   2D glyphs, white world base textures, noisy model skins).
 - Multitexture: unit-1 coordinates are captured into a small queue and flushed
   as `MGLDrawMultitexBuffer` before the main draw when needed.
+- Indexed `GL_TRIANGLES` (`glDrawElements`) take the fused path
+  `AppendResolvedTclVertex`, which appends each resolved vertex straight into
+  the TCL staging buffer. A state call between two draws (`glBindTexture`,
+  blend, depth...) only bumps `semanticStateSerial`, so the fused path
+  re-runs `PrepareScreenAppend` whenever the serial (or the transform request)
+  changed since the buffered batch was captured: a real change flushes, a
+  normalized-away one keeps appending. Before 2026-10-20 it re-checked only on
+  an empty/full buffer or a primitive change, so a draw after a bind joined
+  the previous batch with the previous texture (Quake 3 HUD digits sampled the
+  portrait texture, wrong world textures). Immediate-mode clients (GLQuake,
+  gears) flush at `glEnd` and were not affected.
 
 ### 4.2 Serialization kernels
 
