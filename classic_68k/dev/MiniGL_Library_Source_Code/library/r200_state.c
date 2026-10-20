@@ -1447,7 +1447,8 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
     if (name == MGL_R200_PRIVATE_TEXTURE_CAPS_V1_QUERY) {
         if (value)
             *value = (GLint)(MGL_R200_PRIVATE_TEXTURE_CAPS_V1_TAG |
-                MGL_R200_PRIVATE_TEXTURE_CAP_SUBIMAGE_DIRECT_BGRA);
+                MGL_R200_PRIVATE_TEXTURE_CAP_SUBIMAGE_DIRECT_BGRA |
+                MGL_R200_PRIVATE_TEXTURE_CAP_DIRECT_PARK);
         else if (context)
             SetError(context, GL_INVALID_VALUE);
         return;
@@ -1560,6 +1561,16 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             if (!CommitDirectTexture(context, textureName, srcAddress,
                                      bridge))
                 SetError(context, GL_INVALID_OPERATION);
+        }
+        break;
+    case MGL_R200_PRIVATE_TEXDIRECT_REAP_V1_QUERY:
+        {
+            MGLR200PrivateTexDirectReapV1 *bridge =
+                (MGLR200PrivateTexDirectReapV1 *)value;
+            ZeroMemory(bridge, sizeof(*bridge));
+            bridge->version = MGL_R200_PRIVATE_TEXDIRECT_REAP_V1_VERSION;
+            bridge->structSize = sizeof(*bridge);
+            bridge->released = ReapHostParkedSurfaces(context);
         }
         break;
     case MGL_R200_PRIVATE_TEXDIRECT_ABORT_V1_QUERY:

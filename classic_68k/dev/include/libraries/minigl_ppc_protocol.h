@@ -153,6 +153,14 @@ typedef uint32_t ULONG;
  * reference machine (host handler 0.15-0.4 ms); release-before-present
  * pays two per frame. Without the bit the client keeps the Exec path. */
 #define MGLPPC_CAP_MAILBOX_LEASE (1UL << 17)
+/* TEXTURE_DIRECT_BEGIN honours MGLPPC_TEXDIRECT_REQ_PARK_OLD in value[3]:
+ * the replaced residency is parked host-side and freed once the ring is
+ * fully retired, so a CP-path subimage only has to wait for the host to
+ * CONSUME the ring (every record naming the old surface dispatched)
+ * instead of draining the GPU before every BEGIN. Advertised only when the
+ * native library reports MGL_R200_PRIVATE_TEXTURE_CAP_DIRECT_PARK. */
+#define MGLPPC_CAP_TEXTURE_DIRECT_PARK (1UL << 18)
+#define MGLPPC_TEXDIRECT_REQ_PARK_OLD (1UL << 8)
 /* Reserved startup-smoke storage, separate from control/mailbox lines.
  * Flush PPC writes and drain the aperture before publishing the descriptor. */
 #define MGLPPC_IB_OFFSET 8192UL

@@ -106,7 +106,17 @@ without executing.
 - `CloseFenceGroup` issues a fence-only kick so retirement progresses without a
   full submission.
 - `DrainSemanticFence` is the blocking wait used before operations that must
-  not race (present with sync, readback, teardown).
+  not race (present with sync, readback, teardown). `TEXTURE_DIRECT_BEGIN`
+  skips it when the client sends `MGLPPC_TEXDIRECT_REQ_PARK_OLD` (capability
+  `TEXTURE_DIRECT_PARK`): the library parks the replaced residency
+  (`MGL_R200_TEXDIRECT_FLAG_PARKED`) and the host counts it. Past 64 parked
+  residencies BEGIN drains as before.
+- `ReapParkedSurfaces` frees the parked residencies through
+  `MGL_R200_PRIVATE_TEXDIRECT_REAP_V1` once nothing can sample them: ring
+  fully consumed, no queued fence, no fence-less run, no absorbed records.
+  It runs from `PollQueuedFence` and after every `DrainSemanticFence`, so
+  the library's release (which waits on the device's newest fence) never
+  stalls.
 - `DrainForSegment` waits for every fence that references a segment before it
   is reused.
 - `PollQueuedFence` is non-blocking: it retires the contiguous completed prefix

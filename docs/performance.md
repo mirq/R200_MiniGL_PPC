@@ -387,6 +387,35 @@ Full tables live in [textures.md](textures.md). Headline figures:
   operation.
 - One 64 KiB residency rebuild ≈ 12 ms (0.8 alloc + 0.2 import + 11 copy-back).
 
+### 7.1 Lightmap updates under CP emit (2026-10-20)
+
+GLQuake (`glqfinal`, BlitzQuake) updates lightmap atlases with
+`glTexSubImage2D` even at the stock `gl_flashblend 1` (light styles), and
+much more with real dynamic lights (`gl_flashblend 0`).
+- **Before:** every update drained the GPU (`R200PPCPlatformBarrier(FALSE)`
+  plus the host's `DrainSemanticFence`) and re-imported a fresh 64 KiB surface
+  through the 68k. demo3 at 800x600x16 lost 30.6 -> 18.0 FPS to dynamic
+  lights. The game profiler showed a size-independent floor of ~5.2 ms per
+  upload; 71% of it was the drain.
+- **Changes:** parked residencies (no drain), then the PPC-owned surface pool
+  (no 68k per update); see frontend-r200.md section 7.
+
+Quiet timedemo, demo3, 16-bit fullscreen, 1090 frames, release 0.41 driver,
+host `32DC0FA1`, library `E3A239AC`, DLL `292E67CA`; measured:
+
+| Configuration | Before | Parked | Pool |
+|---|---|---|---|
+| 640x480, `gl_flashblend 1`, CP present | 39.5 | - | **64.345 / 63.743** |
+| 640x480, `gl_flashblend 1`, no CP present | 38.8 | - | **63.298** |
+| 640x480, `gl_flashblend 0`, CP present | - | - | 54.014 |
+| 800x600, `gl_flashblend 0`, no CP present | 17.999 | 19.818 (17.280 NOPARK) | 45.116 |
+| 800x600, `gl_flashblend 1`, no CP present | 30.618 | - | 51.270 |
+
+- Operator visual check: pool rendering correct.
+- `gl_fake_multitexture 0` renders textures wrong and is no faster; keep 1.
+- Fullscreen bridge screenshots show a stale buffer during Quake; use an
+  operator check.
+
 ## 8. Regression catalogue
 
 Every row was measured; use this as a checklist when a run looks wrong.

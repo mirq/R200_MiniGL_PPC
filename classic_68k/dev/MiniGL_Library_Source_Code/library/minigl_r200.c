@@ -294,6 +294,7 @@ static void DestroyContext(struct MiniGLR200Context *context)
     /* Everything retired: deferred texture surfaces can be freed before
      * the generic texture release pass below runs. */
     ReapDeferredSurfaces(context);
+    (void)ReapHostParkedSurfaces(context);
     RestorePrimaryBuffer(context);
     if (context->device) {
         for (index = 0; index < R200_SCREEN_BUFFERS; ++index) {

@@ -222,6 +222,11 @@ typedef struct MGLPPCHostState {
     ULONG lastHeartbeat;
     int verboseUploads;
     BOOL nativeSubimage;
+    /* Native library parks replaced direct residencies on request
+     * (MGL_R200_PRIVATE_TEXTURE_CAP_DIRECT_PARK); parkedSurfaces counts
+     * the ones not yet reaped. */
+    BOOL nativePark;
+    ULONG parkedSurfaces;
 } MGLPPCHostState;
 
 static const GLenum HostUnpackNames[4] = {
@@ -490,7 +495,9 @@ static LONG ReadUploadTraceOption(UBYTE *value, LONG bytes)
     return GetVar((CONST_STRPTR)name, value, bytes, GVF_GLOBAL_ONLY);
 }
 
-static BOOL QueryBackendSubimage(BOOL hasContext)
+/* Capability bits of the native texture schema, or 0 when the backend does
+ * not answer the tagged query. */
+static ULONG QueryBackendTextureCaps(BOOL hasContext)
 {
     GLint reply = 0;
     GLenum error;
@@ -499,11 +506,12 @@ static BOOL QueryBackendSubimage(BOOL hasContext)
     error = glGetError();
     /* Native GetError itself returns INVALID_OPERATION without a context.
      * HELLO must still check the positive tagged scalar, never that error alone. */
-    return (error == GL_NO_ERROR ||
-            (!hasContext && error == GL_INVALID_OPERATION)) &&
+    if ((error == GL_NO_ERROR ||
+         (!hasContext && error == GL_INVALID_OPERATION)) &&
         ((ULONG)reply & MGL_R200_PRIVATE_TEXTURE_CAPS_V1_TAG_MASK) ==
-            MGL_R200_PRIVATE_TEXTURE_CAPS_V1_TAG &&
-        ((ULONG)reply & MGL_R200_PRIVATE_TEXTURE_CAP_SUBIMAGE_DIRECT_BGRA) != 0;
+            MGL_R200_PRIVATE_TEXTURE_CAPS_V1_TAG)
+        return (ULONG)reply & ~MGL_R200_PRIVATE_TEXTURE_CAPS_V1_TAG_MASK;
+    return 0;
 }
 
 static BOOL QueryBackendTexture(ULONG textureName,
@@ -691,6 +699,27 @@ static BOOL CloseFenceGroup(MGLPPCHostState *state)
     return TRUE;
 }
 
+/* Free the direct residencies the library parked for us once nothing can
+ * still sample them: every published ring entry consumed, no absorbed
+ * records or fence-less run pending, and every queued fence retired. The
+ * library's release then waits on an already-retired newest fence. */
+static BOOL RingAccValid;
+
+static void ReapParkedSurfaces(MGLPPCHostState *state)
+{
+    MGLR200PrivateTexDirectReapV1 bridge;
+
+    if (!state->parkedSurfaces || !state->context || state->fenceCount ||
+        state->pendingUnfenced || RingAccValid ||
+        (state->ringControl &&
+         state->ringCompleted != state->ringControl->head))
+        return;
+    memset(&bridge, 0, sizeof(bridge));
+    glGetIntegerv(MGL_R200_PRIVATE_TEXDIRECT_REAP_V1_QUERY, (GLint *)&bridge);
+    (void)glGetError();
+    state->parkedSurfaces = 0;
+}
+
 /* Blocking drain of every in-flight submission, oldest first. PRESENT,
  * teardown and every path that needs GPU quiescence (texture BEGIN, readback,
  * inline semantic execute) uses this. */
@@ -716,6 +745,7 @@ static BOOL DrainSemanticFence(MGLPPCHostState *state)
         PopFence(state);
     }
     AdvanceRetired(state);
+    ReapParkedSurfaces(state);
     return TRUE;
 }
 
@@ -747,6 +777,7 @@ static void PollQueuedFence(MGLPPCHostState *state)
      * exactly the end-of-frame condition. */
     if (!state->fenceCount) {
         AdvanceRetired(state);
+        ReapParkedSurfaces(state);
         return;
     }
     if (!state->cpEnabled && !(state->ringRadeonCaps & RADEON3D_CAP_ORDERED_COMMITS)) {
@@ -2149,7 +2180,6 @@ static ULONG RingAccRecordDwords;
 static ULONG RingAccDraws;
 static ULONG RingAccSegmentIx;
 static ULONG RingAccEntries;
-static BOOL RingAccValid;
 
 static BOOL FlushCommitAccumulator(MGLPPCHostState *state,
                                    MGLR200PrivateBridgeV2 *bridge,
@@ -3539,7 +3569,14 @@ static void HandleMessage(MGLPPCMessage *message,
         message->value[0] = MiniGLBase->lib_Version;
         message->value[1] = MiniGLBase->lib_Revision;
         message->value[2] = MiniGLBase->lib_OpenCnt;
-        state->nativeSubimage = QueryBackendSubimage(state->context != NULL);
+        {
+            ULONG textureCaps = QueryBackendTextureCaps(state->context != NULL);
+
+            state->nativeSubimage =
+                (textureCaps & MGL_R200_PRIVATE_TEXTURE_CAP_SUBIMAGE_DIRECT_BGRA) != 0;
+            state->nativePark =
+                (textureCaps & MGL_R200_PRIVATE_TEXTURE_CAP_DIRECT_PARK) != 0;
+        }
         {
         UBYTE nodirect[8], trace[8], nomailbox[8];
         nodirect[0] = 0;
@@ -3579,7 +3616,9 @@ static void HandleMessage(MGLPPCMessage *message,
                                 MGLPPC_CAP_MAILBOX_UPLOAD_SHARED |
                                 MGLPPC_CAP_MAILBOX_LEASE |
                                 (state->directDisabled ? 0UL :
-                                 MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1)))
+                                 MGLPPC_CAP_TEXTURE_DIRECT_BATCH_V1) |
+                                (state->directDisabled || !state->nativePark ?
+                                 0UL : MGLPPC_CAP_TEXTURE_DIRECT_PARK)))
 #endif
 #ifdef MGLPPC_HOST_VERIFY_CRC
                             ;
@@ -3909,10 +3948,19 @@ static void HandleMessage(MGLPPCMessage *message,
             message->status = MGLPPC_STATUS_NO_CONTEXT;
             break;
         }
-        if (!DrainSemanticFence(state)) {
+        /* MGLPPC_TEXDIRECT_REQ_PARK_OLD: the client waited for the ring to
+         * be consumed, and the replaced residency is parked instead of
+         * released, so no GPU drain is needed. Past the cap, drain and reap
+         * so parked VRAM stays bounded. */
+        if (!(state->nativePark &&
+              (message->value[3] & MGLPPC_TEXDIRECT_REQ_PARK_OLD) &&
+              state->parkedSurfaces < 64UL) &&
+            !DrainSemanticFence(state)) {
             message->status = MGLPPC_STATUS_GL_ERROR;
             break;
         }
+        if (!state->nativePark)
+            message->value[3] &= ~MGLPPC_TEXDIRECT_REQ_PARK_OLD;
         /* Classic clients may derive texture names arithmetically (GLQuake
          * never calls glGenTextures) and the native backend refuses
          * BeginDirectTexture on a non-generated name - 267/267 direct
@@ -3964,6 +4012,8 @@ static void HandleMessage(MGLPPCMessage *message,
             break;
         }
         }
+        if (bridge.flags & MGL_R200_TEXDIRECT_FLAG_PARKED)
+            ++state->parkedSurfaces;
         message->value[1] = bridge.cpuAddress;
         message->value[2] = bridge.pitch;
         message->value[3] = bridge.bytes;
