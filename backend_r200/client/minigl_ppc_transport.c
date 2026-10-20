@@ -1,4 +1,5 @@
 #include <libraries/minigl_ppc_transport.h>
+#include <libraries/minigl_ppc_yield.h>
 #include <libraries/minigl_ppc_trace.h>
 #include <proto/exec.h>
 #include <string.h>
@@ -32,8 +33,14 @@ void MGLPPCTransportClose(MGLPPCTransport *transport)
 
 BOOL MGLPPCTransportCall(MGLPPCTransport *transport, MGLPPCMessage *message)
 {
-    return MGLPPCTransportSend(transport, message) &&
-           MGLPPCTransportWait(transport, message);
+    BOOL result;
+
+    MGLPPCWatch[4] = message->command;
+    MGLPPCWatchSet(3UL, message->command);
+    result = MGLPPCTransportSend(transport, message) &&
+             MGLPPCTransportWait(transport, message);
+    MGLPPCWatchSet(4UL, message->command);
+    return result;
 }
 
 BOOL MGLPPCTransportSend(MGLPPCTransport *transport, MGLPPCMessage *message)

@@ -2066,6 +2066,58 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
                 detail = 70UL;
             else if (length != headerDwords)
                 detail = 71UL;
+            else if (options & ~RADEON3D_DRAW_OPTIONS)
+                detail = 90UL;
+            else if (hardwareTcl && (emitter->InterfaceVersion < 9UL ||
+                         !extendedVertex || !fragmentStatePresent ||
+                         perspective ||
+                         (transformFlags & ~RADEON3D_TRANSFORM_STATE_MASK) ||
+                         !(transformFlags &
+                            RADEON3D_TRANSFORM_POINT_SIZE_MASK)))
+                detail = 91UL;
+            else if (texGen)
+                detail = 92UL;
+            else if (normalVertex || lighting)
+                detail = 93UL;
+            else if (fragmentStatePresent &&
+                     ((textureState & ~(RADEON3D_TEX_STATE_MASK | RADEON3D_TEX_CONTENT_MASK)) ||
+                      minFilter > RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR ||
+                      (fragmentState & ~RADEON3D_FRAGMENT_STATE_MASK) ||
+                      sourceBlend > RADEON3D_BLEND_SRC_ALPHA_SATURATE ||
+                      destinationBlend > RADEON3D_BLEND_ONE_MINUS_DST_ALPHA))
+                detail = 94UL;
+            else if (extendedVertex &&
+                     ((vertexState & ~RADEON3D_VERTEX_STATE_MASK) ||
+                      (fog && perspective) ||
+                      (texture1State & ~(RADEON3D_TEX_STATE_MASK | RADEON3D_TEX_CONTENT_MASK)) ||
+                      minFilter1 > RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR ||
+                      (fogColor & 0xff000000UL)))
+                detail = 95UL;
+            else if (fragmentStatePresent &&
+                     (options & (RADEON3D_DRAW_BILINEAR | RADEON3D_DRAW_ALPHA_BLEND)))
+                detail = 96UL;
+            else if ((options & RADEON3D_DRAW_DEPTH_FUNC_MASK ||
+                      options & RADEON3D_DRAW_DEPTH_WRITE) &&
+                     !(options & RADEON3D_DRAW_DEPTH_LESS))
+                detail = 97UL;
+            else if (primitiveType == R200_CP_VC_CNTL_PRIM_TYPE_TRI_LIST &&
+                     (vertexCount < 3UL || vertexCount % 3UL))
+                detail = 98UL;
+            else if (textured && fragmentStatePresent &&
+                     minFilter >= RADEON3D_TEX_MIN_NEAREST_MIPMAP_NEAREST &&
+                     levels == 1UL)
+                detail = 99UL;
+            else if (textured1 && texture1 != texture &&
+                     ExecuteSurfacesOverlap(texture1, texture))
+                detail = 100UL;
+            else if (!textured1 && extendedVertex &&
+                     (texture1Handle || texture1Offset || texture1Size ||
+                      texture1State))
+                detail = 101UL;
+            else if (!fog && extendedVertex && fogColor)
+                detail = 102UL;
+            else if (!textured)
+                detail = 103UL;
             emitter->FailStage = detail;
         }
         return FALSE;

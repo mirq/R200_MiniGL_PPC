@@ -1952,7 +1952,9 @@ static BOOL PlatformCall(ULONG command, ULONG contextId)
         FrontendPlatform.mailboxOutstanding = TRUE;
         box->reqSerial = FrontendPlatform.mailboxSerial;
         MGLPPCFlushDataRange((APTR)&box->reqSerial, 32);
+        MGLPPCWatchSet(5UL, command);
         result = PlatformMailboxWait();
+        MGLPPCWatchSet(6UL, command);
         if (result) {
             MGLPPCInvalidateLine32((APTR)&box->ackValue[0]);
             FrontendPlatform.control.status = (LONG)box->status;
@@ -2257,7 +2259,12 @@ BOOL R200PPCPlatformOpen(void)
                GVF_GLOBAL_ONLY);
         {
             extern ULONG MGLPPCForceMip;
+            char watchLine[48];
+
             MGLPPCForceMip = verbose[0] == '1' ? 1UL : 0UL;
+            MGLPPCWatchSet(0UL, 0);
+            sprintf(watchLine, "watch %08lx\n", (unsigned long)MGLPPCWatch);
+            MGLPPCIBTrace("DH2:mglwatch.txt", watchLine);
         }
         verbose[0] = 0;
         GetVar((CONST_STRPTR)"MGLPPC_CLEARBLEND", verbose, (LONG)sizeof(verbose),
@@ -3014,7 +3021,19 @@ static BOOL CpRingReserve(volatile MGLPPCRingControlV1 *control, ULONG head,
     }
 }
 
+static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSlot *slot);
+
 static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *slot)
+{
+    BOOL result;
+
+    MGLPPCWatchSet(7UL, slot->recordCount);
+    result = PublishCpSlotBody(context, slot);
+    MGLPPCWatchSet(8UL, result);
+    return result;
+}
+
+static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSlot *slot)
 {
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
     volatile MGLPPCRingEntryV1 *entry;
@@ -3166,6 +3185,53 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     resolveDelta = CpPhaseResolveTicks - resolveBefore;
     CpPhaseEmitTicks += emitElapsed >= resolveDelta ? emitElapsed - resolveDelta : 0;
     if (!count || count > MGLPPC_CP_DWORDS) {
+        char line[160];
+
+        sprintf(line, "PUB emit stage=%lx surf=%lu/%08lx/%lu rec=%lu "
+                "op=%lu/%lu draws=%lu sb=%lu count=%lu\n",
+                (unsigned long)MGLPPCEmitFailStage,
+                (unsigned long)CpSurfFailReason,
+                (unsigned long)CpSurfFailToken,
+                (unsigned long)CpSurfFailValue,
+                (unsigned long)slot->recordCount,
+                (unsigned long)slot->records[0],
+                (unsigned long)slot->records[1],
+                (unsigned long)slot->drawCount,
+                (unsigned long)slot->stateBatch,
+                (unsigned long)count);
+        MGLPPCIBTrace("DH2:cpfail.log", line);
+        {
+            /* Dump the header of the draw the emitter stopped on. */
+            extern ULONG MGLPPCEmitFailDraw;
+            ULONG walk = 0, draw = 0, w;
+
+            while (walk + 1UL < slot->recordCount) {
+                ULONG op = slot->records[walk], len = slot->records[walk + 1UL];
+
+                if (len < 2UL || len > slot->recordCount - walk)
+                    break;
+                if (op != RADEON3D_EXEC_CLEAR) {
+                    if (draw == MGLPPCEmitFailDraw) {
+                        for (w = 0; w < len; w += 8UL) {
+                            ULONG k;
+                            char *p = line;
+
+                            p += sprintf(p, "D%lu@%lu:", (unsigned long)draw,
+                                         (unsigned long)(walk + w));
+                            for (k = w; k < len && k < w + 8UL; ++k)
+                                p += sprintf(p, " %08lx",
+                                             (unsigned long)slot->records[walk + k]);
+                            *p++ = '\n';
+                            *p = 0;
+                            MGLPPCIBTrace("DH2:cpfail.log", line);
+                        }
+                        break;
+                    }
+                    ++draw;
+                }
+                walk += len;
+            }
+        }
         failure = "emit";
         goto failed;
     }

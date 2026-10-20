@@ -19,6 +19,8 @@ typedef char MGLPPCHeaderCapacityCheck[
 
 static struct Radeon3DEmitter MGLPPCEmitter;
 ULONG MGLPPCEmitFailStage;
+/* Draw index reached by the emitter when it rejected a batch. */
+ULONG MGLPPCEmitFailDraw;
 static ULONG MGLPPCEmitHeader[MGLPPC_EMIT_MAX_HEADER];
 
 struct MGLPPCEmitResolver {
@@ -65,6 +67,10 @@ static struct Radeon3DEmitSurface *MGLPPCResolveSurface(
     return slot;
 }
 
+/* Pre-emit validation rejects record a distinct MGLPPCEmitFailStage
+ * (0x1001..) so a publish failure can name the check that refused it. */
+#define EMIT_REJECT(stage) do { MGLPPCEmitFailStage = (stage); return 0; } while (0)
+
 ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
                      const struct MGLPPCEmitVertices *vertices,
                      MGLPPCEmitResolve resolve, void *user)
@@ -78,13 +84,13 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     MGLPPCEmitFailStage = 0xffffUL;
     if (!words || !records || !resolve || !recordDwords ||
         recordDwords > MGLPPC_CP_DWORDS)
-        return 0;
+        EMIT_REJECT(0x1001UL);
     if (vertices && (!vertices->offsets || !vertices->drawCount ||
         vertices->drawCount > RADEON3D_STATE_BATCH_MAX_DRAWS ||
         !vertices->bytes || vertices->bytes > RADEON3D_MAX_SEGMENT_BYTES ||
         (vertices->gpuAddress & 3UL) ||
         vertices->bytes - 1UL > 0xffffffffUL - vertices->gpuAddress))
-        return 0;
+        EMIT_REJECT(0x1002UL);
 
     if (stateBatch) {
         if (recordDwords < RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS ||
@@ -92,7 +98,7 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
             vertices->drawCount > (MGLPPC_CP_DWORDS - recordDwords) / 2UL ||
             records[1] != recordDwords ||
             !Radeon3DEmitPrimitiveType(records[0], &primitiveType))
-            return 0;
+            EMIT_REJECT(0x1003UL);
     } else {
         /* The shared emitter consumes offsets without an array length. Walk
          * first, as CommitRecords does, before it can index that array. */
@@ -101,30 +107,30 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
             ULONG opcode, length;
 
             if (recordDwords - walk < 2UL)
-                return 0;
+                EMIT_REJECT(0x1004UL);
             opcode = records[walk];
             length = records[walk + 1UL];
             if (length < 2UL || length > recordDwords - walk)
-                return 0;
+                EMIT_REJECT(0x1005UL);
             if (opcode >= RADEON3D_EXEC_DRAW_TRIANGLES &&
                 opcode <= RADEON3D_EXEC_DRAW_LINE_LOOP) {
                 if (length < RADEON3D_EXEC_DRAW_HEADER_DWORDS)
-                    return 0;
+                    EMIT_REJECT(0x1006UL);
                 ++draws;
             } else if (vertices && opcode >= RADEON3D_EXEC_REUSE_TRIANGLES &&
                        opcode <= RADEON3D_EXEC_REUSE_LINE_LOOP) {
                 if (length != RADEON3D_EXEC_REUSE_DWORDS)
-                    return 0;
+                    EMIT_REJECT(0x1007UL);
                 ++draws;
             } else if (opcode != RADEON3D_EXEC_CLEAR ||
                        length != RADEON3D_EXEC_CLEAR_DWORDS)
-                return 0;
+                EMIT_REJECT(0x1008UL);
             if (draws > RADEON3D_STATE_BATCH_MAX_DRAWS)
-                return 0;
+                EMIT_REJECT(0x1009UL);
             walk += length;
         }
         if (vertices && draws != vertices->drawCount)
-            return 0;
+            EMIT_REJECT(0x100AUL);
     }
     if (vertices) {
         for (index = 0; index < vertices->drawCount; ++index) {
@@ -132,7 +138,7 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
 
             if ((offset & 3UL) || offset >= vertices->bytes ||
                 (stateBatch && !vertices->offsets[index * 2UL + 1UL]))
-                return 0;
+                EMIT_REJECT(0x100BUL);
         }
     }
 
@@ -178,6 +184,7 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
         if (vertices && emitter->CommitDrawIndex != vertices->drawCount)
             built = FALSE;
     }
+    MGLPPCEmitFailDraw = emitter->CommitDrawIndex;
     emitter->CommitVbuf = FALSE;
     emitter->CommitSegmentGpuBase = 0;
     emitter->CommitSegmentBytes = 0;
