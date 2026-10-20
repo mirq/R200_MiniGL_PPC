@@ -198,6 +198,12 @@ typedef uint32_t ULONG;
  * the client negotiated CP emit AND the host advertised fence coalescing;
  * a host without that support never sets entry.flags from this bit. */
 #define MGLPPC_SEMANTIC_FLAG_DRAIN (1UL << 6)
+/* Largest single CP batch (RADEON3D_MAX_BATCH_DWORDS). Since ring control
+ * v7 the PPC packs batches into the CP segment as a FIFO ring at 16-byte
+ * granularity instead of one fixed slice per ring slot: an entry's payload
+ * names any 16-byte aligned offset whose dword count fits the segment, and
+ * the space is reused only after the entry retires. Quake-class batches
+ * average ~2.5 KB, so fixed 32 KB slices capped the queue at 8 batches. */
 #define MGLPPC_CP_SLICE_BYTES (8192UL * 4UL)
 #define MGLPPC_CP_SEGMENT_BYTES (8UL * MGLPPC_CP_SLICE_BYTES)
 /* ~64 KB chunks: the 65535-byte Exec message limit leaves 16363 payload
@@ -328,9 +334,12 @@ static __inline__ int MGLPPCTextureRect(ULONG baseWidth, ULONG baseHeight,
  * (CacheClearE) before Execute, exactly as in the v10 message path. */
 #define MGLPPC_RING_MAGIC 0x52494e47UL
 /* v6 appends the live color-target publication (colorToken/colorSeq). Both
- * peers must agree; a v5 peer fails ring registration and falls back. */
-#define MGLPPC_RING_CONTROL_VERSION 6UL
-#define MGLPPC_RING_SLOTS 8UL
+ * peers must agree; a v5 peer fails ring registration and falls back.
+ * v7 raises the ring to 32 slots (deeper PPC run-ahead: at 8 the frontend
+ * spent ~4.5 ms of every Quake frame waiting for slice retirement) and
+ * packs CP batches into the CP segment (see MGLPPC_CP_SLICE_BYTES). */
+#define MGLPPC_RING_CONTROL_VERSION 7UL
+#define MGLPPC_RING_SLOTS 32UL
 #define MGLPPC_EVENT_SLOTS 16UL
 #define MGLPPC_RING_SEGMENT_BYTES (64UL * 1024UL)
 /* Vertex streaming segments leased with the ring; the PPC writes vertex

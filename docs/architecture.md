@@ -215,7 +215,7 @@ Three channels, each chosen for a different latency/ownership profile:
 | Channel | Direction | Used for | Notes |
 |---|---|---|---|
 | Exec `MsgPort` (`MiniGLPPC.R200.Host.1`) | PPC → 68k, reply messages | Lifecycle and control: HELLO, CREATE/DESTROY, BIND_TEXTURE, upload begin/commit, readback, VRAM probe | Protocol v15 message header; one outstanding request per channel as encoded in the command semantics |
-| Ring | PPC → 68k one-way, 68k → PPC control block | Hot path: semantic draw slots, present markers, retired/completed/present sequence feedback | 64 KiB segment, 8 slots x 8192 dwords, control version 6 |
+| Ring | PPC → 68k one-way, 68k → PPC control block | Hot path: semantic draw slots, present markers, retired/completed/present sequence feedback | 64 KiB segment, 32 slots x 8192 dwords, control version 7 |
 | Mailbox | PPC ↔ 68k synchronous | Low-latency queries/commands where an Exec round trip is too expensive (GET_INTEGER, texture direct begin/commit, CP surface, upload-shared gating) | 160 bytes at ring offset 4096; serial/ack; 5 s timeout poisons the session |
 
 Registration (`MGLPPC_CMD_REGISTER_SEMANTIC_RING`) negotiates capabilities and
@@ -230,7 +230,7 @@ through the mapped addresses it is given.
 | Ring segment | 64 KiB | host leases, PPC publishes |
 | Ring slots | 8 x 8192 dwords | frontend rotates |
 | Vertex segments | 4 (segment size driver-defined, ≤256 KiB each) | host leases |
-| CP segment (opt-in) | 256 KiB, 8 x 32 KiB slices | host leases |
+| CP segment (opt-in) | 256 KiB, batches packed as a FIFO (v7), at most 32 KiB each | host leases |
 | Mailbox | 160 bytes inside ring at +4096 | both |
 | Texture shared staging | ≤2 MiB per transfer; 64 KiB chunks on Exec | PPC `MEMF_PUBLIC`, host invalidates |
 | Submit slots (frontend) | 2 (one active, one in flight) | frontend |

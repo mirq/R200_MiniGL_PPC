@@ -231,7 +231,9 @@ With `MGLPPC_CPEMIT=1` the frontend bypasses semantic records for draws and
 instead builds driver-format command packets in a leased 256 KiB CP segment,
 using the shared `radeon3d_emit.c`. `MGLPPCEmitBatch` accepts up to 8192 dwords
 and 192 draws, publishes `[byteOffset, dwordCount, vertexSegmentMask]`, and
-reuses slices only after retirement. Surface descriptors are cached (default
+packs batches into the CP segment as a FIFO (`CpRingReserve`, ring control
+v7): a batch's space is reused only after its entry retires, and the PPC may
+run up to 32 entries ahead of retirement. Surface descriptors are cached (default
 128) and invalidated on resource/lifecycle changes. Fullscreen BLIT is
 validated; FLIP has a documented race. Deep spec:
 [reference/CP_EMITTER.md](reference/CP_EMITTER.md).

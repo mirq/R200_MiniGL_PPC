@@ -820,7 +820,8 @@ typedef struct R200PPCFrontendPlatform {
         (MGLPPC_MESSAGE_SIZE(MGLPPC_TEXTURE_CHUNK_WORDS) +
          sizeof(ULONG) - 1UL) / sizeof(ULONG)];
     ULONG registerMessageWords[
-        (MGLPPC_MESSAGE_SIZE(16) + sizeof(ULONG) - 1UL) / sizeof(ULONG)];
+        (MGLPPC_MESSAGE_SIZE(MGLPPC_RING_SLOTS > 16UL ? MGLPPC_RING_SLOTS : 16UL) +
+         sizeof(ULONG) - 1UL) / sizeof(ULONG)];
     MGLPPCMessage execute[SUBMIT_SLOT_COUNT];
     ULONG generation[SUBMIT_SLOT_COUNT];
     BOOL pending[SUBMIT_SLOT_COUNT];
@@ -868,6 +869,12 @@ typedef struct R200PPCFrontendPlatform {
      * waits only for the previous batch's fence (one batch in flight). */
     BOOL leaseNoPresent;
     ULONG leaseNoIdle;
+    /* v7 CP segment FIFO: next free byte, and per ring slot the serial,
+     * start and size of the batch it published (bytes 0: no batch). */
+    ULONG cpRingCursor;
+    ULONG cpEntrySerial[MGLPPC_RING_SLOTS];
+    ULONG cpEntryStart[MGLPPC_RING_SLOTS];
+    ULONG cpEntryBytes[MGLPPC_RING_SLOTS];
     /* Emit staging for lease batches: batch dwords + 6-dword fence tail
      * + padding to the ring's 16-dword alignment. Kept separate from the
      * transport slot buffers so the lease path never fights the bounded
@@ -2851,6 +2858,83 @@ static void R200PPCLeaseResume(volatile MGLPPCRingControlV1 *control)
     }
 }
 
+/* v7 CP segment FIFO. Batches are packed at 16-byte granularity; the
+ * region of the oldest unretired batch-bearing entry is the tail, so a
+ * batch's space is reused only after its entry retired -- the same GPU-read
+ * guard the fixed slices had, at a fraction of the space per batch. A batch
+ * that does not fit before the segment end wraps to offset 0 (the skipped
+ * tail stays unused until it retires). Waits use the progress-aware policy
+ * of the publish loop and are attributed to CP_WAIT fence. */
+static BOOL CpRingFits(ULONG cursor, ULONG tail, BOOL empty, ULONG bytes,
+                       ULONG *offset)
+{
+    if (empty) {
+        *offset = cursor + bytes <= MGLPPC_CP_SEGMENT_BYTES ? cursor : 0;
+        return TRUE;
+    }
+    if (cursor > tail) {
+        if (cursor + bytes <= MGLPPC_CP_SEGMENT_BYTES) {
+            *offset = cursor;
+            return TRUE;
+        }
+        if (bytes < tail) {
+            *offset = 0;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    /* cursor == tail with live batches means the FIFO is full. */
+    if (cursor < tail && cursor + bytes < tail) {
+        *offset = cursor;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL CpRingReserve(volatile MGLPPCRingControlV1 *control, ULONG head,
+                          ULONG bytes, ULONG *offset)
+{
+    ULONG spin = 0, retiredSeen = 0, waitStart = 0;
+
+    for (;;) {
+        ULONG serial, tail = 0;
+        BOOL empty = TRUE;
+
+        MGLPPCInvalidateLine32((APTR)&control->retired);
+        for (serial = control->retired; serial != head; ++serial) {
+            ULONG ringSlot = serial % MGLPPC_RING_SLOTS;
+
+            if (FrontendPlatform.cpEntrySerial[ringSlot] == serial &&
+                FrontendPlatform.cpEntryBytes[ringSlot]) {
+                tail = FrontendPlatform.cpEntryStart[ringSlot];
+                empty = FALSE;
+                break;
+            }
+        }
+        if (CpRingFits(FrontendPlatform.cpRingCursor, tail, empty, bytes,
+                       offset)) {
+            if (waitStart)
+                CpWaitFenceTicks += PerfClock() - waitStart;
+            return TRUE;
+        }
+        if (!waitStart) {
+            waitStart = PerfClock();
+            retiredSeen = control->retired;
+        }
+        if (control->error || control->epoch != FrontendPlatform.epoch ||
+            PerfClock() - waitStart >= PlatformClockRate * 5UL)
+            return FALSE;
+        if (control->retired != retiredSeen) {
+            retiredSeen = control->retired;
+            spin = 0;
+        }
+        if (++spin >= MGLPPC_RING_YIELD_SPINS) {
+            spin = 0;
+            MGLPPCYield();
+        }
+    }
+}
+
 static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *slot)
 {
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
@@ -2864,6 +2948,7 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     ULONG waitSamples = 0, waitSampleTime = 0, waitClass = 0;
     ULONG *staging, start = PerfClock(), spin = 0;
     ULONG waitStart, emitStart, copyStart, publishStart;
+    ULONG cpBytes, cpOffset = 0;
     ULONG resolveBefore, emitElapsed, resolveDelta;
     const char *failure = "ring";
     /* Interface-20 lease: the frontend owns the ring; the bounded-path
@@ -3012,14 +3097,23 @@ static BOOL PublishCpSlot(struct MiniGLR200Context *context, struct SubmitSlot *
     if (vertices.drawCount)
         MGLPPCFlushDataRange((APTR)((ULONG)context->segment.info.CpuAddress +
             context->buildSlot * SEGMENT_HALF_BYTES), slot->segmentCursor);
+    cpBytes = (count * sizeof(ULONG) + 15UL) & ~15UL;
+    if (!CpRingReserve(control, head, cpBytes, &cpOffset)) {
+        failure = control->error ? "host_error" : "cpspace";
+        goto failed;
+    }
     destination = (volatile ULONG *)((UBYTE *)FrontendPlatform.cpAddress +
-                                     ringSlot * MGLPPC_CP_SLICE_BYTES);
+                                     cpOffset);
     copyStart = PerfClock();
     for (index = 0; index < count; ++index)
         destination[index] = __builtin_bswap32(staging[index]);
     MGLPPCFlushDataRange((APTR)destination, count * sizeof(ULONG));
     (void)destination[count - 1UL];
-    staging[0] = ringSlot * MGLPPC_CP_SLICE_BYTES;
+    FrontendPlatform.cpEntrySerial[ringSlot] = head;
+    FrontendPlatform.cpEntryStart[ringSlot] = cpOffset;
+    FrontendPlatform.cpEntryBytes[ringSlot] = cpBytes;
+    FrontendPlatform.cpRingCursor = cpOffset + cpBytes;
+    staging[0] = cpOffset;
     staging[1] = count;
     staging[2] = vertices.drawCount ? 1UL << segmentIx : 0;
     MGLPPCFlushDataRange(staging, 3UL * sizeof(ULONG));
@@ -3931,6 +4025,9 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     FrontendPlatform.cpAddress = NULL;
     FrontendPlatform.cpBytes = FrontendPlatform.cpSurfaceCount = 0;
     FrontendPlatform.cpColorToken = FrontendPlatform.cpColorSeq = 0;
+    FrontendPlatform.cpRingCursor = 0;
+    memset(FrontendPlatform.cpEntryBytes, 0,
+           sizeof(FrontendPlatform.cpEntryBytes));
     {
         UBYTE flag[8];
         flag[0] = 0;
