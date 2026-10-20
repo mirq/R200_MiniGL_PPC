@@ -683,6 +683,10 @@ struct MiniGLR200Context {
      * released; see struct DeferredSurface. Reaped at present and in
      * DestroyContext, both of which follow a full drain. */
     struct DeferredSurface *deferredSurfaces;
+    /* Previous direct residencies parked by MGL_R200_TEXDIRECT_REQ_PARK_OLD;
+     * their last use is tracked by the PPC host, which frees them with
+     * TEXDIRECT_REAP_V1 (and DestroyContext after its drain). */
+    struct DeferredSurface *hostParkedSurfaces;
     GLuint boundTexture[2];
     /* glDrawElements gathers each referenced index once into this cache
      * (generation-stamped, so no clearing between draws) and expands the
@@ -926,6 +930,7 @@ BOOL SyncTextureDirty(struct MiniGLR200Context *context,
 ULONG TextureState(const struct MiniGLR200Context *context,
                    const struct TextureObject *texture, ULONG unit);
 void ReapDeferredSurfaces(struct MiniGLR200Context *context);
+ULONG ReapHostParkedSurfaces(struct MiniGLR200Context *context);
 void CopyBytes(void *destination, const void *source, ULONG count);
 BOOL SourceFormatBytes(GLenum format, GLenum type, ULONG *bytes);
 BOOL BeginDirectTexture(struct MiniGLR200Context *context,

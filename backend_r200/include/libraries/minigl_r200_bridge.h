@@ -65,6 +65,9 @@ typedef char MGLR200PrivateSurfaceV1SizeCheck[
  * V2 texture preflight is allocation-free for direct textures, V1 postquery
  * returns the new image-backed residency. No eager BEGIN/COMMIT pixel copy. */
 #define MGL_R200_PRIVATE_TEXTURE_CAP_SUBIMAGE_DIRECT_BGRA (1UL << 0)
+/* TEXDIRECT_BEGIN_V2 honours MGL_R200_TEXDIRECT_REQ_PARK_OLD and the
+ * TEXDIRECT_REAP_V1 query exists. */
+#define MGL_R200_PRIVATE_TEXTURE_CAP_DIRECT_PARK (1UL << 1)
 
 typedef struct MGLR200PrivateBridgeV1 {
     ULONG version;
@@ -246,6 +249,14 @@ typedef char MGLR200PrivateTexDirectAbortV1SizeCheck[
 #define MGL_R200_PRIVATE_TEXDIRECT_BEGIN_V2_VERSION 3UL
 #define MGL_R200_TEXDIRECT_FMT_BGRA32 0UL
 #define MGL_R200_TEXDIRECT_FMT_RGB565 1UL
+/* requestFormat flag (CAP_DIRECT_PARK): instead of releasing the previous
+ * residency - Radeon3DReleaseSurface waits for the device's newest fence,
+ * a full drain - Begin moves it to a host-parked list and reports
+ * MGL_R200_TEXDIRECT_FLAG_PARKED. The caller owns its lifetime and frees
+ * it with TEXDIRECT_REAP_V1 once every submission that may sample it has
+ * retired. */
+#define MGL_R200_TEXDIRECT_REQ_PARK_OLD (1UL << 8)
+#define MGL_R200_TEXDIRECT_FMT_MASK 0xffUL
 
 typedef struct MGLR200PrivateTexDirectBeginV2 {
     ULONG version;
@@ -261,9 +272,12 @@ typedef struct MGLR200PrivateTexDirectBeginV2 {
     ULONG deviceEpoch;
     /* bit0: surface is driver-owned aux VRAM - the PPC writes it
      * directly through the copyback aperture and COMMIT must not
-     * copy. */
+     * copy. bit1 (MGL_R200_TEXDIRECT_FLAG_PARKED): the previous
+     * residency was moved to the host-parked list. */
     ULONG flags;
 } MGLR200PrivateTexDirectBeginV2;
+
+#define MGL_R200_TEXDIRECT_FLAG_PARKED (1UL << 1)
 
 typedef char MGLR200PrivateTexDirectBeginV2SizeCheck[
     sizeof(MGLR200PrivateTexDirectBeginV2) == 48 ? 1 : -1];
@@ -291,6 +305,22 @@ typedef struct MGLR200PrivateTexDirectCommitV2 {
 
 typedef char MGLR200PrivateTexDirectCommitV2SizeCheck[
     sizeof(MGLR200PrivateTexDirectCommitV2) == 44 ? 1 : -1];
+
+/* Releases every surface parked by MGL_R200_TEXDIRECT_REQ_PARK_OLD. The
+ * caller guarantees that all GPU work which may sample them has retired
+ * (so the release's newest-fence wait returns at once). Output: released
+ * count. */
+#define MGL_R200_PRIVATE_TEXDIRECT_REAP_V1_QUERY 0x4d475015UL
+#define MGL_R200_PRIVATE_TEXDIRECT_REAP_V1_VERSION 1UL
+
+typedef struct MGLR200PrivateTexDirectReapV1 {
+    ULONG version;
+    ULONG structSize;
+    ULONG released;
+} MGLR200PrivateTexDirectReapV1;
+
+typedef char MGLR200PrivateTexDirectReapV1SizeCheck[
+    sizeof(MGLR200PrivateTexDirectReapV1) == 12 ? 1 : -1];
 
 /* Fullscreen BLIT-mode present prepared for a CP-queued copy (host-side
  * MGLPPC_CPPRESENT). The library runs every part of mglSwitchDisplay()'s

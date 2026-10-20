@@ -452,6 +452,29 @@ ULONG FullMipLevelCount(ULONG width, ULONG height)
     return levels;
 }
 
+/* Frees the residencies BeginDirectTexture parked for the PPC host. Only
+ * called once the host has seen every submission retire, so each release's
+ * newest-fence wait is already satisfied. */
+ULONG ReapHostParkedSurfaces(struct MiniGLR200Context *context)
+{
+    ULONG released = 0;
+
+    while (context->hostParkedSurfaces) {
+        struct DeferredSurface *node = context->hostParkedSurfaces;
+
+        context->hostParkedSurfaces = node->next;
+        /* Closing the old device already destroyed its handles. */
+        if (context->device && node->deviceEpoch == context->deviceEpoch &&
+            node->surface.Handle)
+            Radeon3DReleaseSurface(context->device, &node->surface);
+        if (node->bitmap)
+            p96FreeBitMap(node->bitmap);
+        FreeMem(node, sizeof(*node));
+        ++released;
+    }
+    return released;
+}
+
 BOOL ReleaseTextureStorage(struct MiniGLR200Context *context,
                                   struct TextureObject *texture,
                                   BOOL allowDefer)
@@ -498,7 +521,10 @@ BOOL BeginDirectTexture(struct MiniGLR200Context *context,
                         struct MGLR200PrivateTexDirectBeginV2 *bridge)
 {
     struct TextureObject *texture;
-    ULONG want565 = requestFormat == MGL_R200_TEXDIRECT_FMT_RGB565;
+    BOOL park = (requestFormat & MGL_R200_TEXDIRECT_REQ_PARK_OLD) != 0;
+    BOOL parked = FALSE;
+    ULONG want565 = (requestFormat & MGL_R200_TEXDIRECT_FMT_MASK) ==
+                    MGL_R200_TEXDIRECT_FMT_RGB565;
     ULONG grantedFormat = want565 ? RADEON3D_FORMAT_R5G6B5PC
                                   : RADEON3D_FORMAT_B8G8R8A8;
     /* Aux surfaces measured 229 ms/tile from the PPC (3.6x slower than
@@ -517,6 +543,29 @@ BOOL BeginDirectTexture(struct MiniGLR200Context *context,
         return FALSE;
     if (!FlushScreenVertices(context))
         return FALSE;
+    if (park && texture->resident &&
+        texture->residentDeviceEpoch == context->deviceEpoch) {
+        /* The host knows when the PPC's submissions that may still sample
+         * this residency retire; the library does not (no lastUseFence on
+         * the CP path), so hand it over instead of draining here. */
+        struct DeferredSurface *node;
+
+        if (TextureQueued(context, texture) && !Submit(context))
+            return FALSE;
+        node = AllocMem(sizeof(*node), MEMF_PUBLIC);
+        if (node) {
+            node->surface = texture->surface;
+            node->bitmap = texture->bitmap;
+            node->fence = 0;
+            node->deviceEpoch = context->deviceEpoch;
+            node->next = context->hostParkedSurfaces;
+            context->hostParkedSurfaces = node;
+            texture->lastUseFence = 0;
+            texture->lastUseDeviceEpoch = 0;
+            DetachResidency(context, texture);
+            parked = TRUE;
+        }
+    }
     if (!ReleaseTextureStorage(context, texture, TRUE))
         return FALSE;
     texture->direct = TRUE;
@@ -605,7 +654,7 @@ BOOL BeginDirectTexture(struct MiniGLR200Context *context,
     bridge->format = texture->directSurface.Format;
     bridge->bytes = bridge->pitch * height;
     bridge->deviceEpoch = context->deviceEpoch;
-    bridge->flags = 0UL;
+    bridge->flags = parked ? MGL_R200_TEXDIRECT_FLAG_PARKED : 0UL;
     return TRUE;
 fail:
     if (texture->bitmap) {

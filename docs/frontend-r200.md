@@ -207,6 +207,35 @@ device epoch, content/last-use serials and a fence, plus a `queuedBatchSerial`
 for deferred uploads. Eviction is ownership/fence based
 (`ReapDeferredSurfaces`), not "last historical fence".
 
+Repeated `glTexSubImage2D` on a shadow-backed POT texture (Quake lightmap
+atlases) has two CP-path accelerations (2026-10-20):
+
+- **Parked re-commit.** With `TEXTURE_DIRECT_PARK` the direct re-commit waits
+  only for the host to consume the ring (`completed == head`,
+  `FrontendWaitRingConsumed`) instead of `R200PPCPlatformBarrier(FALSE)`
+  (`retired == head`). The host parks the replaced residency and frees it
+  once everything retired. `MGLPPC_NOPARK=1` restores the drain.
+- **Lightmap surface pool** (`FrontendLmPoolUpdate`). From a texture's second
+  subimage it gets 3 holder surfaces: library textures under reserved names
+  from `MAX_TEXTURES-1` down, created once through direct BEGIN/COMMIT, with
+  descriptors in a 256-entry hash consulted before the descriptor cache.
+  An update needs no 68k call:
+  1. Patch the shadow.
+  2. Stamp the current slot's last use as `head + 1`; the records naming it
+     can only go into the next entry, since one Submit publishes exactly one
+     entry.
+  3. Pick a retired slot that is not current, publishing only if every
+     candidate waits on the unpublished entry.
+  4. Copy the rows changed since that slot was last written (8-update
+     history, else the full image) with plain stores, and flush.
+  5. Re-point the texture's token at the slot.
+
+  A slot is never rewritten while current or before its last sampling
+  retired; that is the reuse discipline the free/re-import path already
+  relied on for this GPU's non-invalidating texture cache. A redefinition
+  (token no longer the current slot) forces full rewrites.
+  `MGLPPC_NOPOOL=1` disables the pool.
+
 ## 8. Submission feedback and the device epoch
 
 Ring control publishes `head`, `completed`, `retired`, `presentSeq` and
@@ -306,6 +335,8 @@ sequenceDiagram
 | `MGLPPC_NOALTIVEC` / `MGLPPC_ALTIVEC` | force scalar / vector serialization |
 | `MGLPPC_VERIFY` | read back and compare AltiVec results |
 | `MGLPPC_PROFILE` | frontend profiler buckets (profile builds only) |
+| `MGLPPC_NOPARK` | `1`: subimage re-commits drain the GPU instead of parking the old residency (A/B) |
+| `MGLPPC_NOPOOL` | `1`: no PPC-owned lightmap surface pools (A/B) |
 
 ## 12. Invariants to preserve
 

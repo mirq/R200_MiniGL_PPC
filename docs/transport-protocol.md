@@ -104,6 +104,7 @@ optional features are used. Bit assignments:
 | 15 | `FENCE_DRAIN` | explicit fence drain support |
 | 16 | `PPC_RING` | reserved (early v16 draft; the live bit is the ring-register reply) |
 | 17 | `MAILBOX_LEASE` | `LEASE_BEGIN/HEARTBEAT/END` served through the mailbox |
+| 18 | `TEXTURE_DIRECT_PARK` | `TEXTURE_DIRECT_BEGIN` honours `MGLPPC_TEXDIRECT_REQ_PARK_OLD` (value[3] bit 8): the replaced residency is parked host-side instead of released behind a GPU drain; offered only when the library reports `MGL_R200_PRIVATE_TEXTURE_CAP_DIRECT_PARK` |
 
 The host speaks protocol 16; a BAD_VERSION HELLO downgrades the DLL to 14; ring control
 v5 peers fail ring registration (v6 adds `colorToken`/`colorSeq`) and fall back.

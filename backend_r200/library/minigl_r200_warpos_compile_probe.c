@@ -300,6 +300,11 @@ void R200PPCTraceUL2(const char *label1, ULONG value1,
  * silent unless MGLPPC_VERBOSE is set in the environment. The trace file
  * (DH2:wosbuild/mglppc_client.log) is separately compile-time gated. */
 static ULONG FrontendConsoleVerbose;
+/* MGLPPC_NOPARK=1: subimage re-commits drain instead of parking (A/B). */
+static ULONG FrontendNoPark;
+/* MGLPPC_NOPOOL=1: no PPC-owned lightmap surface pools (A/B). */
+static ULONG FrontendNoPool;
+static void FrontendLmPoolReset(void);
 
 /* EXP-FORCENORMAL: A/B switch (MGLPPC_FORCENORMAL env) that puts
  * hardware-TCL draws on the normal-vertex layout. Diagnostic only. */
@@ -2238,6 +2243,15 @@ BOOL R200PPCPlatformOpen(void)
         GetVar((CONST_STRPTR)"MGLPPC_VERBOSE", verbose, (LONG)sizeof(verbose),
                GVF_GLOBAL_ONLY);
         FrontendConsoleVerbose = verbose[0] ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NOPARK", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        FrontendNoPark = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NOPOOL", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        FrontendNoPool = verbose[0] == '1' ? 1UL : 0UL;
+        FrontendLmPoolReset();
         /* EXP-FORCENORMAL: A/B switch for the 2D layout investigation.
          * Forces hardware-TCL draws onto the normal-vertex layout (13 or
          * compact-10 dwords, DRAW_NORMALS set) so the TCL input state of
@@ -2371,6 +2385,55 @@ failed:
     return FALSE;
 }
 
+/* Descriptors of pooled lightmap holder surfaces (see FrontendLmPoolUpdate).
+ * Kept outside the 128-entry descriptor cache: a pool rotates three tokens
+ * per atlas every frame and would thrash it. Open addressing on the handle
+ * address; entries live as long as the context (holders are never freed
+ * before DestroyContext). */
+#define R200_POOL_HASH 256UL
+
+static struct {
+    ULONG token, epoch;
+    struct MGLPPCEmitSurface surface;
+} FrontendPoolHash[R200_POOL_HASH];
+
+static BOOL FrontendPoolResolve(ULONG token, ULONG epoch,
+                                struct MGLPPCEmitSurface *out)
+{
+    ULONG index = (token >> 3) & (R200_POOL_HASH - 1UL), probe;
+
+    for (probe = 0; probe < R200_POOL_HASH; ++probe) {
+        if (!FrontendPoolHash[index].token)
+            return FALSE;
+        if (FrontendPoolHash[index].token == token) {
+            if (FrontendPoolHash[index].epoch != epoch)
+                return FALSE;
+            *out = FrontendPoolHash[index].surface;
+            return TRUE;
+        }
+        index = (index + 1UL) & (R200_POOL_HASH - 1UL);
+    }
+    return FALSE;
+}
+
+static BOOL FrontendPoolHashInsert(ULONG token, ULONG epoch,
+                                   const struct MGLPPCEmitSurface *surface)
+{
+    ULONG index = (token >> 3) & (R200_POOL_HASH - 1UL), probe;
+
+    for (probe = 0; probe < R200_POOL_HASH; ++probe) {
+        if (!FrontendPoolHash[index].token ||
+            FrontendPoolHash[index].token == token) {
+            FrontendPoolHash[index].token = token;
+            FrontendPoolHash[index].epoch = epoch;
+            FrontendPoolHash[index].surface = *surface;
+            return TRUE;
+        }
+        index = (index + 1UL) & (R200_POOL_HASH - 1UL);
+    }
+    return FALSE;
+}
+
 static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
                                   struct MGLPPCEmitSurface *out)
 {
@@ -2381,6 +2444,10 @@ static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
     if (!token || !FrontendPlatform.cpEnabled || FrontendPlatform.cpFailed) {
         CpSurfFailReason = 1;
         return FALSE;
+    }
+    if (FrontendPoolResolve(token, context->deviceEpoch, out)) {
+        ++CpSurfHits;
+        return TRUE;
     }
     for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index)
         if (FrontendPlatform.cpSurfaces[index].token == token) {
@@ -5845,6 +5912,41 @@ static void FrontendDirectWritePixels(UBYTE *destination, ULONG pitch,
     }
 }
 
+/* MGLPPC_TEXDIRECT_REQ_PARK_OLD for the next direct BEGIN; set only around
+ * the subimage re-commit. */
+static ULONG FrontendDirectRequestFlags;
+
+/* Park-mode subimage ordering: the host must have consumed (dispatched)
+ * every published entry before BEGIN, so a replaced residency is only
+ * named by work the host already queued - which its reap waits out - and a
+ * VRAM-pressure eviction inside BEGIN cannot free a surface an unconsumed
+ * entry still names. Unlike R200PPCPlatformBarrier(FALSE) this does not
+ * wait for the GPU to retire anything. */
+static BOOL FrontendWaitRingConsumed(void)
+{
+    volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
+    ULONG spin = 0;
+    ULONG seen;
+
+    if (!control)
+        return TRUE;
+    seen = control->completed;
+    while (control->completed != control->head) {
+        if (!(spin & 255UL)) {
+            MGLPPCInvalidateLine32((APTR)&control->completed);
+            if (control->completed != seen) {
+                seen = control->completed;
+                spin = 0;
+            }
+        }
+        if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
+            MGLPPCYield();
+        if (control->error || ++spin > 5000000UL)
+            return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL FrontendDirectTextureUploadNamed(struct MiniGLR200Context *context,
                                              ULONG textureName, ULONG width,
                                              ULONG height, GLenum format,
@@ -5872,7 +5974,8 @@ static BOOL FrontendDirectTextureUploadNamed(struct MiniGLR200Context *context,
     FrontendPlatform.control.value[0] = textureName;
     FrontendPlatform.control.value[1] = width;
     FrontendPlatform.control.value[2] = height;
-    FrontendPlatform.control.value[3] = requestFormat;
+    FrontendPlatform.control.value[3] = requestFormat |
+                                        FrontendDirectRequestFlags;
 #if MGLPPC_PROFILE
     phaseStart = PerfClock();
 #endif
@@ -5941,6 +6044,240 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
     return FrontendDirectTextureUploadNamed(context,
         context->boundTexture[context->activeTexture], width, height,
         format, type, source, sourceStride, shadowDestination);
+}
+
+/* PPC-owned lightmap surface pools. A texture that keeps receiving
+ * subimages (Quake's lightmap atlases, several per frame with dynamic
+ * lights) gets R200_POOL_SLOTS library-owned holder surfaces, created once
+ * through the direct BEGIN/COMMIT path under reserved texture names. An
+ * update then needs no 68k at all: patch the shadow, publish the records
+ * that still name the current slot (its last use is the ring head), pick
+ * a slot whose last use has retired, copy the rows that changed since that
+ * slot was last written, and point the texture's token at it. The R200
+ * texture cache never re-reads a rewritten line (p96-driver docs/07), so a
+ * slot is rewritten only after its last sampling retired and never while
+ * it is the current one; the reuse distance (two other slots in between)
+ * is what the free/re-import path already relied on. */
+#define R200_POOL_SLOTS 3UL
+#define R200_POOL_MAX 64UL
+#define R200_POOL_HISTORY 8UL
+#define R200_POOL_NONE 0xffffffffUL
+
+struct FrontendLmPoolSlot {
+    ULONG token, cpu, lastUse, written;
+};
+
+static struct FrontendLmPool {
+    ULONG width, height, epoch, serial, current;
+    ULONG histSerial[R200_POOL_HISTORY];
+    UWORD histTop[R200_POOL_HISTORY], histEnd[R200_POOL_HISTORY];
+    struct FrontendLmPoolSlot slot[R200_POOL_SLOTS];
+} FrontendLmPools[R200_POOL_MAX];
+static ULONG FrontendLmPoolCount;
+static ULONG FrontendLmPoolNextName;
+/* Per texture name: 0 unseen, 1 one subimage seen, 2+i pool i,
+ * 255 not poolable. */
+static UBYTE FrontendLmPoolState[MAX_TEXTURES];
+
+static void FrontendLmPoolReset(void)
+{
+    memset(FrontendLmPoolState, 0, sizeof(FrontendLmPoolState));
+    memset(FrontendPoolHash, 0, sizeof(FrontendPoolHash));
+    FrontendLmPoolCount = 0;
+    FrontendLmPoolNextName = MAX_TEXTURES - 1UL;
+}
+
+static struct FrontendLmPool *FrontendLmPoolCreate(
+    struct MiniGLR200Context *context, struct TextureObject *texture)
+{
+    struct FrontendLmPool *pool;
+    ULONG index;
+
+    /* Holder names come from the top of the name space; GLQuake-class
+     * clients number textures upward from 1. */
+    if (FrontendLmPoolCount >= R200_POOL_MAX ||
+        FrontendLmPoolNextName < MAX_TEXTURES - R200_POOL_MAX * R200_POOL_SLOTS)
+        return NULL;
+    pool = &FrontendLmPools[FrontendLmPoolCount];
+    memset(pool, 0, sizeof(*pool));
+    for (index = 0; index < R200_POOL_SLOTS; ++index) {
+        ULONG holder = FrontendLmPoolNextName--;
+        struct MGLPPCEmitSurface surface;
+        ULONG token;
+
+        if (!FrontendDirectTextureUploadNamed(context, holder, texture->width,
+                                              texture->height, MGL_UBYTE_BGRA,
+                                              GL_UNSIGNED_BYTE, texture->shadow,
+                                              texture->width * 4UL, NULL) ||
+            !FrontendPlatform.control.value[1] ||
+            FrontendPlatform.control.value[7] != context->deviceEpoch)
+            return NULL;
+        token = FrontendPlatform.control.value[1];
+        memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
+        FrontendPlatform.control.value[0] = token;
+        if (!PlatformCall(MGLPPC_CMD_CP_SURFACE, FrontendPlatform.contextId) ||
+            FrontendPlatform.control.value[0] != GL_NO_ERROR ||
+            !FrontendPlatform.control.value[1] ||
+            FrontendPlatform.control.value[3] != texture->width * 4UL ||
+            FrontendPlatform.control.value[4] != texture->width ||
+            FrontendPlatform.control.value[5] != texture->height ||
+            FrontendPlatform.control.value[6] != RADEON3D_FORMAT_B8G8R8A8 ||
+            FrontendPlatform.control.value[7] != context->deviceEpoch)
+            return NULL;
+        surface.cpuAddress = FrontendPlatform.control.value[1];
+        surface.gpuAddress = FrontendPlatform.control.value[2];
+        surface.pitch = FrontendPlatform.control.value[3];
+        surface.width = FrontendPlatform.control.value[4];
+        surface.height = FrontendPlatform.control.value[5];
+        surface.format = FrontendPlatform.control.value[6];
+        if (!FrontendPoolHashInsert(token, context->deviceEpoch, &surface))
+            return NULL;
+        pool->slot[index].token = token;
+        pool->slot[index].cpu = surface.cpuAddress;
+        pool->slot[index].lastUse = 0;
+        pool->slot[index].written = 0; /* the full shadow as of serial 0 */
+    }
+    pool->width = texture->width;
+    pool->height = texture->height;
+    pool->epoch = context->deviceEpoch;
+    pool->current = R200_POOL_NONE;
+    ++FrontendLmPoolCount;
+    return pool;
+}
+
+/* The shadow already holds this update. Returns 1 when the pool served it,
+ * 0 when the caller should take the direct re-commit, -1 on failure. */
+static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
+                                struct TextureObject *texture, ULONG name,
+                                ULONG top, ULONG rows)
+{
+    volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
+    struct FrontendLmPool *pool;
+    UBYTE state = FrontendLmPoolState[name];
+    ULONG index, pick, serial, first, end, pitch, spin = 0, generation;
+
+    if (state == 255U)
+        return 0;
+    if (state < 2U) {
+        if (!state) {
+            FrontendLmPoolState[name] = 1;
+            return 0;
+        }
+        pool = FrontendLmPoolCreate(context, texture);
+        if (!pool) {
+            FrontendLmPoolState[name] = 255;
+            return 0;
+        }
+        FrontendLmPoolState[name] = (UBYTE)(2UL + (ULONG)(pool - FrontendLmPools));
+    } else {
+        pool = &FrontendLmPools[state - 2U];
+    }
+    if (pool->epoch != context->deviceEpoch ||
+        pool->width != texture->width || pool->height != texture->height) {
+        FrontendLmPoolState[name] = 255;
+        return 0;
+    }
+    /* Records naming the current slot are already built (or are built by
+     * this flush) and can only be published in the next ring entry, so
+     * that entry is its last use. Publishing here would split the batch on
+     * every upload; the pick loop publishes only when it must. */
+    if (!FlushScreenVertices(context))
+        return -1;
+    if (pool->current != R200_POOL_NONE) {
+        pool->slot[pool->current].lastUse = control->head + 1UL;
+        /* A redefinition (TexImage2D) re-pointed the texture at a native
+         * surface: the slots no longer mirror the shadow. */
+        if ((ULONG)texture->surface.Handle != pool->slot[pool->current].token)
+            for (index = 0; index < R200_POOL_SLOTS; ++index)
+                pool->slot[index].written = R200_POOL_NONE;
+    }
+    serial = ++pool->serial;
+    index = serial % R200_POOL_HISTORY;
+    pool->histSerial[index] = serial;
+    pool->histTop[index] = (UWORD)top;
+    pool->histEnd[index] = (UWORD)(top + rows);
+    /* Never the current slot; among retired ones the least recently used. */
+    for (;;) {
+        ULONG retired;
+
+        MGLPPCInvalidateLine32((APTR)&control->retired);
+        retired = control->retired;
+        pick = R200_POOL_NONE;
+        for (index = 0; index < R200_POOL_SLOTS; ++index) {
+            if (index == pool->current ||
+                (LONG)(retired - pool->slot[index].lastUse) < 0)
+                continue;
+            if (pick == R200_POOL_NONE ||
+                (LONG)(pool->slot[index].lastUse -
+                       pool->slot[pick].lastUse) < 0)
+                pick = index;
+        }
+        if (pick != R200_POOL_NONE)
+            break;
+        /* A slot waiting on the unpublished entry can never retire until
+         * that entry is published. */
+        for (index = 0; index < R200_POOL_SLOTS; ++index)
+            if (index != pool->current &&
+                (LONG)(pool->slot[index].lastUse - control->head) > 0)
+                break;
+        if (index < R200_POOL_SLOTS) {
+            if (!Submit(context))
+                return -1;
+            continue;
+        }
+        if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
+            MGLPPCYield();
+        if (control->error || ++spin > 5000000UL)
+            return -1;
+    }
+    /* Rows changed since this slot was last written. */
+    first = 0;
+    end = pool->height;
+    if (pool->slot[pick].written != R200_POOL_NONE &&
+        serial - pool->slot[pick].written <= R200_POOL_HISTORY) {
+        ULONG s;
+
+        first = pool->height;
+        end = 0;
+        for (s = pool->slot[pick].written + 1UL; s <= serial; ++s) {
+            index = s % R200_POOL_HISTORY;
+            if (pool->histSerial[index] != s) {
+                first = 0;
+                end = pool->height;
+                break;
+            }
+            if (pool->histTop[index] < first)
+                first = pool->histTop[index];
+            if (pool->histEnd[index] > end)
+                end = pool->histEnd[index];
+        }
+    }
+    pitch = pool->width * 4UL;
+    if (end > first) {
+        /* The shadow is the surface's BGRA32 dword image (pitch == width*4
+         * was verified at creation): a straight dword copy. */
+        volatile ULONG *dst = (volatile ULONG *)(pool->slot[pick].cpu +
+                                                 first * pitch);
+        const ULONG *src = (const ULONG *)(texture->shadow + first * pitch);
+        ULONG count = (end - first) * pool->width;
+
+        while (count--)
+            *dst++ = *src++;
+        MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + first * pitch),
+                             (end - first) * pitch);
+    }
+    pool->slot[pick].written = serial;
+    pool->current = pick;
+    texture->surface.Handle = (APTR)pool->slot[pick].token;
+    texture->resident = TRUE;
+    generation = texture->imageGeneration + 1UL;
+    if (!generation)
+        generation = 1;
+    texture->imageGeneration = generation;
+    texture->residentGeneration = generation;
+    texture->dirtyLevelMask = 0;
+    BumpSemanticStateSerial(context);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -7100,6 +7437,13 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         !FrontendPlatform.mailboxAbandoned &&
         !(texture->width & (texture->width - 1UL)) &&
         !(texture->height & (texture->height - 1UL))) {
+        /* CP path with a parking host: wait for consumption only. */
+        BOOL park = FrontendPlatform.cpEnabled && !FrontendPlatform.cpFailed &&
+                    FrontendPlatform.ring && !FrontendPlatform.leaseActive &&
+                    !FrontendNoPark &&
+                    (FrontendPlatform.capabilities &
+                     MGLPPC_CAP_TEXTURE_DIRECT_PARK);
+        BOOL uploaded;
 #if MGLPPC_PROFILE
         subChunkStart = PerfClock();
         PlatformProfile.textureBarrierCalls++;
@@ -7111,11 +7455,34 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         FrontendShadowPatch(texture, (const UBYTE *)pixels + offset,
                             width, height, format, type,
                             bpp, stride, xoffset, yoffset);
+        if (park && !FrontendNoPool && PlatformMailboxReady() &&
+            texture->width >= 16UL && texture->height >= 16UL &&
+            texture->width <= 256UL && texture->height <= 256UL) {
+            int pooled = FrontendLmPoolUpdate(context, texture, name,
+                                              (ULONG)yoffset, (ULONG)height);
+
+            if (pooled < 0) {
+                SetError(context, GL_INVALID_OPERATION);
+                return;
+            }
+            if (pooled) {
+#if MGLPPC_PROFILE
+                if (lm) {
+                    lm->path = 4;
+                    lm->result = 1;
+                }
+                PlatformProfile.textureSuccesses++;
+                PlatformProfile.textureTicks += PerfClock() - textureStart;
+#endif
+                return;
+            }
+        }
         PPC_LM_NEXT(PPC_LM_DIRECT_BARRIER);
         if (!PlatformMailboxReady() ||
             !FlushScreenVertices(context) || !Submit(context) ||
             (FrontendPlatform.ring &&
-             !R200PPCPlatformBarrier(context, FALSE))) {
+             !(park ? FrontendWaitRingConsumed()
+                    : R200PPCPlatformBarrier(context, FALSE)))) {
 #if MGLPPC_PROFILE
             PlatformProfile.textureBarrierTicks += PerfClock() - subChunkStart;
 #endif
@@ -7128,12 +7495,15 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         PlatformProfile.textureDirectCalls++;
 #endif
         PPC_LM_NEXT(PPC_LM_DIRECT);
-        if (FrontendDirectTextureUpload(context, texture->shadowWidth,
-                                        texture->shadowHeight,
-                                        MGL_UBYTE_BGRA, GL_UNSIGNED_BYTE,
-                                        texture->shadow,
-                                        texture->shadowWidth * 4UL,
-                                        NULL)) {
+        FrontendDirectRequestFlags = park ? MGLPPC_TEXDIRECT_REQ_PARK_OLD : 0UL;
+        uploaded = FrontendDirectTextureUpload(context, texture->shadowWidth,
+                                               texture->shadowHeight,
+                                               MGL_UBYTE_BGRA, GL_UNSIGNED_BYTE,
+                                               texture->shadow,
+                                               texture->shadowWidth * 4UL,
+                                               NULL);
+        FrontendDirectRequestFlags = 0;
+        if (uploaded) {
 #if MGLPPC_PROFILE
             PlatformProfile.textureDirectTicks += PerfClock() - subChunkStart;
 #endif
