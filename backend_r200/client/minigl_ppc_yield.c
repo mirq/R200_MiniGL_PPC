@@ -20,6 +20,21 @@ static ULONG YieldCalls, YieldTicks, YieldMaximum;
 #endif
 static ULONG YieldBurstStart, YieldLast;
 
+/* Hang watch (diagnostic): the last blocking site the client entered,
+ * flushed to memory so the 68k side can read it while the PPC is stuck.
+ * [0] magic 'MWAT', [1] site, [2] value, [3] update count, [4] last
+ * transport command. The address is written to DH2:mglwatch.txt at open. */
+volatile ULONG MGLPPCWatch[8] __attribute__((aligned(32)));
+
+void MGLPPCWatchSet(ULONG site, ULONG value)
+{
+    MGLPPCWatch[0] = 0x4d574154UL;
+    MGLPPCWatch[1] = site;
+    MGLPPCWatch[2] = value;
+    ++MGLPPCWatch[3];
+    __asm__ volatile ("dcbf 0,%0\n\tsync" : : "r" (MGLPPCWatch) : "memory");
+}
+
 static ULONG YieldClock(void)
 {
     ULONG value;
@@ -46,7 +61,9 @@ void MGLPPCYield(void)
     YieldLast = now;
     if (now - YieldBurstStart < MGLPPC_RING_YIELD_SPIN_TICKS)
         return;
+    MGLPPCWatchSet(1UL, 0);
     (void)WaitTime(0UL, MGLPPC_RING_YIELD_US);
+    MGLPPCWatchSet(2UL, 0);
     YieldLast = YieldClock();
 #if MGLPPC_PROFILE
     elapsed = YieldLast - now;

@@ -268,6 +268,18 @@ ULONG TextureState(const struct MiniGLR200Context *context,
     }
     if (IsMipFilter(filter))
         levels = texture->levelCount;
+    /* A one-level texture (e.g. 1x1 after Quake 3 r_picmip) is mipmap
+     * complete in GL and samples level 0; the emitter rejects a mip filter
+     * with one level, so use the matching non-mip filter instead. */
+    if (levels <= 1UL) {
+        levels = 1UL;
+        if (minFilter == RADEON3D_TEX_MIN_NEAREST_MIPMAP_NEAREST ||
+            minFilter == RADEON3D_TEX_MIN_NEAREST_MIPMAP_LINEAR)
+            minFilter = RADEON3D_TEX_MIN_NEAREST;
+        else if (minFilter == RADEON3D_TEX_MIN_LINEAR_MIPMAP_NEAREST ||
+                 minFilter == RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR)
+            minFilter = RADEON3D_TEX_MIN_LINEAR;
+    }
     state |= minFilter << RADEON3D_TEX_MIN_SHIFT;
     state |= (levels - 1UL) << RADEON3D_TEX_LEVELS_SHIFT;
     state |= (texture->contentSerial & 0xffffUL) <<

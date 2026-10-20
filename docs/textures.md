@@ -159,3 +159,10 @@ unless a path genuinely needs immediate submission.
   larger uploads at the API level rather than raising the protocol limits.
 - Always verify texture uploads with `examples/r200_texture_update_test.c`
   (pixel-verified) after touching any upload path.
+- A texture with a single level and a mipmap minification filter (Quake 3
+  shrinks 8x8 effect textures to 1x1 at `r_picmip 3`) is mipmap-complete in
+  GL. `TextureState` (`r200_texture.c`) maps the mip filter to the matching
+  non-mip filter (`*_MIPMAP_*` → `NEAREST`/`LINEAR`) when only one level
+  exists. The emitter rejects a mip filter with one level; before this
+  (2026-10-21) the rejection latched `cpFailed` and hung Quake 3 at the first
+  death in the `four` demo (gib/blood textures).
