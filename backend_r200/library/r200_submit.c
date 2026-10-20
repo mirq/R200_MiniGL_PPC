@@ -572,6 +572,41 @@ static void DumpFailBatch(struct MiniGLR200Context *context,
     Close(file);
 }
 
+#if R200_PPC_FRONTEND && MGLPPC_PROFILE
+/* Profile builds: who forces non-empty submits (return addresses relative
+ * to Submit itself, mapped to source lines with the warpelf symbols). */
+#define SUBMIT_CALLER_SLOTS 24UL
+static ULONG SubmitCallerAddr[SUBMIT_CALLER_SLOTS];
+static ULONG SubmitCallerCount[SUBMIT_CALLER_SLOTS];
+static ULONG SubmitCallerOverflow;
+
+static void SubmitCallerNote(ULONG address)
+{
+    ULONG i;
+
+    for (i = 0; i < SUBMIT_CALLER_SLOTS; ++i) {
+        if (!SubmitCallerCount[i])
+            SubmitCallerAddr[i] = address;
+        if (SubmitCallerAddr[i] == address) {
+            ++SubmitCallerCount[i];
+            return;
+        }
+    }
+    ++SubmitCallerOverflow;
+}
+
+/* Entry i: returns its count and stores the caller's offset from Submit;
+ * index SUBMIT_CALLER_SLOTS returns the overflow count. */
+ULONG R200SubmitCallerGet(ULONG index, ULONG *offset);
+ULONG R200SubmitCallerGet(ULONG index, ULONG *offset)
+{
+    if (index >= SUBMIT_CALLER_SLOTS)
+        return SubmitCallerOverflow;
+    *offset = SubmitCallerAddr[index] - (ULONG)Submit;
+    return SubmitCallerCount[index];
+}
+#endif
+
 BOOL Submit(struct MiniGLR200Context *context)
 {
 #if R200_PPC_FRONTEND
@@ -583,6 +618,9 @@ BOOL Submit(struct MiniGLR200Context *context)
 
     if (!slot->recordCount)
         return TRUE;
+#if MGLPPC_PROFILE
+    SubmitCallerNote((ULONG)__builtin_return_address(0));
+#endif
     nextIndex = (currentIndex + 1UL) % SUBMIT_SLOT_COUNT;
     next = &context->submitSlots[nextIndex];
     if (!WaitSubmitSlot(context, next, SUBMIT_WAIT_BUFFER))

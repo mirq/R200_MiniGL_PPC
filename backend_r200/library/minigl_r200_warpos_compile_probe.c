@@ -1443,6 +1443,64 @@ static struct PpcLmRecord *PpcLmBegin(struct MiniGLR200Context *context,
     return r;
 }
 
+/* Shared glTexImage2D histogram (profile builds): which textures take the
+ * 68k shared upload path, how often and at what cost. */
+#define SHARED_HISTO_SLOTS 24UL
+static struct {
+    ULONG name, level, w, h, format, type, count, ticks;
+} SharedUploadHisto[SHARED_HISTO_SLOTS];
+static ULONG SharedUploadHistoOverflow;
+
+static void SharedUploadHistoNote(ULONG name, GLint level, GLsizei w,
+                                  GLsizei h, GLenum format, GLenum type,
+                                  ULONG ticks)
+{
+    ULONG i;
+
+    for (i = 0; i < SHARED_HISTO_SLOTS; ++i) {
+        if (!SharedUploadHisto[i].count) {
+            SharedUploadHisto[i].name = name;
+            SharedUploadHisto[i].level = (ULONG)level;
+            SharedUploadHisto[i].w = (ULONG)w;
+            SharedUploadHisto[i].h = (ULONG)h;
+            SharedUploadHisto[i].format = format;
+            SharedUploadHisto[i].type = type;
+        }
+        if (SharedUploadHisto[i].name == name &&
+            SharedUploadHisto[i].level == (ULONG)level &&
+            SharedUploadHisto[i].w == (ULONG)w &&
+            SharedUploadHisto[i].h == (ULONG)h &&
+            SharedUploadHisto[i].format == format) {
+            ++SharedUploadHisto[i].count;
+            SharedUploadHisto[i].ticks += ticks;
+            return;
+        }
+    }
+    ++SharedUploadHistoOverflow;
+}
+
+ULONG R200SubmitCallerGet(ULONG index, ULONG *offset);
+
+static void SharedUploadHistoDump(FILE *file)
+{
+    ULONG i;
+
+    fprintf(file, "SHARED_HISTO overflow=%lu\n",
+            (unsigned long)SharedUploadHistoOverflow);
+    for (i = 0; i < SHARED_HISTO_SLOTS && SharedUploadHisto[i].count; ++i)
+        if (SharedUploadHisto[i].count > 2UL)
+            fprintf(file, "SHARED name=%lu lvl=%lu %lux%lu fmt=%lx/%lx "
+                    "n=%lu ticks=%lu\n",
+                    (unsigned long)SharedUploadHisto[i].name,
+                    (unsigned long)SharedUploadHisto[i].level,
+                    (unsigned long)SharedUploadHisto[i].w,
+                    (unsigned long)SharedUploadHisto[i].h,
+                    (unsigned long)SharedUploadHisto[i].format,
+                    (unsigned long)SharedUploadHisto[i].type,
+                    (unsigned long)SharedUploadHisto[i].count,
+                    (unsigned long)SharedUploadHisto[i].ticks);
+}
+
 /* At most four small varargs per call: no floats or %llu on WarpOS. */
 static void PpcLmDump(void)
 {
@@ -4272,9 +4330,65 @@ static void FrontendContextProfileDump(void)
     }
 }
 
+#if MGLPPC_PROFILE
+/* Profile builds: whole-run frontend attribution from the first present,
+ * written once at teardown (DH2:mglprof/frontend.log). Wall minus the
+ * DLL buckets is time in the client's own code. */
+static ULONG FrontendFirstPresentTick;
+
+static void FrontendAttributionDump(void)
+{
+    const struct PerfMetrics *perf;
+    FILE *file;
+
+    if (!R200PPCContext || !FrontendFirstPresentTick)
+        return;
+    perf = &R200PPCContext->perf;
+    file = fopen("DH2:mglprof/frontend.log", "w");
+    if (!file)
+        return;
+    fprintf(file, "FE frames=%lu wall=%lu clock_hz=%lu\n",
+            (unsigned long)perf->frames,
+            (unsigned long)(PerfClock() - FrontendFirstPresentTick),
+            (unsigned long)PlatformClockRate);
+    fprintf(file, "FE frontend=%lu serialize=%lu execute=%lu wait=%lu\n",
+            (unsigned long)perf->frontendTicks,
+            (unsigned long)perf->serializeTicks,
+            (unsigned long)perf->executeTicks,
+            (unsigned long)perf->waitTicks);
+    fprintf(file, "FE present=%lu draw=%lu matrix=%lu fetch=%lu\n",
+            (unsigned long)perf->presentTicks,
+            (unsigned long)perf->drawTicks,
+            (unsigned long)perf->matrixTicks,
+            (unsigned long)perf->vertexFetchTicks);
+    fprintf(file, "FE append=%lu indexscan=%lu stall=%lu drain=%lu\n",
+            (unsigned long)perf->appendTicks,
+            (unsigned long)perf->indexScanTicks,
+            (unsigned long)PlatformProfile.ringStallTicks,
+            (unsigned long)PlatformProfile.drainTicks);
+    fprintf(file, "FE verts=%lu prims=%lu submits=%lu flushes=%lu "
+            "states=%lu\n",
+            (unsigned long)perf->inputVertices,
+            (unsigned long)perf->primitives,
+            (unsigned long)perf->submits,
+            (unsigned long)perf->flushCalls,
+            (unsigned long)perf->stateCalls);
+    fprintf(file, "FE snapshot_builds=%lu snapshot_fast=%lu capture_hits=%lu "
+            "deferred_splits=%lu\n",
+            (unsigned long)perf->snapshotBuilds,
+            (unsigned long)perf->snapshotFastHits,
+            (unsigned long)perf->captureCacheHits,
+            (unsigned long)perf->deferredSplits);
+    fclose(file);
+}
+#endif
+
 void R200PPCDispatchDeleteContext(void)
 {
     ULONG index;
+#if MGLPPC_PROFILE
+    FrontendAttributionDump();
+#endif
     /* Unacknowledged smoke work, a latched CP failure or a dead ring mean
      * drains, barriers and slot waits can no longer be answered here. The
      * host however still services the mailbox: if it never learns that the
@@ -4567,6 +4681,19 @@ void R200PPCDispatchDeleteContext(void)
             fprintf(report, "PPC_CHUNK count=%lu ticks=%lu\n",
                     (unsigned long)profile->chunkCount,
                     (unsigned long)profile->chunkTicks);
+            SharedUploadHistoDump(report);
+            {
+                ULONG i, offset = 0, count;
+
+                for (i = 0; i < 24UL; ++i) {
+                    count = R200SubmitCallerGet(i, &offset);
+                    if (count)
+                        fprintf(report, "SUBMIT_CALLER off=%08lx n=%lu\n",
+                                (unsigned long)offset, (unsigned long)count);
+                }
+                fprintf(report, "SUBMIT_CALLER overflow=%lu\n",
+                        (unsigned long)R200SubmitCallerGet(24UL, &offset));
+            }
             fprintf(report, "PPC_TEXTURE calls=%lu successes=%lu bytes=%lu "
                     "ticks=%lu direct_calls=%lu direct_ticks=%lu "
                     "shared_calls=%lu chunked_calls=%lu barrier_calls=%lu "
@@ -6620,6 +6747,9 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #if MGLPPC_PROFILE
         PlatformProfile.chunkTicks += PerfClock() - chunkStart;
         PlatformProfile.chunkCount++;
+        SharedUploadHistoNote(context->boundTexture[context->activeTexture],
+                              level, width, height, format, type,
+                              PerfClock() - chunkStart);
 #endif
         if (!chunkOk) {
             /* The host reports the native glTexImage2D error in
