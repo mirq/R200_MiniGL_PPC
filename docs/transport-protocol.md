@@ -112,13 +112,20 @@ v5 peers fail ring registration (v6 adds `colorToken`/`colorSeq`) and fall back.
 
 ```
 segment: 64 KiB, non-cacheable streaming aperture, host-leased
-offset 0:     MGLPPCRingControlV1 (32-byte aligned; 114 dwords = 456 bytes)
+offset 0:     MGLPPCRingControlV1 (32-byte aligned; 258 dwords = 1032 bytes)
 offset 4096:  MGLPPCMailboxV1 (160 bytes, 32-byte lines)
-slots:        8 x 8192 dwords, cacheable shared memory (slotAddrs[])
+slots:        32 x 8192 dwords, cacheable shared memory (slotAddrs[])
 ```
 
-- `MGLPPC_RING_MAGIC 0x52494e47`, `MGLPPC_RING_CONTROL_VERSION 6`,
-  `MGLPPC_RING_SLOTS 8`, `MGLPPC_EVENT_SLOTS 16`.
+- `MGLPPC_RING_MAGIC 0x52494e47`, `MGLPPC_RING_CONTROL_VERSION 7`,
+  `MGLPPC_RING_SLOTS 32`, `MGLPPC_EVENT_SLOTS 16`.
+- CP entries (v7): the PPC packs each batch into the 256 KiB CP segment as a
+  FIFO at 16-byte granularity; the entry payload `{byteOffset, dwordCount,
+  vertexSegmentMask}` names any 16-byte aligned offset inside the segment, and
+  the space is reused only after the entry retires. v6 used one fixed 32 KiB
+  slice per slot, which capped the queue at 8 batches (Quake averages ~2.5 KiB
+  per batch); the PPC then spent ~4.5 ms per Quake frame waiting for
+  retirement.
 - Each slot has a `MGLPPCRingEntryV1 { slot, dwords, generation, flags, crc }`.
 - Commit entries carry `dword[0] = draw count`, `dword[1] = vertex segment pool
   index`, then header-only record chain, then one dword vertex byte offset per
@@ -139,10 +146,10 @@ Segment layout (offsets in bytes; the control block is 32-byte aligned):
 ```mermaid
 flowchart TB
     subgraph SEG["Ring segment - 64 KiB, non-cacheable streaming aperture"]
-        CTRL["offset 0: control block v6 - 456 B / 114 dwords<br/>magic, version, slotCount, slotDwords, epoch, head, completed,<br/>retired, presentSeq, error, slotAddrs[8], entries[8],<br/>sync state, event region, colorToken/colorSeq"]
+        CTRL["offset 0: control block v7 - 1032 B / 258 dwords<br/>magic, version, slotCount, slotDwords, epoch, head, completed,<br/>retired, presentSeq, error, slotAddrs[32], entries[32],<br/>sync state, event region, colorToken/colorSeq"]
         MB["offset 4096: mailbox v1 - 160 B, one writer per 32-byte line"]
     end
-    S["8 x 8192-dword slots - cacheable shared memory, addressed by slotAddrs"]
+    S["32 x 8192-dword slots - cacheable shared memory, addressed by slotAddrs"]
     SEG --- S
 ```
 
@@ -275,8 +282,9 @@ host writes `colorToken` first and `colorSeq` last, then flushes; PPC reads
 
 - Protocol 16 is the current wire version (adds the lease commands); the DLL
   downgrades to 14 on a BAD_VERSION HELLO.
-- Ring control 6 is current; v5 peers fall back rather than run with a
-  mismatched control block.
+- Ring control 7 is current (32 slots, packed CP segment); a v6 peer fails
+  ring registration rather than run with a mismatched control block. The DLL
+  and the host must be deployed as a matched pair.
 - Never change field offsets or add fields to `MGLPPCRingControlV1` —
   it has static offset/size checks and both peers must agree exactly.
 - Protocol copies exist in the classic tree

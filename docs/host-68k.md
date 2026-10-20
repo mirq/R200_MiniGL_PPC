@@ -70,7 +70,7 @@ mailbox is the latency-critical channel.
 | VRAM_PROBE_* | 64 KiB / 64-pass read-write probe with dual sentinels |
 | REGISTER/EXECUTE/BARRIER/UNREGISTER_SEMANTIC | semantic slots (legacy path) |
 | BIND_TEXTURE | bind/normalize a texture for the backend |
-| REGISTER_SEMANTIC_RING | validate `count==8`, `slotDwords==8192`; lease 64 KiB ring + 4 vertex segments + optional 256 KiB CP segment; init control block, mailbox at +4096; echo `HOST_EVENTS/MAILBOX/INDIRECT/IB_DRY/CP_EMIT` |
+| REGISTER_SEMANTIC_RING | validate `count==32` (`MGLPPC_RING_SLOTS`), `slotDwords==8192`; lease 64 KiB ring + 4 vertex segments + optional 256 KiB CP segment; init control block, mailbox at +4096; echo `HOST_EVENTS/MAILBOX/INDIRECT/IB_DRY/CP_EMIT` |
 | TEXTURE_UPLOAD_SHARED | validate staging, invalidate, upload, reply |
 | TEXTURE_DIRECT_BEGIN/COMMIT/ABORT | direct-fill lease/commit (with epoch validation) |
 | TEXTURE_DIRECT_BEGIN2/COMMIT2 | batched two-tile variant (capability-gated, diagnostics) |

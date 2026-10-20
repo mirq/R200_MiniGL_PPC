@@ -2016,7 +2016,9 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
     indirect.ByteOffset = payload[0];
     indirect.DwordCount = payload[1];
     mask = payload[2];
-    if (indirect.ByteOffset != entry->slot * MGLPPC_CP_SLICE_BYTES ||
+    /* v7: batches are packed into the CP segment; any 16-byte aligned
+     * offset inside it is valid (the dispatch requires 16-byte IB bases). */
+    if ((indirect.ByteOffset & 15UL) ||
         !indirect.DwordCount || (indirect.DwordCount & 1UL) ||
         indirect.DwordCount > RADEON3D_MAX_BATCH_DWORDS ||
         indirect.ByteOffset >= state->cpSegment.Bytes ||
