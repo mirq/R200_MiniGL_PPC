@@ -111,8 +111,19 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
      * deferred direct-texture tile must be installed (and its mirror
      * serialized) before this capture reads them, or the record would
      * name the surface the upload is replacing. */
+#if MGLPPC_PROFILE
+    {
+        ULONG pendingStart = PerfClock();
+        BOOL pendingOk = R200PPCPendingUploadFlush(context);
+
+        context->perf.indexScanTicks += PerfClock() - pendingStart;
+        if (!pendingOk)
+            return FALSE;
+    }
+#else
     if (!R200PPCPendingUploadFlush(context))
         return FALSE;
+#endif
 #endif
     if (context->screenVertexCount && context->pendingDrawValid &&
         context->pendingSemanticStateSerial == context->semanticStateSerial &&
@@ -145,10 +156,16 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
     } else {
         ULONG previousFloatMode = BeginSemanticFloatMode();
         BOOL captured;
+#if MGLPPC_PROFILE
+        ULONG captureStart = PerfClock();
+#endif
 
         state = &context->captureScratch;
         captured = CapturePendingDrawState(context, command, state);
         EndSemanticFloatMode(previousFloatMode);
+#if MGLPPC_PROFILE
+        context->perf.matrixTicks += PerfClock() - captureStart;
+#endif
         if (!captured)
             return FALSE;
         /* Residency work inside the capture can legitimately have bumped
@@ -1770,6 +1787,34 @@ static BOOL EmitHardwareBatch(struct MiniGLR200Context *context,
         return FALSE;
     context->screenHardwareTransform = TRUE;
     context->screenProjective = FALSE;
+#if MGLPPC_PROFILE
+    /* Profile builds: split EmitHardwareBatch into append preparation
+     * (appendTicks), per-vertex copy (vertexFetchTicks) and the flush
+     * (drawTicks, inclusive of its nested serialize/execute). */
+    {
+        ULONG t0 = PerfClock(), t1, t2;
+        BOOL ok;
+
+        if (!PrepareScreenAppend(context, command)) {
+            context->screenHardwareTransform = FALSE;
+            return FALSE;
+        }
+        t1 = PerfClock();
+        for (index = 0; index < count; ++index)
+            CopyHardwareVertex(context, &vertices[index],
+                               &context->screenVertices[context->screenVertexCount++],
+                               hardwareSphereMap, softwareSphereMap);
+        t2 = PerfClock();
+        context->perf.appendTicks += t1 - t0;
+        context->perf.vertexFetchTicks += t2 - t1;
+        context->screenHardwareTransform = FALSE;
+        if (HardwareListCommand(command))
+            return TRUE;
+        ok = FlushScreenVertices(context);
+        context->perf.drawTicks += PerfClock() - t2;
+        return ok;
+    }
+#else
     if (!PrepareScreenAppend(context, command)) {
         context->screenHardwareTransform = FALSE;
         return FALSE;
@@ -1782,6 +1827,7 @@ static BOOL EmitHardwareBatch(struct MiniGLR200Context *context,
     if (HardwareListCommand(command))
         return TRUE;
     return FlushScreenVertices(context);
+#endif
 }
 
 static BOOL EmitHardwareTriangle(struct MiniGLR200Context *context,

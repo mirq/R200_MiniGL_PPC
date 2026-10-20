@@ -819,6 +819,12 @@ static ULONG HostEventPollTicks, HostEventPollCalls;
 static ULONG HostCpEntries;
 static ULONG HostCpDrainTicks;
 static ULONG HostCpDispatchTicks;
+/* Profile split of the dispatch stage: library bridge query vs the driver's
+ * Radeon3DDispatchIndirect. */
+static ULONG HostCpBridgeTicks, HostCpDriverTicks;
+/* Driver dispatch latency histogram (EClock ticks: <50us, <100, <200,
+ * <500, <1ms, <5ms, >=5ms) and the minimum. */
+static ULONG HostCpDriverHisto[7], HostCpDriverMin = ~0UL;
 static ULONG HostCpTotalTicks;
 /* Subimage stage attribution (MGLPPC-profile builds only). */
 static ULONG HostSubimageCount;
@@ -2038,7 +2044,19 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
                  state->fenceGroupCount + 1UL >= state->fenceGroupSize) ?
                 TRUE : FALSE;
     CpFailStage = "bridge";
+#if MGLPPC_PROFILE
+    {
+        ULONG bridgeStart = HostClock();
+        BOOL bridgeOk = QueryBackendBridgeV2(&bridge);
+
+        HostCpBridgeTicks += HostClock() - bridgeStart;
+        if (!bridgeOk)
+            bridge.version = 0;
+    }
+    if (bridge.version != MGL_R200_PRIVATE_BRIDGE_V2_VERSION ||
+#else
     if (!QueryBackendBridgeV2(&bridge) ||
+#endif
         bridge.deviceEpoch != state->ringDeviceEpoch ||
         bridge.deviceToken != state->ringDeviceToken) {
         CpFailStage = "dispatch";
@@ -2046,9 +2064,30 @@ static BOOL ExecuteCpEntry(MGLPPCHostState *state,
     }
     if (!wantFence)
         indirect.Flags = RADEON3D_INDIRECT_NO_FENCE;
+#if MGLPPC_PROFILE
+    {
+        ULONG driverStart = HostClock();
+        BOOL dispatched = Radeon3DDispatchIndirect(
+            (struct Radeon3DDevice *)state->ringDeviceToken, &indirect, &fence);
+
+        ULONG driverTicks = HostClock() - driverStart;
+        ULONG us = (ULONG)((driverTicks * 1000000ULL) / HostClockHz);
+
+        HostCpDriverTicks += driverTicks;
+        if (driverTicks < HostCpDriverMin)
+            HostCpDriverMin = driverTicks;
+        ++HostCpDriverHisto[us < 50UL ? 0 : us < 100UL ? 1 : us < 200UL ? 2 :
+                            us < 500UL ? 3 : us < 1000UL ? 4 :
+                            us < 5000UL ? 5 : 6];
+        if (!dispatched)
+            fence = 0, wantFence = TRUE;
+    }
+    if (wantFence && !fence) {
+#else
     if (!Radeon3DDispatchIndirect((struct Radeon3DDevice *)state->ringDeviceToken,
                                   &indirect, &fence) ||
         (wantFence && !fence)) {
+#endif
         CpFailStage = "dispatch";
         return FALSE;
     }
@@ -5178,6 +5217,19 @@ int main(int argc, char **argv)
 
         if (!ticksPerMs)
             ticksPerMs = 1;
+        printf("CP_PROF_SPLIT bridge_ms=%lu driver_ms=%lu driver_min_ticks=%lu "
+               "histo_us <50:%lu <100:%lu <200:%lu <500:%lu <1000:%lu "
+               "<5000:%lu more:%lu\n",
+               (unsigned long)(HostCpBridgeTicks / ticksPerMs),
+               (unsigned long)(HostCpDriverTicks / ticksPerMs),
+               (unsigned long)HostCpDriverMin,
+               (unsigned long)HostCpDriverHisto[0],
+               (unsigned long)HostCpDriverHisto[1],
+               (unsigned long)HostCpDriverHisto[2],
+               (unsigned long)HostCpDriverHisto[3],
+               (unsigned long)HostCpDriverHisto[4],
+               (unsigned long)HostCpDriverHisto[5],
+               (unsigned long)HostCpDriverHisto[6]);
         printf("CP_PROF entries=%lu drain_ms=%lu dispatch_ms=%lu "
                "total_ms=%lu\n",
                (unsigned long)HostCpEntries,
