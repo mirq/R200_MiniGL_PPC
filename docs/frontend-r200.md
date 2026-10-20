@@ -319,6 +319,22 @@ sequenceDiagram
     P->>H: LEASE_BEGIN for the next frame
 ```
 
+### 10.2 Wait yield policy and colour-suppressed draws (2026-10-20)
+
+- **Yield only after a real stall.** `MGLPPCYield` (`client/minigl_ppc_yield.c`)
+  is called from every bounded wait loop. It now parks (`WaitTime`, which
+  costs a whole ~20 ms tick, not the requested 100 us) only once the current
+  wait has lasted `MGLPPC_RING_YIELD_SPIN_TICKS` (500000 time-base ticks,
+  ~15-20 ms). Calls less than `MGLPPC_RING_YIELD_GAP_TICKS` apart count as
+  the same wait; earlier calls return at once and the caller keeps
+  spinning. At 800x600 Quake, 150 parks used to cost 2.2 s of a 19.8 s run.
+- **Depth-only clears use the plane mask.** RB3D_PLANEMASK is ignored unless
+  `R200_PLANE_MASK_ENABLE` (RB3D_CNTL bit 1) is set. The emitter now sets it
+  for colour-suppressed draws, so a depth-only clear (`gl_ztrick 0`) is a
+  pure depth write instead of a full-screen colour read-modify-write
+  (~2.5 ms/frame at 800x600). The older no-op-blend workaround stays behind
+  `MGLPPC_CLEARBLEND=1`.
+
 ## 11. Frontend environment knobs
 
 | Variable | Effect |
@@ -337,6 +353,9 @@ sequenceDiagram
 | `MGLPPC_PROFILE` | frontend profiler buckets (profile builds only) |
 | `MGLPPC_NOPARK` | `1`: subimage re-commits drain the GPU instead of parking the old residency (A/B) |
 | `MGLPPC_NOPOOL` | `1`: no PPC-owned lightmap surface pools (A/B) |
+| `MGLPPC_FORCEMIP` | `1`: a `GL_LINEAR`-minified texture with a complete app-uploaded mip chain samples the chain (`LINEAR_MIPMAP_NEAREST`); read at platform open. Breaks pictures that upload only level 0 (Quake HUD/console) |
+| `MGLPPC_CLEARBLEND` | `1`: restore the old depth-only clear workaround (no-op blend `SRC=ZERO, DST=ONE` + full state re-emit) instead of `R200_PLANE_MASK_ENABLE` |
+| `MGLPPC_BATCHDW` | diagnostic: cap the CP batch budget in dwords (>= 1024); used to measure per-IB cost |
 
 ## 12. Invariants to preserve
 

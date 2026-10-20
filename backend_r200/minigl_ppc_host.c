@@ -1900,7 +1900,7 @@ static BOOL PresentViaCp(MGLPPCHostState *state)
     words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_Y_X));
     words[count++] = HOST_LE32((dstY << 16) | dstX);
     words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_HEIGHT_WIDTH));
-    /* EXPERIMENT (not for commit): MGLPPC_BLITDIAG=1 copies one pixel. */
+    /* Diagnostic: MGLPPC_BLITDIAG=1 copies one pixel (present-cost A/B). */
     words[count++] = HOST_LE32(state->blitDiag ? ((1UL << 16) | 1UL) :
                                ((present.height << 16) | present.width));
     CacheClearE((APTR)words, count * sizeof(ULONG), CACRF_ClearD);
