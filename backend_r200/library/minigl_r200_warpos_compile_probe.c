@@ -7714,6 +7714,23 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
      * eligibility rules as the direct TexImage path plus the shadow.
      * Paletted sources skip it (FrontendShadowPatch cannot expand
      * indices); they take the canonical shared path below. */
+    /* A full-image update of a level-0-only, non-mipmapped texture
+     * (Quake 3 RoQ cinematics: 512x256 RGBA every frame) needs no prior
+     * content, so it can start a shadow here and take the direct path:
+     * the shared subimage path below cost ~280 ms per frame (68k copy).
+     * TexImage2D cannot do this for RGBA because mip levels may follow;
+     * by the first subimage the filter and level count are known. */
+    if (!texture->shadow && format != GL_COLOR_INDEX && level == 0 &&
+        xoffset == 0 && yoffset == 0 &&
+        (ULONG)width == texture->width && (ULONG)height == texture->height &&
+        texture->definedLevels == 1UL &&
+        (texture->minFilter == GL_LINEAR ||
+         texture->minFilter == GL_NEAREST) &&
+        FrontendShadowEnsure(context, texture, (ULONG)width, (ULONG)height))
+        /* The direct commit publishes a single level; the mirror's
+         * levelCount (the allocated mip chain) must agree or the reply
+         * check rejects every commit and draws keep the stale surface. */
+        texture->levelCount = 1UL;
     if (texture->shadow &&
         format != GL_COLOR_INDEX &&
         texture->shadowWidth == (ULONG)texture->width &&
