@@ -430,6 +430,44 @@ void dbg_float_bits(float value) { (void)value; }
 
 static struct MiniGLR200Context proofContext;
 
+/* glDrawElements index cache for the live context (minigl_r200.c allocates
+ * it only in the 68k library's CreateContext, so the PPC mirror never had
+ * one and every drawn index was a full vertex fetch). */
+BOOL MGLPPCIndexedDraws = FALSE;
+
+static void ProofIndexCacheFree(void)
+{
+    if (proofContext.indexLocal)
+        FreeVec(proofContext.indexLocal);
+    if (proofContext.indexLocalStamp)
+        FreeVec(proofContext.indexLocalStamp);
+    proofContext.indexLocal = NULL;
+    proofContext.indexLocalStamp = NULL;
+    if (proofContext.indexCacheVerts)
+        FreeVec(proofContext.indexCacheVerts);
+    if (proofContext.indexCacheStamp)
+        FreeVec(proofContext.indexCacheStamp);
+    proofContext.indexCacheVerts = NULL;
+    proofContext.indexCacheStamp = NULL;
+    proofContext.indexCacheSize = 0;
+}
+
+static void ProofIndexCacheAlloc(void)
+{
+    proofContext.indexCacheVerts =
+        AllocVec(65536UL * sizeof(struct Vertex), MEMF_PUBLIC);
+    proofContext.indexCacheStamp =
+        AllocVec(65536UL * sizeof(ULONG), MEMF_PUBLIC | MEMF_CLEAR);
+    proofContext.indexLocal = AllocVec(65536UL * sizeof(UWORD), MEMF_PUBLIC);
+    proofContext.indexLocalStamp =
+        AllocVec(65536UL * sizeof(ULONG), MEMF_PUBLIC | MEMF_CLEAR);
+    if (proofContext.indexCacheVerts && proofContext.indexCacheStamp &&
+        proofContext.indexLocal && proofContext.indexLocalStamp)
+        proofContext.indexCacheSize = 65536UL;
+    else
+        ProofIndexCacheFree();
+}
+
 #if defined(R200_FRONTEND_LINK_PROOF)
 static BOOL ExpectedMatrix(const GLfloat *matrix)
 {
@@ -812,12 +850,26 @@ extern void R200PPCWriteBarrier(void);
  * the emitter can resolve: colour target, depth, texture unit 0 and texture
  * unit 1. Resident textures dominate the working set, so the old 16 entries
  * caused a capacity miss every few draws (CP_SURF evidence 2026-09-20: ~36k
- * synchronous mailbox queries per timedemo). 128 entries cost 4 KiB.
- * Overridable at build time (Makefile MGLPPC_CP_SLOTS) for the 16/64/128
- * A/B; the safe invalidation rules do not depend on the capacity. */
+ * synchronous mailbox queries per timedemo). Quake 3 with lightmaps
+ * outgrew 128 linearly searched entries (3.4k capacity overwrites and 3.5k
+ * mailbox queries per timedemo, resolve ~2.5 ms/frame), so the cache is
+ * 4-way set associative, hashed by token: a lookup probes one set.
+ * Overridable at build time (Makefile MGLPPC_CP_SLOTS, a power of two
+ * >= 4); the safe invalidation rules do not depend on the capacity. */
 #ifndef MGLPPC_CP_SURFACE_SLOTS
-#define MGLPPC_CP_SURFACE_SLOTS 128UL
+#define MGLPPC_CP_SURFACE_SLOTS 2048UL
 #endif
+#define MGLPPC_CP_SURFACE_WAYS 4UL
+#define MGLPPC_CP_SURFACE_SETS (MGLPPC_CP_SURFACE_SLOTS / MGLPPC_CP_SURFACE_WAYS)
+
+/* First slot of the set a token maps to (tokens are aligned addresses). */
+static ULONG CpSurfaceSet(ULONG token)
+{
+    ULONG hash = token >> 4;
+
+    hash ^= hash >> 9;
+    return (hash & (MGLPPC_CP_SURFACE_SETS - 1UL)) * MGLPPC_CP_SURFACE_WAYS;
+}
 
 typedef struct R200PPCFrontendPlatform {
     MGLPPCTransport transport;
@@ -1789,20 +1841,28 @@ void R200PPCResetCpAttribution(void)
     CpWaitMaxBacklog = CpWaitMaxPending = 0;
 }
 
-/* Remove one token from the descriptor cache (swap-remove). Tokens are
- * unique among live surfaces, so the first match is the only match. */
+/* Remove one token from the descriptor cache. Tokens are unique among live
+ * surfaces, so the first match in its set is the only match. */
+static void FrontendClearCpSurfaces(void)
+{
+    ULONG index;
+
+    for (index = 0; index < MGLPPC_CP_SURFACE_SLOTS; ++index)
+        FrontendPlatform.cpSurfaces[index].token = 0;
+    FrontendPlatform.cpSurfaceCount = 0;
+}
+
 static void FrontendDropCachedSurface(ULONG token)
 {
     ULONG index;
 
     if (!token)
         return;
-    for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index) {
+    for (index = CpSurfaceSet(token);
+         index < CpSurfaceSet(token) + MGLPPC_CP_SURFACE_WAYS; ++index) {
         if (FrontendPlatform.cpSurfaces[index].token == token) {
-            ULONG last = --FrontendPlatform.cpSurfaceCount;
-
-            FrontendPlatform.cpSurfaces[index] =
-                FrontendPlatform.cpSurfaces[last];
+            FrontendPlatform.cpSurfaces[index].token = 0;
+            --FrontendPlatform.cpSurfaceCount;
             ++CpSurfDropped;
             return;
         }
@@ -1864,7 +1924,7 @@ static void FrontendDropCachedSurfacesForCommand(ULONG command)
     case MGLPPC_CMD_SHUTDOWN:
         if (FrontendPlatform.cpSurfaceCount)
             ++CpSurfInvalidate;
-        FrontendPlatform.cpSurfaceCount = 0;
+        FrontendClearCpSurfaces();
         break;
     case MGLPPC_CMD_TEXTURE_UPLOAD_SHARED:
     case MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN:
@@ -2468,7 +2528,8 @@ static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
         ++CpSurfHits;
         return TRUE;
     }
-    for (index = 0; index < FrontendPlatform.cpSurfaceCount; ++index)
+    for (index = CpSurfaceSet(token);
+         index < CpSurfaceSet(token) + MGLPPC_CP_SURFACE_WAYS; ++index)
         if (FrontendPlatform.cpSurfaces[index].token == token) {
             if (FrontendPlatform.cpSurfaces[index].epoch == context->deviceEpoch) {
                 ++CpSurfHits;
@@ -2501,18 +2562,23 @@ static BOOL ResolveCpSurfaceInner(void *user, ULONG token,
     out->height = FrontendPlatform.control.value[5];
     out->format = FrontendPlatform.control.value[6];
     if (insertIndex < MGLPPC_CP_SURFACE_SLOTS) {
-        /* An epoch-stale entry for this same token: replace it in place.
-         * Appending would leave the stale entry to shadow the fresh one and
-         * force a mailbox query on every resolve until the ring wraps. */
+        /* An epoch-stale entry for this same token: replace it in place so
+         * it cannot shadow the fresh one. */
         index = insertIndex;
-    } else if (FrontendPlatform.cpSurfaceCount == MGLPPC_CP_SURFACE_SLOTS) {
-        /* Capacity: overwrite the oldest entry (ring) instead of wiping the
-         * whole cache. Wiping forced the next 16 lookups through synchronous
-         * mailbox queries (the CP_SURF miss storm of 2026-09-20). */
-        ++CpSurfCapResets;
-        index = CpSurfCursor++ % MGLPPC_CP_SURFACE_SLOTS;
     } else {
-        index = FrontendPlatform.cpSurfaceCount++;
+        ULONG set = CpSurfaceSet(token);
+
+        for (index = set; index < set + MGLPPC_CP_SURFACE_WAYS; ++index)
+            if (!FrontendPlatform.cpSurfaces[index].token)
+                break;
+        if (index < set + MGLPPC_CP_SURFACE_WAYS) {
+            ++FrontendPlatform.cpSurfaceCount;
+        } else {
+            /* Full set: overwrite one way (round robin), never the whole
+             * cache (the CP_SURF miss storm of 2026-09-20). */
+            ++CpSurfCapResets;
+            index = set + (CpSurfCursor++ % MGLPPC_CP_SURFACE_WAYS);
+        }
     }
     FrontendPlatform.cpSurfaces[index].token = token;
     FrontendPlatform.cpSurfaces[index].epoch = context->deviceEpoch;
@@ -2709,6 +2775,7 @@ static BOOL SubmitLeaseBatch(struct MiniGLR200Context *context,
         vertices.stateBatch = slot->stateBatch;
         vertices.offsets = slot->stateBatch ? (const ULONG *)slot->stateBatchDraws :
                                             slot->vertexOffsets;
+        vertices.indexOffsets = MGLPPCIndexedDraws ? slot->indexOffsets : NULL;
     }
     /* v6: resolve the drawing buffer before the emitter bakes the target. */
     RefreshCpColorTarget(FrontendPlatform.ring, slot->records,
@@ -2837,6 +2904,7 @@ failed:
     MGLPPCIBTrace("DH2:cpfail.log", failure);
     (void)MGLPPCLeaseEnd();
     FrontendPlatform.cpFailed = TRUE;
+    MGLPPCIndexedDraws = FALSE;
     return FALSE;
 }
 
@@ -3168,6 +3236,7 @@ static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSl
         vertices.stateBatch = slot->stateBatch;
         vertices.offsets = slot->stateBatch ? (const ULONG *)slot->stateBatchDraws :
                                             slot->vertexOffsets;
+        vertices.indexOffsets = MGLPPCIndexedDraws ? slot->indexOffsets : NULL;
     }
     failure = "emit_or_surface";
     /* v6: the host may have rotated the fullscreen drawing buffer since the
@@ -3203,7 +3272,23 @@ static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSl
         {
             /* Dump the header of the draw the emitter stopped on. */
             extern ULONG MGLPPCEmitFailDraw;
+            extern ULONG R200EmitDbgTexReject[9];
+            /* The emitter counts a draw before validating it. */
+            ULONG failDraw = MGLPPCEmitFailDraw ? MGLPPCEmitFailDraw - 1UL : 0;
             ULONG walk = 0, draw = 0, w;
+
+            sprintf(line, "TEX unit=%lu surf=%lux%lu pitch=%lu fmt=%lu off=%lu "
+                    "req=%lux%lu levels=%lu\n",
+                    (unsigned long)R200EmitDbgTexReject[0],
+                    (unsigned long)R200EmitDbgTexReject[1],
+                    (unsigned long)R200EmitDbgTexReject[2],
+                    (unsigned long)R200EmitDbgTexReject[3],
+                    (unsigned long)R200EmitDbgTexReject[4],
+                    (unsigned long)R200EmitDbgTexReject[5],
+                    (unsigned long)R200EmitDbgTexReject[6],
+                    (unsigned long)R200EmitDbgTexReject[7],
+                    (unsigned long)R200EmitDbgTexReject[8]);
+            MGLPPCIBTrace("DH2:cpfail.log", line);
 
             while (walk + 1UL < slot->recordCount) {
                 ULONG op = slot->records[walk], len = slot->records[walk + 1UL];
@@ -3211,7 +3296,29 @@ static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSl
                 if (len < 2UL || len > slot->recordCount - walk)
                     break;
                 if (op != RADEON3D_EXEC_CLEAR) {
-                    if (draw == MGLPPCEmitFailDraw) {
+                    if (draw == failDraw) {
+                        /* Which texture object owns the rejected handle. */
+                        ULONG name;
+
+                        for (name = 0; name < MAX_TEXTURES; ++name) {
+                            const struct TextureObject *t =
+                                &proofContext.textures[name];
+
+                            if (!t->surface.Handle ||
+                                (ULONG)t->surface.Handle != slot->records[walk + 4UL])
+                                continue;
+                            sprintf(line, "TEXOBJ name=%lu %lux%lu levels=%lu "
+                                    "bytes=%lu resident=%lu gen=%lu/%lu\n",
+                                    (unsigned long)name,
+                                    (unsigned long)t->width,
+                                    (unsigned long)t->height,
+                                    (unsigned long)t->levelCount,
+                                    (unsigned long)t->imageBytes,
+                                    (unsigned long)t->resident,
+                                    (unsigned long)t->residentGeneration,
+                                    (unsigned long)t->imageGeneration);
+                            MGLPPCIBTrace("DH2:cpfail.log", line);
+                        }
                         for (w = 0; w < len; w += 8UL) {
                             ULONG k;
                             char *p = line;
@@ -3283,6 +3390,7 @@ static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSl
     return TRUE;
 failed:
     FrontendPlatform.cpFailed = TRUE;
+    MGLPPCIndexedDraws = FALSE;
     MGLPPCIBTrace("DH2:cpfail.log", failure);
     R200PPCConsolePrintf("CP publish failed: %s\n", failure);
     CpDbgPrintf("PUBFAIL %s head=%lu completed=%lu retired=%lu err=%lu "
@@ -4121,6 +4229,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     FrontendPlatform.hostShadowTexture = 0;
     FrontendPlatform.hostShadowDirty = TRUE;
 
+    ProofIndexCacheFree();
     memset(&proofContext, 0, sizeof(proofContext));
     proofContext.width = FrontendPlatform.control.value[1];
     proofContext.height = FrontendPlatform.control.value[2];
@@ -4146,6 +4255,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
             proofContext.batchDwords = (ULONG)cap;
     }
     InitializeFrontendContext(&proofContext);
+    ProofIndexCacheAlloc();
     R200PPCContext = &proofContext;
     FrontendPlatform.contextId = FrontendPlatform.control.contextId;
     FrontendPlatform.windowHandle =
@@ -4176,8 +4286,10 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
     FrontendPlatform.ibSmokeFailed = FALSE;
     FrontendPlatform.ibSegmentBytes = 0;
     FrontendPlatform.cpEnabled = FrontendPlatform.cpFailed = FALSE;
+    MGLPPCIndexedDraws = FALSE;
     FrontendPlatform.cpAddress = NULL;
-    FrontendPlatform.cpBytes = FrontendPlatform.cpSurfaceCount = 0;
+    FrontendPlatform.cpBytes = 0;
+    FrontendClearCpSurfaces();
     FrontendPlatform.cpColorToken = FrontendPlatform.cpColorSeq = 0;
     FrontendPlatform.cpRingCursor = 0;
     memset(FrontendPlatform.cpEntryBytes, 0,
@@ -4311,6 +4423,18 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                 FrontendPlatform.ibSegmentBytes = registerMessage->value[4];
                 FrontendPlatform.cpEnabled =
                     (registerMessage->value[3] & MGLPPC_RING_REGISTER_CP_EMIT) != 0;
+                {
+                    /* Indexed commit draws (default on, MGLPPC_INDEXED=0 turns
+                     * them off) need the PPC CP emitter: the host service
+                     * path only walks vertex lists. */
+                    UBYTE flag[8];
+                    flag[0] = 0;
+                    MGLPPCIndexedDraws = FrontendPlatform.cpEnabled &&
+                        proofContext.indexLocal &&
+                        !(GetVar((CONST_STRPTR)"MGLPPC_INDEXED", flag,
+                                 sizeof(flag), GVF_GLOBAL_ONLY) > 0 &&
+                          flag[0] == '0');
+                }
                 /* Reply-only lease flag: the live driver session advertises
                  * RADEON3D_CAP_PPC_RING, so LEASE_BEGIN may be negotiated. */
                 FrontendPlatform.leaseAvailable =
@@ -4322,6 +4446,7 @@ void *R200PPCDispatchCreateContext(int offx, int offy, int width, int height)
                         vertexCount != MGLPPC_VERTEX_SEGMENTS ||
                         registerMessage->payloadWords != vertexCount * 4UL) {
                         FrontendPlatform.cpFailed = TRUE;
+                        MGLPPCIndexedDraws = FALSE;
                         return NULL;
                     }
                     FrontendPlatform.cpAddress = (APTR)registerMessage->value[5];
@@ -4617,9 +4742,11 @@ static void FrontendAttributionDump(void)
             (unsigned long)perf->indexScanTicks,
             (unsigned long)PlatformProfile.ringStallTicks,
             (unsigned long)PlatformProfile.drainTicks);
-    fprintf(file, "FE verts=%lu prims=%lu submits=%lu flushes=%lu "
+    fprintf(file, "FE indexcache=%lu verts=%lu fetches=%lu prims=%lu submits=%lu flushes=%lu "
             "states=%lu\n",
+            (unsigned long)R200PPCContext->indexCacheSize,
             (unsigned long)perf->inputVertices,
+            (unsigned long)perf->vertexFetches,
             (unsigned long)perf->primitives,
             (unsigned long)perf->submits,
             (unsigned long)perf->flushCalls,
@@ -5020,6 +5147,7 @@ void R200PPCDispatchDeleteContext(void)
     FrontendPlatform.epoch = 0;
     FrontendPlatform.windowHandle = NULL;
     FrontendPlatform.mailboxAbandoned = FALSE;
+    ProofIndexCacheFree();
     memset(&proofContext, 0, sizeof(proofContext));
     R200PPCTraceStr("delctx done");
     R200PPCTraceClose();
@@ -5347,11 +5475,13 @@ void R200PPCDispatchBindTexture(GLenum target, GLuint texture)
      * this wrapper's own control.value[] is set up, because a PlatformCall
      * both reads and overwrites that shared buffer.
      * Quake uploads lightmaps while unit 1 is active (gl_rsurf.c:2160),
-     * so binds must be allowed on either unit. Only unit 0's binding is
-     * shadowed to the host (semanticBoundTexture); unit 1's binding is
-     * local to the draw records. */
-    if (context->activeTexture == 0 &&
-        FrontendPlatform.hostShadowTexture != texture)
+     * so binds must be allowed on either unit. The host has one binding
+     * (its unit 0) and only the upload completers use it, so it shadows
+     * the ACTIVE unit's texture: an upload names whatever the client has
+     * bound on its active unit. Shadowing only unit 0 sent Quake 3's
+     * uploads made while unit 1 was active into the unit-0 texture (the
+     * font), and the reply mirrored that surface under the new name. */
+    if (FrontendPlatform.hostShadowTexture != texture)
         FrontendPlatform.hostShadowDirty = TRUE;
     Lib_glBindTexture(target, texture);
 }
@@ -5364,7 +5494,8 @@ static BOOL HostTextureShadowSync(void)
     if (!context || !FrontendPlatform.opened ||
         !FrontendPlatform.registered || !FrontendPlatform.contextId)
         return TRUE;
-    bound = context->boundTexture[0];
+    bound = context->boundTexture[context->activeTexture > 1UL ? 0UL :
+                                  context->activeTexture];
     if (!FrontendPlatform.hostShadowDirty &&
         FrontendPlatform.hostShadowTexture == bound)
         return TRUE;

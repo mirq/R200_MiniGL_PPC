@@ -95,15 +95,39 @@ flowchart LR
   (position, packed color, texture coordinates, optional normal index) to the
   context vertex buffer.
 - `glDrawArrays`/`glDrawElements` use the same append path; indexed draws have
-  a small index cache (`indexCacheVerts`, `indexCacheStamp`).
-- `glInterleavedArrays` and the client array pointers feed the same machinery;
-  `GLLockArrays`/`GLUnlockArrays` are honoured. `EXT_compiled_vertex_array`
-  freezes the vertex array only: locked draws keep positions, normals and fog
-  from the lock snapshot but read colour and texture coordinates **live**
-  from the client arrays. Clients (Quake's stage iterators) legitimately
-  rewrite those arrays between `glLockArrays` and the draw; serving the
-  frozen copy sampled the previous surface's coordinates (scrambled/solid
-  2D glyphs, white world base textures, noisy model skins).
+  a 64K-entry index cache (`indexCacheVerts`, `indexCacheStamp`) that fetches
+  each referenced vertex once per draw. The PPC DLL context (`proofContext`)
+  allocates it in `ProofIndexCacheAlloc` together with the per-chunk local map
+  (`indexLocal`, `indexLocalStamp`). Before 2026-10-21 only the 68k library's
+  `CreateContext` allocated it, so on the PPC every drawn index was a full
+  vertex fetch (Quake 3 800x600: 46.2 -> 49.5 FPS once it was allocated).
+- **Indexed commit draws** (`MGLPPCIndexedDraws`, on while the PPC CP emitter
+  is live; `MGLPPC_INDEXED=0` opts out): `DrawElementsIndexed` stages each
+  chunk of at most `MAX_SCREEN_VERTICES` (255) triangle-list indices as its
+  unique vertices plus a 16-bit index list (`screenIndices`). The flush sizes,
+  budgets and validates the chunk as the expanded list it replaces (record
+  vertex count = index count, segment reservation = expanded bytes), so every
+  capacity check is unchanged; it serializes only the unique vertices, writes
+  the index list right after them (little-endian dwords, first index in the
+  low half) and records its segment offset in `slot->indexOffsets[draw]`.
+  The emitter then fires `DRAW_INDX_2` (`WALK_IND`) + `INDX_BUFFER` (Mesa
+  `r200FireEB`) instead of `DRAW_VBUF_2`. Indexed records never merge; a
+  chunk with too little reuse to fit inside the reservation, or one that
+  lands on the inline (non-commit) path, is expanded back to front in place.
+  `COMMIT_DRAW_DWORDS` budgets the 4 extra CP dwords for every commit draw
+  while indexed mode is on. Quake 3: vertex bytes per frame roughly halve
+  (6.8M fetches for 13.8M indices), 49.8 -> 58.9 FPS.
+- `glInterleavedArrays` and the client array pointers feed the same machinery.
+  `GLLockArrays`/`GLUnlockArrays` only record the locked range: every draw
+  reads all attributes live from the client arrays. Clients (Quake's stage
+  iterators) rewrite colour and texture coordinates between `glLockArrays`
+  and the draw, and the old per-lock `AllocMem` copy of every vertex cost
+  Quake 3 two-pass lightmaps ~30 ms per frame.
+- `glClientActiveTextureARB` selects which texture-coordinate array
+  (`texcoordArray` for unit 0, `texcoord1Array` for unit 1) `glTexCoordPointer`
+  and `GL_TEXTURE_COORD_ARRAY` client state address; `FetchArrayVertex`
+  fills `s1/t1` from the unit-1 array, so ARB_multitexture vertex arrays
+  (Quake 3 single-pass lightmaps) draw in one pass.
 - Multitexture: unit-1 coordinates are captured into a small queue and flushed
   as `MGLDrawMultitexBuffer` before the main draw when needed.
 - Indexed `GL_TRIANGLES` (`glDrawElements`) take the fused path
@@ -129,6 +153,7 @@ little-endian word format. Kernels live in `backend_r200/client/`:
 | `MGLPPCSwapLit10` | unlit vertex, 10 dwords |
 | `MGLPPCSwapTCL10` | TCL record, 10 dwords (hot path) |
 | `MGLPPCSwapTCL7` | compact TCL, 7 dwords |
+| `SwapTCL9` (`r200_geometry.c`) | compact unlit TCL with unit 1, 9 dwords |
 
 Stride selection is lit-aware. The compact TCL stride (7 dwords) is declared
 only for lit/normal-vertex records (`state->normalVertex`), whose normals are
@@ -138,7 +163,12 @@ unlit compact stride made the service read the unwritten normal dwords as
 colour and texture coordinates — a constant texel per primitive (solid 2D
 text, white world textures) — so unlit draws never set
 `RADEON3D_DRAW_COMPACT_VERTEX` even when
-`RADEON3D_CAP_COMPACT_TCL_VERTEX` is available.
+`RADEON3D_CAP_COMPACT_TCL_VERTEX` is available. The one unlit exception is the
+9-dword `x,y,z,w,colour,s0,t0,s1,t1` stride (two units, no fog, PPC CP emitter
+only): it drops just the trailing fog dword, so every written dword stays in
+place. The emitter derives that stride from the record's vertex state once it
+is read (`Radeon3DEmitDraw`) and its inline vertex walk skips the fog-slot
+zero check for compact strides.
 
 They use `stwbrx` with source stride == record dwords and masks for disabled
 attributes. A scalar head/tail plus an AltiVec middle path
@@ -273,8 +303,14 @@ using the shared `radeon3d_emit.c`. `MGLPPCEmitBatch` accepts up to 8192 dwords
 and 192 draws, publishes `[byteOffset, dwordCount, vertexSegmentMask]`, and
 packs batches into the CP segment as a FIFO (`CpRingReserve`, ring control
 v7): a batch's space is reused only after its entry retires, and the PPC may
-run up to 32 entries ahead of retirement. Surface descriptors are cached (default
-128) and invalidated on resource/lifecycle changes. Fullscreen BLIT is
+run up to 32 entries ahead of retirement. Surface descriptors are cached in a
+4-way set-associative table (`MGLPPC_CP_SLOTS`, default 2048; round-robin
+victim per set) and invalidated on resource/lifecycle changes; the old
+128-entry table thrashed on Quake 3 lightmaps (3,541 misses per demo, 45.2
+FPS) where the set-associative one misses 260 times (50.6 FPS). The host
+binding shadow (`hostShadowTexture`) mirrors the binding of the **active**
+texture unit; mirroring unit 0 only let a unit-1 bind reuse a stale handle
+(a 256x256 lightmap resolved to a 16x7 surface, emit stage 0x58). Fullscreen BLIT is
 validated; FLIP has a documented race. Deep spec:
 [reference/CP_EMITTER.md](reference/CP_EMITTER.md).
 
@@ -367,6 +403,7 @@ sequenceDiagram
 | `MGLPPC_FORCEMIP` | `1`: a `GL_LINEAR`-minified texture with a complete app-uploaded mip chain samples the chain (`LINEAR_MIPMAP_NEAREST`); read at platform open. Breaks pictures that upload only level 0 (Quake HUD/console) |
 | `MGLPPC_CLEARBLEND` | `1`: restore the old depth-only clear workaround (no-op blend `SRC=ZERO, DST=ONE` + full state re-emit) instead of `R200_PLANE_MASK_ENABLE` |
 | `MGLPPC_BATCHDW` | diagnostic: cap the CP batch budget in dwords (>= 1024); used to measure per-IB cost |
+| `MGLPPC_INDEXED` | `0`: disable indexed commit draws (`DRAW_INDX_2`, section 4.1); default on with the CP emitter |
 
 ## 12. Invariants to preserve
 

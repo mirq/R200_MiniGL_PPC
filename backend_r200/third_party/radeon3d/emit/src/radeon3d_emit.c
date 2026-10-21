@@ -34,6 +34,9 @@
  * published as plain memory for the frontend's record logger
  * (DH2:recstate.log). Deliberately no I/O here. */
 ULONG R200EmitDbgOptions, R200EmitDbgVertexState, R200EmitDbgVertexCount;
+/* Rejected texture surface (unit, width, height, pitch, format, offset,
+ * requested width/height/levels) for the client's failure log. */
+ULONG R200EmitDbgTexReject[9];
 ULONG R200EmitDbgTextured, R200EmitDbgNormal, R200EmitDbgCompact;
 ULONG R200EmitDbgStride, R200EmitDbgColorOff, R200EmitDbgSTOff;
 ULONG R200EmitDbgTexGen;
@@ -1311,7 +1314,8 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
     BOOL perspective=hardwareTcl || (extendedVertex &&
                      (vertexState & RADEON3D_VERTEX_CLIP_COORDINATES));
     ULONG tclStride = hardwareTcl ?
-        (compactVertex ? (normalVertex ? 10UL : 7UL) :
+        (compactVertex ? (normalVertex ? 10UL :
+                          (vertexState & RADEON3D_VERTEX_TEXTURE1) ? 9UL : 7UL) :
          normalVertex ? RADEON3D_EXEC_HW_TCL_NORMAL_VERTEX_DWORDS :
                         RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS) : 0UL;
     ULONG dwordsPerVertex = hardwareTcl ?
@@ -1411,6 +1415,27 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
                               emitter->CommitVbufAddress +
                                   (ULONG)offsets[array] * 4UL)))
             return FALSE;
+        if (emitter->CommitIndexOffset)
+            /* Indexed draw (Mesa r200FireEB): vertexCount is the index
+             * count; the 16-bit list lives in the segment after the
+             * draw's unique vertices and the CP fetches it. */
+            return ExecuteEmitWord(
+                       emitter,
+                       RADEON_CP_PACKET3(R200_CP_CMD_3D_DRAW_INDX_2, 0UL)) &&
+                   ExecuteEmitWord(emitter,
+                                   (vertexCount << 16) |
+                                       R200_CP_VC_CNTL_PRIM_WALK_IND |
+                                       R200_VF_TCL_OUTPUT_VTX_ENABLE |
+                                       primitiveType) &&
+                   ExecuteEmitWord(
+                       emitter,
+                       RADEON_CP_PACKET3(R200_CP_CMD_INDX_BUFFER, 2UL)) &&
+                   ExecuteEmitWord(emitter,
+                                   (0x80UL << 24) | (0UL << 16) | 0x810UL) &&
+                   ExecuteEmitWord(emitter,
+                                   emitter->CommitSegmentGpuBase +
+                                       emitter->CommitIndexOffset) &&
+                   ExecuteEmitWord(emitter, (vertexCount + 1UL) >> 1);
         return ExecuteEmitWord(
                    emitter,
                    RADEON_CP_PACKET3(R200_CP_CMD_3D_DRAW_VBUF_2, 0UL)) &&
@@ -1521,9 +1546,10 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
                      ? (!ValidTextureCoordinate(input[st1Index]) ||
                         !ValidTextureCoordinate(input[st1Index + 1UL]))
                       : (input[st1Index] || input[st1Index + 1UL])) ||
+                /* compact strides end before the fog slot */
                 (vertexState & RADEON3D_VERTEX_FOG
                      ? !ValidUnitFloat(input[fogIndex])
-                      : input[fogIndex]))
+                      : !compactVertex && input[fogIndex]))
                 return FALSE;
             if (!ExecuteEmitWord(emitter,input[0]) ||
                 !ExecuteEmitWord(emitter,input[1]) ||
@@ -1801,6 +1827,8 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
         extendedVertex ? RADEON3D_EXEC_EXTENDED_VERTEX_DWORDS
                        : RADEON3D_EXEC_VERTEX_DWORDS;
     if (emitter->CommitVbuf) {
+        emitter->CommitIndexOffset = emitter->CommitIndexOffsets
+            ? emitter->CommitIndexOffsets[emitter->CommitDrawIndex] : 0UL;
         commitOffset =
             emitter->CommitVertexOffsets[emitter->CommitDrawIndex++];
         emitter->CommitVbufAddress = emitter->CommitSegmentGpuBase +
@@ -1868,6 +1896,10 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
     }
     textured1 = extendedVertex &&
                 (vertexState & RADEON3D_VERTEX_TEXTURE1) != 0;
+    /* The vertex state is only known here: the unlit compact stride
+     * keeps the unit-1 pair (9 dwords) when unit 1 is active. */
+    if (hardwareTcl && compactVertex && !normalVertex && textured1)
+        vertexStride = 9UL;
     fog = extendedVertex &&
           (vertexState & RADEON3D_VERTEX_FOG) != 0;
     perspective = extendedVertex &&
@@ -1951,10 +1983,13 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
                      minFilter1 >
                          RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR ||
                      (fogColor & 0xff000000UL))) ||
+         /* Compact strides drop the unused tail: never fog; unit 1 only
+          * in the 9-dword unlit shape (x,y,z,w,colour,s0,t0,s1,t1). */
          (options & RADEON3D_DRAW_COMPACT_VERTEX &&
           (!hardwareTcl ||
-           (vertexState & (RADEON3D_VERTEX_TEXTURE1 |
-                           RADEON3D_VERTEX_FOG)))) ||
+           (vertexState & RADEON3D_VERTEX_FOG) ||
+           (normalVertex &&
+            (vertexState & RADEON3D_VERTEX_TEXTURE1)))) ||
          (options & RADEON3D_DRAW_BILINEAR && !textured) ||
         (options & RADEON3D_DRAW_ALPHA_BLEND && !textured) ||
         (options & RADEON3D_DRAW_DEPTH_FUNC_MASK &&
@@ -2035,10 +2070,21 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
                                                   textureOffset, textureWidth,
                                                   textureHeight, levels,
                                                   &textureBytes))
+            {
                 detail = TextureRejectReason(texture, color,
                                              useDepth ? depth : NULL,
                                              textureOffset, textureWidth,
                                              textureHeight, levels);
+                R200EmitDbgTexReject[0] = 0;
+                R200EmitDbgTexReject[1] = texture ? texture->Width : 0;
+                R200EmitDbgTexReject[2] = texture ? texture->Height : 0;
+                R200EmitDbgTexReject[3] = texture ? texture->Pitch : 0;
+                R200EmitDbgTexReject[4] = texture ? texture->Format : 0;
+                R200EmitDbgTexReject[5] = textureOffset;
+                R200EmitDbgTexReject[6] = textureWidth;
+                R200EmitDbgTexReject[7] = textureHeight;
+                R200EmitDbgTexReject[8] = levels;
+            }
             else if (textured && !fragmentStatePresent &&
                      !ValidTextureTarget(texture, color, depth))
                 detail = 64UL;
@@ -2283,7 +2329,8 @@ BOOL Radeon3DEmitVbufDraw(                                struct Radeon3DEmitter
         return FALSE;
     options = state->Options;
     vertexStride = (options & RADEON3D_DRAW_COMPACT_VERTEX)
-        ? (state->NormalVertex ? 10UL : 7UL)
+        ? (state->NormalVertex ? 10UL :
+           (state->VertexState & RADEON3D_VERTEX_TEXTURE1) ? 9UL : 7UL)
         : (state->NormalVertex ? RADEON3D_EXEC_HW_TCL_NORMAL_VERTEX_DWORDS
                                : RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS);
     if ((primitiveType == R200_CP_VC_CNTL_PRIM_TYPE_POINT_LIST
@@ -2326,6 +2373,7 @@ BOOL Radeon3DEmitReuseDraw(                                 struct Radeon3DEmitt
 
     if (length != RADEON3D_EXEC_REUSE_DWORDS)
         return FALSE;
+    emitter->CommitIndexOffset = 0;
     commitOffset =
         emitter->CommitVertexOffsets[emitter->CommitDrawIndex++];
     return Radeon3DEmitVbufDraw(emitter, commitOffset, record[2],

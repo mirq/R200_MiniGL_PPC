@@ -135,10 +135,16 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     if (vertices) {
         for (index = 0; index < vertices->drawCount; ++index) {
             ULONG offset = vertices->offsets[index * (stateBatch ? 2UL : 1UL)];
+            ULONG indexOffset = vertices->indexOffsets
+                ? vertices->indexOffsets[index] : 0UL;
 
             if ((offset & 3UL) || offset >= vertices->bytes ||
                 (stateBatch && !vertices->offsets[index * 2UL + 1UL]))
                 EMIT_REJECT(0x100BUL);
+            if (indexOffset &&
+                ((indexOffset & 3UL) || indexOffset <= offset ||
+                 indexOffset >= vertices->bytes))
+                EMIT_REJECT(0x100CUL);
         }
     }
 
@@ -167,6 +173,8 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     emitter->CommitSegmentGpuBase = vertices ? vertices->gpuAddress : 0;
     emitter->CommitSegmentBytes = vertices ? vertices->bytes : 0;
     emitter->CommitVertexOffsets = vertices ? vertices->offsets : NULL;
+    emitter->CommitIndexOffsets = vertices ? vertices->indexOffsets : NULL;
+    emitter->CommitIndexOffset = 0;
     emitter->CommitDrawIndex = 0;
     emitter->CommitVbufAddress = 0;
 
@@ -176,9 +184,12 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
         MGLPPCEmitHeader[10] = vertices->offsets[1];
         built = Radeon3DEmitDraw(emitter, MGLPPCEmitHeader, recordDwords,
                                 primitiveType);
-        for (index = 1; built && index < vertices->drawCount; ++index)
+        for (index = 1; built && index < vertices->drawCount; ++index) {
+            emitter->CommitIndexOffset = vertices->indexOffsets
+                ? vertices->indexOffsets[index] : 0UL;
             built = Radeon3DEmitVbufDraw(emitter, vertices->offsets[index * 2UL],
                 vertices->offsets[index * 2UL + 1UL], primitiveType);
+        }
     } else {
         built = Radeon3DEmitStream(emitter, records, recordDwords);
         if (vertices && emitter->CommitDrawIndex != vertices->drawCount)
@@ -189,6 +200,8 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     emitter->CommitSegmentGpuBase = 0;
     emitter->CommitSegmentBytes = 0;
     emitter->CommitVertexOffsets = NULL;
+    emitter->CommitIndexOffsets = NULL;
+    emitter->CommitIndexOffset = 0;
     emitter->CommitDrawIndex = 0;
     emitter->CommitVbufAddress = 0;
     emitter->StateValid = FALSE;

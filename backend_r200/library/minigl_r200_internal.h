@@ -120,6 +120,9 @@ ULONG DepthStorageWidth(ULONG width);
  * worst-case LOAD_VBPNTR for 6 arrays (1 packet + 1 count + 9 descriptor
  * words) plus the 2-dword DRAW_VBUF_2. The minimum emission is 8. */
 #define COMMIT_FETCH_DWORDS 13UL
+/* An indexed commit draw fires DRAW_INDX_2 + INDX_BUFFER (6 dwords) instead
+ * of the 2-dword DRAW_VBUF_2. */
+#define COMMIT_INDEXED_EXTRA_DWORDS 4UL
 /* Segment streaming is the accepted default: the T5 acceptance matrix
  * passed with it enabled and gears gains ~13%. Define this to 0 to fall
  * back to the inline Execute path. */
@@ -192,6 +195,7 @@ ULONG DepthStorageWidth(ULONG width);
  * omitted instead of carried as zeros. */
 #define R200_LIT_VERTEX_COMPACT_DWORDS 10UL
 #define R200_TCL_VERTEX_COMPACT_DWORDS 7UL
+#define R200_TCL_VERTEX_TEX1_COMPACT_DWORDS 9UL
 
 /* Light-block dword offsets (24 vector dwords then 7 scalars), matching
  * Mesa classic r200's LIT_* scalar order. */
@@ -466,6 +470,9 @@ struct SubmitSlot {
     ULONG drawCount;
     ULONG vertexOffsets[MAX_SLOT_DRAWS];
     struct Radeon3DStateBatchDraw stateBatchDraws[MAX_SLOT_DRAWS];
+    /* Indexed commit draws: segment byte offset of the draw's 16-bit
+     * index list (DRAW_INDX_2), or 0 for a plain vertex-list draw. */
+    ULONG indexOffsets[MAX_SLOT_DRAWS];
     ULONG segmentCursor;
 };
 
@@ -625,6 +632,11 @@ struct MiniGLR200Context {
     struct ScreenVertex screenVertices[SCREEN_VERTEX_CAPACITY];
     ULONG vertexCount;
     ULONG screenVertexCount;
+    /* Indexed staging (glDrawElements chunks): screenVertices holds the
+     * chunk's unique vertices and screenIndices the triangle list into them.
+     * screenIndexCount == 0 means a plain expanded vertex list. */
+    UWORD screenIndices[SCREEN_VERTEX_CAPACITY];
+    ULONG screenIndexCount;
     ULONG screenCommand;
     /* Projective layout requested by the primitive currently being emitted.
      * pendingDraw captures the immutable effective value at first append. */
@@ -663,6 +675,9 @@ struct MiniGLR200Context {
     struct ArrayState vertexArray;
     struct ArrayState colorArray;
     struct ArrayState texcoordArray;
+    /* Unit-1 texture coordinate array (glClientActiveTextureARB). */
+    struct ArrayState texcoord1Array;
+    ULONG clientActiveTexture;
     struct ArrayState normalArray;
     /* Fixed-function lighting (interface 11). */
     struct LightState lights[R200_MAX_LIGHTS];
@@ -718,6 +733,11 @@ struct MiniGLR200Context {
     struct Vertex *indexCacheVerts;
     ULONG *indexCacheStamp;
     ULONG indexCacheSize;
+    /* Per-chunk map from a GL index to its slot in screenVertices, valid
+     * while indexLocalStamp[value] == indexLocalGeneration. */
+    UWORD *indexLocal;
+    ULONG *indexLocalStamp;
+    ULONG indexLocalGeneration;
     ULONG indexCacheGeneration;
     /* mglDrawMultitexBuffer queue: polygons captured at glEnd() while
      * unit 1 is enabled, flushed two-pass by Lib_mglDrawMultitexBuffer().
@@ -1071,6 +1091,9 @@ void MGLPPCSwapTCL7(ULONG *destination, const ULONG *source, ULONG count,
  * vector blocks move it to the aperture. Byte-identical output; only used
  * when MGLPPCAltiVecVertexEnabled is set by the runtime CPU probe. */
 extern BOOL MGLPPCAltiVecVertexEnabled;
+/* Set by the platform while the PPC CP emitter is live (MGLPPC_INDEXED=0 opts out):
+ * glDrawElements triangles go out as indexed commit draws (DRAW_INDX_2). */
+extern BOOL MGLPPCIndexedDraws;
 void MGLPPCAltiVecVertexProbe(void);
 void MGLPPCSwapLit13Vector(ULONG *destination, const ULONG *source,
                            ULONG count, ULONG unit0Mask, ULONG unit1Mask,

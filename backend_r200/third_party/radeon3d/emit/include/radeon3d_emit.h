@@ -189,6 +189,10 @@ struct Radeon3DEmitter {
     const ULONG *CommitVertexOffsets;
     ULONG CommitDrawIndex;
     ULONG CommitVbufAddress;
+    /* Indexed commit draws: per-draw index-list offsets (NULL = none) and
+     * the current draw's, or 0 for a plain DRAW_VBUF_2. */
+    const ULONG *CommitIndexOffsets;
+    ULONG CommitIndexOffset;
 };
 
 /* Point Live/Build at the emitter's two captures. Call once per submission,
