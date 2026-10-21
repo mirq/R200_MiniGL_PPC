@@ -450,6 +450,31 @@ same pair as 7.2 except DLL `857FB757` (warpelf `891ADEB9`,
 640x480x16, native modules, `r_primitives 0`) renders the world and HUD
 correctly with this DLL (frame readback via `glReadPixels`).
 
+### 7.4 Quake 3 800x600x16 above 60 FPS with music (2026-10-21)
+
+Quake 3 timedemo `four`, 800x600x16, lightmaps (`r_vertexLight 0`,
+`r_ext_multitexture 1`, `r_picmip 0`), AHI sound and music on, CP emit,
+`MGLPPC_EXPAND_MIN=0`. Steps in order (MiniGL and Quake 3 side):
+
+| Change | FPS |
+|---|---|
+| start | 46.3 |
+| PPC index cache allocated (section 4.1 of frontend-r200.md) | 49.8 |
+| music WAV preloaded (Quake 3) | 52.3 |
+| indexed commit draws (`DRAW_INDX_2`) | 58.9 |
+| stdout 64 KB buffered (Quake 3) | 59.5 |
+| input port read without `GetMsg` when empty (Quake 3) | **60.3 / 60.8 / 60.6** |
+
+Profile (MiniGL profile build, per frame, 24.74 MHz timebase) with indexed
+draws: draw 9.25 ms, of which serialize 3.95 ms (bus-bound, ~232 KB/frame
+at ~59 MB/s), CP execute 1.92 ms (emit 1.03, copy 0.37, resolve 0.34).
+Quake 3 backend time fits ~0.066 ms per shader + ~0.0013 ms per vertex, so
+large views (many shaders and surfaces) are the slow frames. The 9-dword
+compact TCL stride is functionally correct but within noise.
+
+Quake 1 gate with the final DLL (demo3 800x600x16): 62.073 / 62.215 / 61.791,
+**median 62.073**.
+
 ## 8. Regression catalogue
 
 Every row was measured; use this as a checklist when a run looks wrong.

@@ -149,6 +149,7 @@ void Lib_mglProhibitAlphaFallback(GLboolean flag);
 void Lib_mglProhibitMipMapping(GLboolean flag);
 void Lib_mglProposeCloseDesktop(GLboolean closeme);
 void Lib_glPolygonOffset(GLfloat factor, GLfloat units);
+void Lib_glClientActiveTextureARB(GLenum unit);
 void Lib_glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer);
 void Lib_mglEmergencyCloseScreen(void);
 GLboolean Lib_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp);
@@ -925,7 +926,7 @@ static void R200_GLPolygonOffset(GLcontext context, GLfloat factor, GLfloat unit
 static void R200_GLClientActiveTextureARB(GLcontext context, GLenum unit)
 {
     (void)context;
-    (void)unit;
+    Lib_glClientActiveTextureARB(unit);
 }
 
 static void R200_GLInterleavedArrays(GLcontext context, GLenum format, GLsizei stride, const GLvoid *pointer)

@@ -55,6 +55,47 @@ typedef char ScreenVertexSerializeLayoutCheck[
 #define R200_EXPAND_MISMATCH_MIN 4UL
 #endif
 
+/* One little-endian dword into the VRAM aperture (the serializer kernels'
+ * byte order). */
+static inline void StoreLE32(ULONG *destination, ULONG value)
+{
+#if defined(__PPC__) && !defined(__m68k__)
+    __asm__ __volatile__ ("stwbrx %0,0,%1" : : "r" (value), "r" (destination)
+                          : "memory");
+#else
+    *destination = (value >> 24) | ((value >> 8) & 0xff00UL) |
+                   ((value << 8) & 0xff0000UL) | (value << 24);
+#endif
+}
+
+#if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
+/* 9-dword plain TCL record x,y,z,w,colour,s0,t0,s1,t1 from the 13-dword
+ * ScreenVertex (colour in lane 7, normals skipped): MGLPPCSwapTCL10
+ * without the fog dword. */
+static void SwapTCL9(ULONG *destination, const ULONG *source, ULONG count,
+                     ULONG unit0Mask, ULONG unit1Mask)
+{
+    while (count--) {
+        StoreLE32(destination + 0, source[0]);
+        StoreLE32(destination + 1, source[1]);
+        StoreLE32(destination + 2, source[2]);
+        StoreLE32(destination + 3, source[3]);
+        StoreLE32(destination + 4, source[7]);
+        StoreLE32(destination + 5, source[8] & unit0Mask);
+        StoreLE32(destination + 6, source[9] & unit0Mask);
+        StoreLE32(destination + 7, source[10] & unit1Mask);
+        StoreLE32(destination + 8, source[11] & unit1Mask);
+        destination += 9;
+        source += 13;
+    }
+}
+#endif
+
+/* CP dwords a commit draw generates; indexed mode may fire any commit draw
+ * as DRAW_INDX_2 + INDX_BUFFER, so budget that shape for all of them. */
+#define COMMIT_DRAW_DWORDS (COMMIT_FETCH_DWORDS + \
+    (MGLPPCIndexedDraws ? COMMIT_INDEXED_EXTRA_DWORDS : 0UL))
+
 static BOOL CanExpandStateBatch(struct MiniGLR200Context *context,
                                struct SubmitSlot *slot, ULONG nextHeader,
                                ULONG nextGenerated, ULONG *expandedGenerated)
@@ -71,7 +112,7 @@ static BOOL CanExpandStateBatch(struct MiniGLR200Context *context,
                             slot->drawCount + 1UL, FALSE, R200_PPC_FRONTEND))
         return FALSE;
     return R200ExpandedBatchCost(slot->generatedDwordCount, slot->drawCount,
-                                COMMIT_FETCH_DWORDS,
+                                COMMIT_DRAW_DWORDS,
                                 context->batchDwords - nextGenerated,
                                 (slot->records[5] & RADEON3D_DRAW_LIGHTING) != 0,
                                 expandedGenerated);
@@ -283,6 +324,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
     BOOL merge = FALSE;
     BOOL useCommit, stateBatch;
     ULONG vertexBytes;
+    ULONG indexCount, uniqueCount, serializeCount, commitDraw = ~0UL;
     ULONG serializeStart = 0, executeBefore = 0, waitBefore = 0;
 #if R200_PPC_FRONTEND
     ULONG stallBefore = 0;
@@ -298,6 +340,8 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         return TRUE;
     if (!context->pendingDrawValid)
         return FALSE;
+    indexCount = context->screenIndexCount;
+    context->screenIndexCount = 0;
 #if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
     /* Geometry being flushed is the last chance to install a deferred
      * direct-texture tile before the records naming the texture are
@@ -357,6 +401,25 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                 return FALSE;
             }
         }
+    }
+    uniqueCount = context->screenVertexCount;
+    if (indexCount) {
+        /* An indexed chunk is sized, budgeted and validated as the expanded
+         * vertex list it replaces (record vertex count = index count), so
+         * every capacity check and the segment reservation are unchanged;
+         * only the serializer writes less. A chunk without enough reuse to
+         * fit unique vertices + indices inside that reservation goes out
+         * as the plain list. */
+        if (uniqueCount * vertexDwords * 4UL + ((indexCount + 1UL) & ~1UL) * 2UL >
+            indexCount * vertexDwords * 4UL) {
+            ULONG k = indexCount;
+            while (k-- > 0)
+                context->screenVertices[k] =
+                    context->screenVertices[context->screenIndices[k]];
+            uniqueCount = indexCount;
+            indexCount = 0;
+        }
+        context->screenVertexCount = indexCount ? indexCount : uniqueCount;
     }
     vertexBytes = context->screenVertexCount * vertexDwords * 4UL;
     /* Streaming commits place the vertices in this slot's segment half and
@@ -419,7 +482,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                                        state->textured[1], state->fog,
                                        texgen, state->normalVertex,
                                        state->enabledLights) +
-              (useCommit ? COMMIT_FETCH_DWORDS : 0UL)
+              (useCommit ? COMMIT_DRAW_DWORDS : 0UL)
         : GeneratedDrawDwords(context->screenVertexCount, state->depth,
                               state->textured[0], state->textured[1],
                               state->fog, state->perspective);
@@ -487,11 +550,11 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
     if (stateBatch) {
         required = slot->drawCount ? 0UL : headerDwords;
         generatedRequired = slot->drawCount
-            ? COMMIT_FETCH_DWORDS
+            ? COMMIT_DRAW_DWORDS
             : GeneratedHardwareDrawDwords(
                   0UL, state->depth, state->textured[0], state->textured[1],
                   state->fog, texgen, state->normalVertex, state->enabledLights) +
-                  COMMIT_FETCH_DWORDS;
+                  COMMIT_DRAW_DWORDS;
         growthRequired = required;
         generatedGrowth = generatedRequired;
         if (slot->drawCount >= MAX_SLOT_DRAWS ||
@@ -516,7 +579,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                 generatedRequired = GeneratedHardwareDrawDwords(
                     0UL, state->depth, state->textured[0],
                     state->textured[1], state->fog, texgen, state->normalVertex,
-                    state->enabledLights) + COMMIT_FETCH_DWORDS;
+                    state->enabledLights) + COMMIT_DRAW_DWORDS;
                 generatedGrowth = generatedRequired;
             }
         }
@@ -534,6 +597,8 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                 slot->vertexOffsets[slot->drawCount];
             slot->stateBatchDraws[slot->drawCount].VertexCount =
                 context->screenVertexCount;
+            commitDraw = slot->drawCount;
+            slot->indexOffsets[slot->drawCount] = 0;
             slot->drawCount++;
             slot->lastDrawValid = FALSE;
             destination = (ULONG *)
@@ -550,7 +615,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
             state->enabledLights);
     }
     header[1] = required;
-    if (slot->lastDrawValid &&
+    if (!indexCount && slot->lastDrawValid &&
         slot->lastDrawOffset < slot->recordCount) {
         record = slot->records + slot->lastDrawOffset;
         merge = slot->lastDrawHeaderDwords == headerDwords &&
@@ -617,7 +682,7 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
                   useCommit ? 0UL : context->screenVertexCount,
                   state->depth, state->textured[0], state->textured[1],
                   state->fog, texgen, state->normalVertex, state->enabledLights) +
-                  (useCommit ? COMMIT_FETCH_DWORDS : 0UL)
+                  (useCommit ? COMMIT_DRAW_DWORDS : 0UL)
             : GeneratedDrawDwords(context->screenVertexCount, state->depth,
                                   state->textured[0], state->textured[1],
                                   state->fog, state->perspective);
@@ -647,6 +712,8 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
             record[index] = header[index];
         destination = record + headerDwords;
         if (useCommit) {
+            commitDraw = slot->drawCount;
+            slot->indexOffsets[slot->drawCount] = 0;
             slot->vertexOffsets[slot->drawCount++] =
                 context->buildSlot * SEGMENT_HALF_BYTES +
                 slot->segmentCursor;
@@ -657,6 +724,20 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         }
     }
 serialize_vertices:
+    serializeCount = context->screenVertexCount;
+    if (indexCount) {
+        if (useCommit && commitDraw != ~0UL) {
+            serializeCount = uniqueCount;
+        } else {
+            /* Inline records carry the vertex list itself: expand back to
+             * front (each index names a slot at or below its position). */
+            ULONG k = indexCount;
+            while (k-- > 0)
+                context->screenVertices[k] =
+                    context->screenVertices[context->screenIndices[k]];
+            indexCount = 0;
+        }
+    }
 #if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
     /* PPC mirrors of the m68k movem serializers: the commit-mode record
      * shapes are contiguous ScreenVertex prefixes (plain TCL relocates
@@ -665,7 +746,7 @@ serialize_vertices:
      * that do not match a kernel fall through to the generic loop. */
     if (hardwareTransform && useCommit) {
         const ULONG *serialSource = (const ULONG *)context->screenVertices;
-        ULONG serialCount = context->screenVertexCount;
+        ULONG serialCount = serializeCount;
         BOOL vector = MGLPPCAltiVecVertexEnabled;
 
         if (state->normalVertex &&
@@ -699,6 +780,13 @@ serialize_vertices:
                 MGLPPCSwapTCL10(destination, serialSource, serialCount,
                                 unit0Mask, unit1Mask, fogMask);
         } else if (!state->normalVertex &&
+                   vertexDwords == R200_TCL_VERTEX_TEX1_COMPACT_DWORDS &&
+                   sizeof(struct ScreenVertex) == 13UL * sizeof(ULONG)) {
+            context->perf.serializeKernelFlushes++;
+            context->perf.serializeKernelVertices += serialCount;
+            SwapTCL9(destination, serialSource, serialCount,
+                     unit0Mask, unit1Mask);
+        } else if (!state->normalVertex &&
                    vertexDwords == R200_TCL_VERTEX_COMPACT_DWORDS) {
             context->perf.serializeKernelFlushes++;
             context->perf.serializeKernelVertices += serialCount;
@@ -715,7 +803,7 @@ serialize_vertices:
     }
 #endif
 serialize_generic:
-    for (index = 0; index < context->screenVertexCount; ++index) {
+    for (index = 0; index < serializeCount; ++index) {
         struct ScreenVertex *vertex = &context->screenVertices[index];
         if (hardwareTransform && !useCommit && state->normalVertex &&
             vertexDwords == R200_LIT_VERTEX_DWORDS &&
@@ -974,7 +1062,8 @@ serialize_generic:
             STORE_DWORD(6, state->textured[0] ? FloatBits(vertex->t) : 0);
             STORE_DWORD(7, state->textured[1] ? FloatBits(vertex->s1) : 0);
             STORE_DWORD(8, state->textured[1] ? FloatBits(vertex->t1) : 0);
-            STORE_DWORD(9, state->fog ? FloatBits(vertex->fog) : 0);
+            if (vertexDwords > R200_TCL_VERTEX_TEX1_COMPACT_DWORDS)
+                STORE_DWORD(9, state->fog ? FloatBits(vertex->fog) : 0);
             }
             }
             #undef STORE_DWORD
@@ -1011,8 +1100,28 @@ serialize_done:
                 ((ULONG)context->segment.info.CpuAddress +
                  context->buildSlot * SEGMENT_HALF_BYTES +
                  slot->segmentCursor + vertexBytes - sizeof(ULONG));
+        if (indexCount) {
+            /* The 16-bit index list follows the unique vertices; dwords are
+             * little-endian in VRAM like the vertex data, first index in the
+             * low half. */
+            ULONG indexOffset = slot->vertexOffsets[commitDraw] +
+                                uniqueCount * vertexDwords * 4UL;
+            ULONG *out = (ULONG *)((ULONG)context->segment.info.CpuAddress +
+                                   indexOffset);
+            const UWORD *in = context->screenIndices;
+            ULONG k;
+
+            for (k = 0; k + 1UL < indexCount; k += 2UL)
+                StoreLE32(out++, (ULONG)in[k] | ((ULONG)in[k + 1UL] << 16));
+            if (k < indexCount)
+                StoreLE32(out++, (ULONG)in[k]);
+            slot->indexOffsets[commitDraw] = indexOffset;
+            segmentTail = (volatile ULONG *)(out - 1);
+        }
         (void)*segmentTail;
         slot->segmentCursor += vertexBytes;
+        if (indexCount)
+            slot->lastDrawValid = FALSE;
     }
     slot->recordCount += growthRequired;
     slot->generatedDwordCount += generatedGrowth;
@@ -2573,17 +2682,36 @@ void Lib_glMultiTexCoord2fvARB(GLenum unit, GLfloat *value)
     if (value) Lib_glMultiTexCoord2fARB(unit,value[0],value[1]);
 }
 
+/* The texture coordinate array glClientActiveTextureARB selects. */
+static struct ArrayState *ClientTexcoordArray(struct MiniGLR200Context *context)
+{
+    return context->clientActiveTexture ? &context->texcoord1Array
+                                        : &context->texcoordArray;
+}
+
+void Lib_glClientActiveTextureARB(GLenum unit)
+{
+    struct MiniGLR200Context *context=CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    if (unit!=GL_TEXTURE0_ARB && unit!=GL_TEXTURE1_ARB) {
+        SetError(context,GL_INVALID_ENUM); return;
+    }
+    context->clientActiveTexture=(ULONG)(unit-GL_TEXTURE0_ARB);
+}
+
 void Lib_glTexCoordPointer(GLint size, GLenum type, GLsizei stride,
                            const GLvoid *pointer)
 {
     struct MiniGLR200Context *context=CurrentContext();
+    struct ArrayState *array;
     if (!StateChangeAllowed(context)) return;
     if (size<1 || size>4) { SetError(context,GL_INVALID_VALUE); return; }
     if (type!=GL_FLOAT) { SetError(context,GL_INVALID_ENUM); return; }
     if (stride<0) { SetError(context,GL_INVALID_VALUE); return; }
-    context->texcoordArray.pointer=pointer; context->texcoordArray.size=size;
-    context->texcoordArray.type=type;
-    context->texcoordArray.stride=stride ? (ULONG)stride : size*4UL;
+    array=ClientTexcoordArray(context);
+    array->pointer=pointer; array->size=size;
+    array->type=type;
+    array->stride=stride ? (ULONG)stride : size*4UL;
 }
 
 static ULONG TypeSize(GLenum type)
@@ -2688,7 +2816,7 @@ void Lib_glEnableClientState(GLenum state)
     if (!StateChangeAllowed(context)) return;
     if (state == GL_VERTEX_ARRAY) context->vertexArray.enabled = TRUE;
     else if (state == GL_COLOR_ARRAY) context->colorArray.enabled = TRUE;
-    else if (state == GL_TEXTURE_COORD_ARRAY) context->texcoordArray.enabled = TRUE;
+    else if (state == GL_TEXTURE_COORD_ARRAY) ClientTexcoordArray(context)->enabled = TRUE;
     else if (state == GL_NORMAL_ARRAY) {
         if (!(context->radeonCaps & RADEON3D_CAP_HW_LIGHTING)) {
             SetError(context, GL_INVALID_OPERATION);
@@ -2705,7 +2833,7 @@ void Lib_glDisableClientState(GLenum state)
     if (!StateChangeAllowed(context)) return;
     if (state == GL_VERTEX_ARRAY) context->vertexArray.enabled = FALSE;
     else if (state == GL_COLOR_ARRAY) context->colorArray.enabled = FALSE;
-    else if (state == GL_TEXTURE_COORD_ARRAY) context->texcoordArray.enabled = FALSE;
+    else if (state == GL_TEXTURE_COORD_ARRAY) ClientTexcoordArray(context)->enabled = FALSE;
     else if (state == GL_NORMAL_ARRAY) context->normalArray.enabled = FALSE;
     else SetError(context, GL_INVALID_ENUM);
 }
@@ -2847,6 +2975,65 @@ static BOOL FetchArrayVertex(struct MiniGLR200Context *context, ULONG index,
     GLfloat values[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ULONG component;
     if (!array->enabled || !array->pointer) return FALSE;
+    /* Common game layout (Quake 3): aligned float positions, unsigned-byte
+     * RGBA colours, float texture coordinates, no normal array. Load the
+     * fields directly; the generic path below converts every component
+     * through ReadNumber/ReadColor/PackColor with identical results. */
+    if (array->type == GL_FLOAT && array->size >= 3 &&
+        !(((ULONG)array->pointer | array->stride) & 3UL) &&
+        !(context->normalArray.enabled && context->normalArray.pointer) &&
+        (!context->colorArray.enabled || !context->colorArray.pointer ||
+         (context->colorArray.type == GL_UNSIGNED_BYTE &&
+          context->colorArray.size == 4)) &&
+        (!context->texcoordArray.enabled || !context->texcoordArray.pointer ||
+         (context->texcoordArray.type == GL_FLOAT &&
+          !(((ULONG)context->texcoordArray.pointer |
+             context->texcoordArray.stride) & 3UL))) &&
+        (!context->texcoord1Array.enabled || !context->texcoord1Array.pointer ||
+         !(((ULONG)context->texcoord1Array.pointer |
+            context->texcoord1Array.stride) & 3UL))) {
+        const GLfloat *position =
+            (const GLfloat *)(array->pointer + index * array->stride);
+        vertex->x = position[0];
+        vertex->y = position[1];
+        vertex->z = position[2];
+        vertex->w = array->size > 3 ? position[3] : 1.0f;
+        if (context->colorArray.enabled && context->colorArray.pointer) {
+            const UBYTE *rgba = context->colorArray.pointer +
+                                index * context->colorArray.stride;
+            color = ((ULONG)rgba[3] << 24) | ((ULONG)rgba[0] << 16) |
+                    ((ULONG)rgba[1] << 8) | (ULONG)rgba[2];
+        }
+        vertex->color = color;
+        vertex->nx = context->currentNormalX;
+        vertex->ny = context->currentNormalY;
+        vertex->nz = context->currentNormalZ;
+        if (context->texcoord1Array.enabled &&
+            context->texcoord1Array.pointer) {
+            const GLfloat *st = (const GLfloat *)
+                (context->texcoord1Array.pointer +
+                 index * context->texcoord1Array.stride);
+            vertex->s1 = st[0];
+            vertex->t1 = context->texcoord1Array.size > 1 ? st[1] : 0.0f;
+        } else {
+            vertex->s1 = context->currentS[1];
+            vertex->t1 = context->currentT[1];
+        }
+        vertex->fog = FogFactor(context, vertex->x, vertex->y, vertex->z,
+                                vertex->w);
+        if (context->texcoordArray.enabled &&
+            context->texcoordArray.pointer) {
+            const GLfloat *st = (const GLfloat *)
+                (context->texcoordArray.pointer +
+                 index * context->texcoordArray.stride);
+            vertex->s = st[0];
+            vertex->t = context->texcoordArray.size > 1 ? st[1] : 0.0f;
+        } else {
+            vertex->s = context->currentS[0];
+            vertex->t = context->currentT[0];
+        }
+        return TRUE;
+    }
     bytes = TypeSize(array->type);
     input = array->pointer + index * array->stride;
     for (component = 0; component < (ULONG)array->size; ++component)
@@ -2890,49 +3077,35 @@ static BOOL FetchArrayVertex(struct MiniGLR200Context *context, ULONG index,
         vertex->t=texcoords->size > 1
                       ? ReadNumber(input+bytes,texcoords->type) : 0.0f;
     }
+    if (context->texcoord1Array.enabled && context->texcoord1Array.pointer) {
+        const struct ArrayState *texcoords=&context->texcoord1Array;
+        bytes=TypeSize(texcoords->type);
+        input=texcoords->pointer+index*texcoords->stride;
+        vertex->s1=ReadNumber(input,texcoords->type);
+        vertex->t1=texcoords->size > 1
+                       ? ReadNumber(input+bytes,texcoords->type) : 0.0f;
+    }
     return TRUE;
 }
 
 static BOOL FetchDrawVertex(struct MiniGLR200Context *context, ULONG index,
                             struct Vertex *vertex)
 {
-    if (context->lockedVertices && index >= context->lockedFirst &&
-        index - context->lockedFirst < context->lockedCount) {
-        struct Vertex live;
-        *vertex = context->lockedVertices[index - context->lockedFirst];
-        /* EXT_compiled_vertex_array freezes the VERTEX ARRAY only. Quake's
-         * stage iterators call glLockArrays BEFORE ComputeTexCoords and then
-         * rewrite the per-stage colour/texcoord arrays (tess.svars.*), so
-         * serving the locked copy for those fields made every draw sample
-         * the PREVIOUS surface's texture coordinates: scrambled/solid glyphs
-         * for 2D text, white world base textures, noisy model skins. Keep
-         * positions/normals/fog from the lock, but read colour and texture
-         * coordinates live. */
-        if (FetchArrayVertex(context, index, &live)) {
-            vertex->color = live.color;
-            vertex->s = live.s;
-            vertex->t = live.t;
-            vertex->s1 = live.s1;
-            vertex->t1 = live.t1;
-        }
-        vertex->nx = context->currentNormalX;
-        vertex->ny = context->currentNormalY;
-        vertex->nz = context->currentNormalZ;
-        vertex->fog = FogFactor(context,vertex->x,vertex->y,
-                                vertex->z,vertex->w);
-        return TRUE;
-    }
+    /* Locks keep no vertex copy (see Lib_glLockArrays): always live. */
     return FetchArrayVertex(context, index, vertex);
 }
 
+/* EXT_compiled_vertex_array is a hint. Draws fetch through the per-draw
+ * index cache and read colour/texcoords live anyway, so a lock only records
+ * its range: copying every vertex into AllocMem'd storage cost two 68k
+ * calls per lock and made Quake 3's multi-pass (lightmapped) shaders run at
+ * ~2.5 fps. lockedVertices stays NULL; lockedCount marks the lock. */
 void Lib_glLockArrays(GLuint first, GLsizei count)
 {
     struct MiniGLR200Context *context = CurrentContext();
-    struct Vertex *vertices;
-    ULONG index, bytes;
 
     if (!StateChangeAllowed(context)) return;
-    if (context->lockedVertices) {
+    if (context->lockedCount) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
@@ -2940,25 +3113,10 @@ void Lib_glLockArrays(GLuint first, GLsizei count)
         SetError(context, GL_INVALID_VALUE);
         return;
     }
-    if (!context->vertexArray.enabled || !context->vertexArray.pointer ||
-        (ULONG)count > 0xffffffffUL / sizeof(struct Vertex)) {
+    if (!context->vertexArray.enabled || !context->vertexArray.pointer) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
-    bytes = (ULONG)count * sizeof(struct Vertex);
-    vertices = AllocMem(bytes, MEMF_PUBLIC);
-    if (!vertices) {
-        SetError(context, GL_OUT_OF_MEMORY);
-        return;
-    }
-    for (index = 0; index < (ULONG)count; ++index) {
-        if (!FetchArrayVertex(context, first + index, &vertices[index])) {
-            FreeMem(vertices, bytes);
-            SetError(context, GL_INVALID_OPERATION);
-            return;
-        }
-    }
-    context->lockedVertices = vertices;
     context->lockedFirst = first;
     context->lockedCount = (ULONG)count;
 }
@@ -2967,13 +3125,10 @@ void Lib_glUnlockArrays(void)
 {
     struct MiniGLR200Context *context = CurrentContext();
     if (!StateChangeAllowed(context)) return;
-    if (!context->lockedVertices) {
+    if (!context->lockedCount) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
-    FreeMem(context->lockedVertices,
-            context->lockedCount * sizeof(struct Vertex));
-    context->lockedVertices = NULL;
     context->lockedFirst = 0;
     context->lockedCount = 0;
 }
@@ -3088,6 +3243,76 @@ static BOOL AppendResolvedTclVertex(struct MiniGLR200Context *context,
     return TRUE;
 }
 
+/*
+ * Indexed glDrawElements triangles (MGLPPCIndexedDraws): stage each chunk of
+ * at most MAX_SCREEN_VERTICES indices as its unique vertices plus a 16-bit
+ * index list, so FlushScreenVertices writes every shared vertex across the
+ * bus once and the GPU walks the list with DRAW_INDX_2. Chunks end at the
+ * draw, so the staging buffer never mixes an index list with a plain one.
+ */
+static BOOL DrawElementsIndexed(struct MiniGLR200Context *context,
+                                const UBYTE *indices, GLenum type,
+                                ULONG count, ULONG hardwareSphereMap,
+                                ULONG softwareSphereMap)
+{
+    ULONG tri, corner;
+
+    for (tri = 0; tri < count; tri += 3UL) {
+        if (context->screenIndexCount &&
+            (context->screenIndexCount + 3UL > MAX_SCREEN_VERTICES ||
+             context->screenVertexCount + 3UL > MAX_SCREEN_VERTICES) &&
+            !FlushScreenVertices(context))
+            return FALSE;
+        if (!context->screenIndexCount) {
+            if (context->screenVertexCount &&
+                !FlushScreenVertices(context))
+                return FALSE;
+            context->screenHardwareTransform = TRUE;
+            context->screenProjective = FALSE;
+            if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_TRIANGLES)) {
+                context->screenHardwareTransform = FALSE;
+                return FALSE;
+            }
+            if (++context->indexLocalGeneration == 0UL) {
+                ULONG clear;
+                for (clear = 0; clear < 65536UL; ++clear)
+                    context->indexLocalStamp[clear] = 0;
+                context->indexLocalGeneration = 1UL;
+            }
+        }
+        for (corner = 0; corner < 3UL; ++corner) {
+            ULONG value = ReadIndex(indices, type, tri + corner);
+            ULONG local;
+
+            if (context->indexCacheStamp[value] !=
+                context->indexCacheGeneration) {
+                if (!FetchDrawVertex(context, value,
+                                     &context->indexCacheVerts[value]))
+                    return FALSE;
+                if (context->perfEnabled)
+                    context->perf.vertexFetches++;
+                context->indexCacheStamp[value] =
+                    context->indexCacheGeneration;
+            }
+            if (context->indexLocalStamp[value] ==
+                context->indexLocalGeneration) {
+                local = context->indexLocal[value];
+            } else {
+                local = context->screenVertexCount++;
+                CopyHardwareVertex(context, &context->indexCacheVerts[value],
+                                   &context->screenVertices[local],
+                                   hardwareSphereMap, softwareSphereMap);
+                context->indexLocal[value] = (UWORD)local;
+                context->indexLocalStamp[value] =
+                    context->indexLocalGeneration;
+            }
+            context->screenIndices[context->screenIndexCount++] =
+                (UWORD)local;
+        }
+    }
+    return context->screenIndexCount ? FlushScreenVertices(context) : TRUE;
+}
+
 void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
                         const GLvoid *indices)
 {
@@ -3108,7 +3333,9 @@ void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
      * whole BYTE/SHORT index space, so there is no per-draw max-index
      * scan; UINT-indexed draws (and cache-less contexts) fetch directly. */
     ULONG drawStart = context->perfEnabled ? PerfClock() : 0;
-    useCache = type != GL_UNSIGNED_INT && context->indexCacheVerts != NULL;
+    /* UINT indices (ioq3's glIndex_t) use the cache too: values below
+     * 64K hit the table, larger ones are fetched directly per index. */
+    useCache = context->indexCacheVerts != NULL;
     if (useCache) {
         if (++context->indexCacheGeneration == 0UL)
             context->indexCacheGeneration = 1UL;
@@ -3131,16 +3358,38 @@ void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
             context->perf.primitives++;
             context->perf.inputVertices += (ULONG)count;
         }
+        if (fast && MGLPPCIndexedDraws && context->indexLocal &&
+            useCache && !((ULONG)count % 3UL)) {
+            BOOL small = TRUE;
+
+            if (type == GL_UNSIGNED_INT)
+                for (index = 0; small && index < (ULONG)count; ++index)
+                    small = ReadIndex(indices, type, index) < 65536UL;
+            if (small) {
+                if (!DrawElementsIndexed(context, (const UBYTE *)indices,
+                                         type, (ULONG)count,
+                                         hardwareSphereMap,
+                                         softwareSphereMap)) {
+                    context->screenIndexCount = 0;
+                    context->screenVertexCount = 0;
+                    SetError(context, GL_INVALID_OPERATION);
+                }
+                if (context->perfEnabled)
+                    context->perf.drawTicks += PerfClock() - drawStart;
+                return;
+            }
+        }
         for (index=0; index<(ULONG)count; ++index) {
             ULONG value = ReadIndex(indices,type,index);
             const struct Vertex *source;
             struct Vertex resolved;
-            if (useCache && context->indexCacheStamp[value] ==
-                            context->indexCacheGeneration) {
+            BOOL cached = useCache && value < 65536UL;
+            if (cached && context->indexCacheStamp[value] ==
+                          context->indexCacheGeneration) {
                 source = &context->indexCacheVerts[value];
             } else {
-                source = useCache ? &context->indexCacheVerts[value]
-                                  : &resolved;
+                source = cached ? &context->indexCacheVerts[value]
+                                : &resolved;
                 /* Fetch straight into the cache slot: misses fill the
                  * entry once and later references alias it. */
                 if (!FetchDrawVertex(context, value,
@@ -3149,7 +3398,7 @@ void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
                 }
                 if (context->perfEnabled)
                     context->perf.vertexFetches++;
-                if (useCache)
+                if (cached)
                     context->indexCacheStamp[value] =
                         context->indexCacheGeneration;
             }

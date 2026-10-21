@@ -103,7 +103,7 @@ mglProhibitMipMapping mglProposeCloseDesktop GLPolygonOffset
 
 | # | Field | Semantics in this tree |
 |---|---|---|
-| 130 | `GLClientActiveTextureARB` | no-op (the frontend has no independent client-active selector) |
+| 130 | `GLClientActiveTextureARB` | `Lib_glClientActiveTextureARB`: selects the unit-0/unit-1 texture-coordinate array |
 | 131 | `GLInterleavedArrays` | mglQ3/R200 implementation |
 | 132 | `GLMultiDrawArrays` | loops `GLDrawArrays` internally |
 | 133 | `MGLEmergencyCloseScreen` | conservative no-op |
@@ -227,8 +227,8 @@ tools/generate_dispatch_r200.py \
   to `Lib_<name>` (with GL→`Lib_gl*`, MGL→`Lib_mgl*`, etc.), and emits a
   context-dropping thunk per field.
 - Explicit special cases: `MGLSetState` → `Lib_glEnable`/`Lib_glDisable`;
-  `GLClientActiveTextureARB`, `MGLResizeContext`, `MGLForceNewRenderPass` are
-  no-ops; `GLMultiDrawArrays` loops `Lib_glDrawArrays`; `mglBeginFastPath` and
+  `GLClientActiveTextureARB` maps to `Lib_glClientActiveTextureARB`;
+  `MGLResizeContext`, `MGLForceNewRenderPass` are no-ops; `GLMultiDrawArrays` loops `Lib_glDrawArrays`; `mglBeginFastPath` and
   friends bind when present.
 - Missing implementations become `R200Unsupported_*` thunks that call
   `LibUnsupported()` and set `GL_INVALID_OPERATION` — a missing symbol can

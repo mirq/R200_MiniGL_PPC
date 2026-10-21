@@ -120,6 +120,7 @@ Rules:
 | `MGLPPC_IBDRY` | host | dry-run IB smoke (diagnostic) |
 | `MGLPPC_FENCE_GROUP` | host | fence coalescing group size override |
 | `MGLPPC_CPEMIT` | PPC | enable PPC CP-emitter mode (needs matching host/driver) |
+| `MGLPPC_INDEXED` | PPC | `0` disables indexed commit draws (default on with CP emit) |
 | `MGLPPC_IBSMOKE` | PPC | IB smoke probe (not with CPEMIT) |
 | `MGLPPC_BATCH` | PPC | opt-in batched two-tile texture upload (currently slower, see [textures.md](textures.md)) |
 | `MGLPPC_BATCHDIAG` | PPC | batch diagnostics (profile builds) |

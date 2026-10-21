@@ -40,17 +40,19 @@ SPECIAL = {
         "        Lib_glDisable(cap);\n"
         "}",
     ),
-    # These are intentional WarpOS ABI-v3 compatibility behaviours. They are
-    # not missing R200 backend functions and must not raise GL errors.
+    # Selects the texture coordinate array (unit 0 or 1) that
+    # glTexCoordPointer and GL_TEXTURE_COORD_ARRAY client state address.
     "GLClientActiveTextureARB": (
-        [],
-        "",
+        ["Lib_glClientActiveTextureARB"],
+        "void Lib_glClientActiveTextureARB(GLenum unit);",
         "static void R200_GLClientActiveTextureARB(GLcontext context, GLenum unit)\n"
         "{\n"
         "    (void)context;\n"
-        "    (void)unit;\n"
+        "    Lib_glClientActiveTextureARB(unit);\n"
         "}",
     ),
+    # These are intentional WarpOS ABI-v3 compatibility behaviours. They are
+    # not missing R200 backend functions and must not raise GL errors.
     "MGLResizeContext": (
         [],
         "",

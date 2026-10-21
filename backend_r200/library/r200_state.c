@@ -405,6 +405,17 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
         if (state->normalVertex && context->compactTclVertex &&
             !state->textured[1] && !state->fog)
             options |= RADEON3D_DRAW_COMPACT_VERTEX;
+        /* Unlit two-unit TCL without fog (Quake 3 lightmapped surfaces):
+         * the 9-dword x,y,z,w,colour,s0,t0,s1,t1 stride drops the unused
+         * fog dword -- a tenth less vertex data over the bus. Unlike the
+         * 7-dword unlit shape above it keeps every written dword in place,
+         * so no stale normal lanes are read. PPC CP emitter only: the host
+         * service does not take this stride. */
+        if (!state->normalVertex && MGLPPCIndexedDraws &&
+            state->textured[1] && !state->fog) {
+            options |= RADEON3D_DRAW_COMPACT_VERTEX;
+            state->vertexDwords = R200_TCL_VERTEX_TEX1_COMPACT_DWORDS;
+        }
         if (!context->combinedMatrixValid) {
             MultiplyMatrix(context->combinedMatrix,
                            context->projection[context->projectionDepth],

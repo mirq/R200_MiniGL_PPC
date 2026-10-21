@@ -91,7 +91,7 @@ comparing (make does not track flag changes):
 | `MGLPPC_IDLE_DIAG` | 0 | host idle sleep counters |
 | `MGLPPC_HOST_DBG` | 0 | timed host markers in `DH2:hostdbg.log` (SLOW/STALL/HB); EClock reads every host loop pass, diagnostic builds only |
 | `MGLPPC_AUTOREPORT` | 0 | live frontend console reports |
-| `MGLPPC_CP_SLOTS` | 128 | CP surface-descriptor cache capacity |
+| `MGLPPC_CP_SLOTS` | 2048 | CP surface-descriptor cache capacity (4-way set associative) |
 | `MGLPPC_EXPAND_MIN` | 4 | mismatch submits before state-batch expansion |
 | `MGLPPC_HOST_TARGET_CACHE` | 1 | host target-surface query cache |
 | `MGLPPC_INFLIGHT` | 0 | 1 = conservative one-outstanding-fence host model (A/B only) |
