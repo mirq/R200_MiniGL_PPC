@@ -159,6 +159,11 @@ waits order the copy between frames on the GPU, and the driver marks
 `Need2DRestore` so Picasso96 re-syncs its 2D state. FLIP, windowed, sync
 without BLIT, and unaligned layouts take the old path. Shutdown prints
 `CP_PRESENT queued/not_eligible/cpu_copies` with the first fallback reason.
+A present source marked `MGL_R200_SURFACE_FORMAT_TILED` (the
+`MINIGL_CTILE=1` render target, frontend-r200.md section 10.3) is copied
+with the SRC macro-tile bit (`SRC_PITCH_OFFSET` bit 30), which untiles it
+into the linear screen bitmap; a tiled source must start on a 2 KiB
+boundary (fallback reason 5 otherwise).
 
 - Windowed present is a bounded P96 blit from the drawn surface.
 - Fullscreen present is BLIT (default) or FLIP when sync is on; FLIP uses

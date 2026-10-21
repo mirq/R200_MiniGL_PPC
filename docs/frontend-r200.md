@@ -382,6 +382,27 @@ sequenceDiagram
   (~2.5 ms/frame at 800x600). The older no-op-blend workaround stays behind
   `MGLPPC_CLEARBLEND=1`.
 
+### 10.3 Macro-tiled colour target (`MINIGL_CTILE=1`, 2026-10-21)
+
+At 1024x768 Quake 3 is fill-bound (a quarter-size view runs 39 -> 54 FPS)
+and the linear colour buffer is the expensive part (32-bit colour halves the
+frame rate; texture depth and picmip barely matter). With `MINIGL_CTILE=1`
+the 68k library's fullscreen setup (`SetupTiledColorTarget`) replaces the
+drawing buffer with a separate bitmap two rows taller whose start is moved
+up to the next 2 KiB boundary: macro-tiled addressing needs that alignment
+and a pitch of whole 256-byte rows, and the P96 screen buffers start at
+64-byte boundaries (an unaligned tiled target renders in shifted vertical
+blocks with striped rows). The surface and present descriptors carry
+`MGL_R200_SURFACE_FORMAT_TILED` (bit 31 of `format`); `MGLPPCResolveSurface`
+strips it into `Radeon3DEmitSurface.Tiled`, which sets
+`R200_COLOR_TILE_ENABLE` in `RB3D_COLORPITCH`, and the host present untiles
+the copy. Quake 3 1024x768x16 with dynamic lights: 39.3 -> 50.0 FPS.
+
+Opt-in only: native 68k clients render through the library's own path and
+present with a CPU-side blit, both linear; CPU readers of the drawing buffer
+(`glReadPixels`, `mglLockBack`, the `MGLPPC_SHOT_EVERY` dump) see tiled data.
+Micro tiling (bit 17) scrambles the 2D untile copy and is slower.
+
 ## 11. Frontend environment knobs
 
 | Variable | Effect |

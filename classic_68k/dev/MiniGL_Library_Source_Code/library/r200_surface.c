@@ -401,6 +401,82 @@ static BOOL WaitTargetBufferSafe(struct MiniGLR200Context *context)
  * mglSwitchDisplay(). */
 static void RecordPerfFrame(struct MiniGLR200Context *context);
 
+/* MINIGL_CTILE=1: render the fullscreen drawing buffer macro-tiled. Opt-in:
+ * only valid when the PPC CP emitter renders and the CP present copies
+ * (minigl_ppc_host); native 68k clients render and present linearly
+ * (R200_COLOR_TILE_ENABLE). Tiled addressing needs a 2 KiB-aligned base and
+ * a pitch of whole 256-byte tile rows, which the P96 screen buffers do not
+ * give (they start at 64-byte boundaries), so the target is a separate
+ * bitmap two rows taller with its start moved up to the next 2 KiB
+ * boundary. Only the PPC CP-emitter path renders it tiled and only the CP
+ * present untiles it; CPU readers (glReadPixels, mglLockBack) see tiled
+ * data. Failure keeps the linear screen buffer. */
+void SetupTiledColorTarget(struct MiniGLR200Context *context)
+{
+    TEXT flag[4];
+    struct Radeon3DSurface surface;
+    ULONG delta, index = context->drawingBuffer;
+
+    flag[0] = 0;
+    if (GetVar("MINIGL_CTILE", flag, sizeof(flag), GVF_GLOBAL_ONLY) <= 0 ||
+        flag[0] != '1' || context->singleBuffer || context->presentFlip ||
+        index == 0 || index >= R200_SCREEN_BUFFERS ||
+        !context->surfaces[index].Handle)
+        return;
+    context->colorTileBitmap = AllocateColorBitMap(
+        context->surfaces[index].Pitch /
+            (context->surfaces[index].Format == RADEON3D_FORMAT_B8G8R8A8
+                 ? 4UL : 2UL),
+        context->height + 2UL, context->pixelDepth);
+    if (!context->colorTileBitmap) {
+        dbg_puts("[mgl] ctile=alloc fail\n");
+        return;
+    }
+    surface.Size = sizeof(surface);
+    if (!Radeon3DImportBitMap(context->device, context->colorTileBitmap,
+                              &surface)) {
+        dbg_puts("[mgl] ctile=import fail\n");
+        p96FreeBitMap(context->colorTileBitmap);
+        context->colorTileBitmap = NULL;
+        return;
+    }
+    delta = ((surface.GpuAddress + 2047UL) & ~2047UL) - surface.GpuAddress;
+    if (surface.Format != context->surfaces[index].Format ||
+        (surface.Pitch & 255UL) ||
+        delta + surface.Pitch * context->height >
+            surface.Pitch * surface.Height) {
+        dbg_puts("[mgl] ctile=shape fail\n");
+        Radeon3DReleaseSurface(context->device, &surface);
+        p96FreeBitMap(context->colorTileBitmap);
+        context->colorTileBitmap = NULL;
+        return;
+    }
+    context->colorTileImport = surface;
+    context->colorTileScreen = context->surfaces[index];
+    surface.GpuAddress += delta;
+    surface.CpuAddress = (APTR)((ULONG)surface.CpuAddress + delta);
+    surface.Height = context->height;
+    context->surfaces[index] = surface;
+    context->colorTileIndex = index;
+    context->colorTiled = TRUE;
+    dbg_puts("[mgl] ctile=on gpu=");
+    dbg_u32(surface.GpuAddress);
+    dbg_puts(" pitch=");
+    dbg_u32(surface.Pitch);
+    dbg_newline();
+}
+
+/* Undo SetupTiledColorTarget before the generic surface release. */
+void ReleaseTiledColorTarget(struct MiniGLR200Context *context)
+{
+    if (!context->colorTiled)
+        return;
+    if (context->device && context->colorTileImport.Handle)
+        Radeon3DReleaseSurface(context->device, &context->colorTileImport);
+    context->surfaces[context->colorTileIndex] = context->colorTileScreen;
+    context->colorTiled = FALSE;
+}
+
 BOOL R200PreparePresentCp(struct MiniGLR200Context *context,
                           MGLR200PrivatePresentV1 *bridge)
 {
@@ -445,7 +521,9 @@ BOOL R200PreparePresentCp(struct MiniGLR200Context *context,
     bridge->dstPitch = destination->Pitch;
     bridge->width = context->width;
     bridge->height = context->height;
-    bridge->format = source->Format;
+    bridge->format = source->Format |
+        (context->colorTiled && drawn == context->colorTileIndex
+             ? MGL_R200_SURFACE_FORMAT_TILED : 0UL);
     if (context->perfEnabled)
         RecordPerfFrame(context);
     return TRUE;
@@ -1220,6 +1298,7 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
     }
     context->pendingValid = FALSE;
     context->pendingBuffer = 0;
+    SetupTiledColorTarget(context);
     return TRUE;
 }
 

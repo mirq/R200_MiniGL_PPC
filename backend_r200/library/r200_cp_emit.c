@@ -4,6 +4,11 @@
 #include <libraries/minigl_ppc_cp_emit.h>
 #include <radeon3d_emit.h>
 
+#ifndef MGL_R200_SURFACE_FORMAT_TILED
+/* minigl_r200_bridge.h: macro-tiled colour target flag in the format word */
+#define MGL_R200_SURFACE_FORMAT_TILED 0x80000000UL
+#endif
+
 typedef char MGLPPCCapacityCheck[
     MGLPPC_CP_DWORDS == RADEON3D_MAX_BATCH_DWORDS ? 1 : -1];
 
@@ -37,6 +42,9 @@ static struct Radeon3DEmitSurface *MGLPPCResolveSurface(
 
     if (!handle || !resolver->resolve(resolver->user, handle, &surface))
         return NULL;
+    /* The library marks a macro-tiled colour target in the format word. */
+    slot->Tiled = (surface.format & MGL_R200_SURFACE_FORMAT_TILED) != 0;
+    surface.format &= ~MGL_R200_SURFACE_FORMAT_TILED;
     switch (surface.format) {
     case RADEON3D_FORMAT_CLUT8: bytesPerPixel = 1UL; break;
     case RADEON3D_FORMAT_R5G6B5PC: bytesPerPixel = 2UL; break;

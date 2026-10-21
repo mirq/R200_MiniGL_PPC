@@ -482,6 +482,29 @@ compact TCL stride is functionally correct but within noise.
 Quake 1 gate with the final DLL (demo3 800x600x16): 62.073 / 62.215 / 61.791,
 **median 62.073**.
 
+### 7.5 Quake 3 1024x768x16 with dynamic lights: 39.3 -> 50.2 FPS (2026-10-21)
+
+Timedemo `four`, 1024x768x16, lightmaps, music, `r_dynamiclight 1`, CP emit.
+
+| Measurement | FPS |
+|---|---|
+| baseline | 39.3 |
+| without dynamic lights | 43.1 |
+| `cg_viewsize 50` (quarter 3D area) | 54.0 |
+| present copy reduced to 1 pixel (`MGLPPC_BLITDIAG=1`) | 41.4 |
+| 32-bit colour (any texture depth) | 18.3-18.4 |
+| macro-tiled colour target (`MINIGL_CTILE=1`, frontend-r200.md 10.3) | 50.0 / 49.8 / 50.1 |
+| + `r_dlightBacks 0` | **50.2 / 50.1 / 50.2** |
+
+Tried without gain: HyperZ Z compression bits (`DEPTH_HYPERZ` +
+`Z_(DE)COMPRESSION_ENABLE`, before and after tiling), micro tiling
+(scrambled, 45.7), `MGLPPC_FENCE_GROUP=4` (45.8), copying 16-bit pixels as
+32-bit pairs (49.9). Host priority +2 starved the TCP stack (operator
+reset); a `CRTC_OFFSET` page flip written through a CP packet hung the
+frame; `MGLPPC_LEASE=1` failed `LEASE_BEGIN` (black screen). Quake 1 gate
+with the tiling host/library (tiling off): 62.144 / 61.305 / 61.932,
+median **61.932**.
+
 ## 8. Regression catalogue
 
 Every row was measured; use this as a checklist when a run looks wrong.

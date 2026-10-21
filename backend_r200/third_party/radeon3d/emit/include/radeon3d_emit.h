@@ -63,6 +63,8 @@ struct Radeon3DEmitSurface {
     ULONG Width;
     ULONG Height;
     ULONG Format;
+    /* Macro-tiled colour target: RB3D_COLORPITCH gets COLOR_TILE_ENABLE. */
+    BOOL Tiled;
 };
 
 /*

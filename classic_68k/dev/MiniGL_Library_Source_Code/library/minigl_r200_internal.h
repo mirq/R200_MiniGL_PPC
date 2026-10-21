@@ -564,6 +564,16 @@ struct MiniGLR200Context {
     struct Radeon3DDevice *device;
     struct Radeon3DSurface surfaces[3];
     struct Radeon3DSurface depthSurface;
+    /* MINIGL_CTILE=1 (fullscreen, PPC CP present only): the drawing buffer is a
+     * 2 KiB-aligned window into colorTileBitmap, rendered macro-tiled and
+     * untiled by the present copy. colorTileImport is the unadjusted import
+     * (released at teardown), colorTileScreen the screen-buffer surface it
+     * replaced in surfaces[colorTileIndex]. */
+    BOOL colorTiled;
+    ULONG colorTileIndex;
+    struct BitMap *colorTileBitmap;
+    struct Radeon3DSurface colorTileImport;
+    struct Radeon3DSurface colorTileScreen;
     struct BitMap *bitmap;
     struct BitMap *depthBitmap;
     struct Screen *screen;
@@ -1013,6 +1023,8 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
 void ZeroMemory(APTR memory, ULONG bytes);
 /* Fullscreen BLIT present without the CPU copy; see
  * MGL_R200_PRIVATE_PRESENT_V1_QUERY (r200_surface.c). */
+void SetupTiledColorTarget(struct MiniGLR200Context *context);
+void ReleaseTiledColorTarget(struct MiniGLR200Context *context);
 BOOL R200PreparePresentCp(struct MiniGLR200Context *context,
                           MGLR200PrivatePresentV1 *bridge);
 ULONG PerfClock(void);

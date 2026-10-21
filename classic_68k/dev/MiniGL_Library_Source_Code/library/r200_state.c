@@ -1806,7 +1806,10 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
             bridge->pitch = surface->Pitch;
             bridge->width = surface->Width;
             bridge->height = surface->Height;
-            bridge->format = surface->Format;
+            bridge->format = surface->Format |
+                (context->colorTiled &&
+                 surface == &context->surfaces[context->colorTileIndex]
+                     ? MGL_R200_SURFACE_FORMAT_TILED : 0UL);
             bridge->deviceEpoch = context->deviceEpoch;
             bridge->generation = surface->Generation;
         }

@@ -1124,7 +1124,8 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
         !ExecuteEmitRegister(emitter, R200_RB3D_COLOROFFSET,
                                 color->GpuAddress) ||
         !ExecuteEmitRegister(emitter, R200_RB3D_COLORPITCH,
-                             color->Pitch / SurfaceBytesPerPixel(color)))
+                             color->Pitch / SurfaceBytesPerPixel(color) |
+                                 (color->Tiled ? (1UL << 16) : 0UL)))
         return FALSE;
     /* The guard-clip scalars and the MVP upload are emitted separately by
      * EmitExecuteStateCached(), which caches them across records. */
