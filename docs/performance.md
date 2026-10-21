@@ -450,7 +450,7 @@ same pair as 7.2 except DLL `857FB757` (warpelf `891ADEB9`,
 640x480x16, native modules, `r_primitives 0`) renders the world and HUD
 correctly with this DLL (frame readback via `glReadPixels`).
 
-### 7.4 Quake 3 800x600x16 above 60 FPS with music (2026-10-21)
+### 7.4 Quake 3 800x600x16 with music: 46 -> 58.6 FPS (2026-10-21)
 
 Quake 3 timedemo `four`, 800x600x16, lightmaps (`r_vertexLight 0`,
 `r_ext_multitexture 1`, `r_picmip 0`), AHI sound and music on, CP emit,
@@ -463,7 +463,14 @@ Quake 3 timedemo `four`, 800x600x16, lightmaps (`r_vertexLight 0`,
 | music WAV preloaded (Quake 3) | 52.3 |
 | indexed commit draws (`DRAW_INDX_2`) | 58.9 |
 | stdout 64 KB buffered (Quake 3) | 59.5 |
-| input port read without `GetMsg` when empty (Quake 3) | **60.3 / 60.8 / 60.6** |
+| input port read without `GetMsg` when empty (Quake 3) | 60.3 / 60.8 / 60.6 |
+| same input shortcut reverted (mouse look stuttered in game) | **58.7 / 58.5** |
+
+The empty-port shortcut skipped the ~1 ms `GetMsg` Run68K call per frame,
+but the PPC read of the 68k-owned message list is not reliably fresh without
+a 68k call in between: mouse events were held back until the forced poll and
+mouse look stuttered in an in-game A/B. A timedemo has no input and cannot
+show this; judge input-path changes in game.
 
 Profile (MiniGL profile build, per frame, 24.74 MHz timebase) with indexed
 draws: draw 9.25 ms, of which serialize 3.95 ms (bus-bound, ~232 KB/frame
