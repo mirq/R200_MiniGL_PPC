@@ -39,6 +39,28 @@ measured at ~5% (gears quiet 135.1 → profiled 129.9; room-walk 12.0 → 11.8).
 
 ## 2. Reference workloads and current best-known numbers
 
+**ABI 5 (2026-10-21): no measurable cost.** Same-boot interleaved A/B on one
+cold boot (`InitPPC` once), A = HEAD `b95c467` DLL (byte-identical to the
+deployed `Work:ibdraw/minigl_ppc.dll`, target `4DAFA846`), B = the ABI-5 DLL
+(target `42186817`); both built with `MGLPPC_EXPAND_MIN=0`, both games built
+from the same sources against the respective tree, same host `64FC1CBB`,
+`minigl.library` `E3D71E72`, chip `44A246CD`. Measured, every run
+`failed=0`:
+
+| Workload | A (ABI 3) | B (ABI 5) |
+|---|---|---|
+| Quake demo3, 800x600x16, CP present, `q8s` settings (1090 frames, 1099 presents) | 61.236 / 61.443 / 61.374, median **61.374** | 61.443 / 61.305 / 61.099, median **61.305** |
+| Quake 3 timedemo `four`, 1024x768x16, `Quake3-R200` settings, sound + music (1260 frames, 1294 presents) | 48.9 / 48.6 / 48.7, median **48.7** | 49.0 / 49.1 / 48.9, median **49.0** |
+
+Both differences are inside the noise band (-0.1% / +0.6%; Quake 3 times
+with a 20 ms clock). The sparse-switch concern does not show at the frame
+level. The Quake 3 figure is below the release README's 50.2 for the same
+settings on both A and B; the release binary was not part of this series.
+Not measured: the paths new with ABI 5 (CPU-expanded wide lines,
+display-list replay, readback-based `glCopyTex*`), which neither game uses.
+Rendering was not visually checked in this series (fullscreen bridge
+screenshots are stale during play).
+
 | Workload | Configuration | FPS | Conditions |
 |---|---|---:|---|
 | Precalc gears | FS 640x480x16, 3 buffers, BLIT, sync off, `-frames 600` | **144.927** | current-source rebuild, warm boot (2026-09-17) |

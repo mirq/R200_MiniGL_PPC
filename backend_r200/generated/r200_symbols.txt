@@ -1,9 +1,12 @@
 Lib_glActiveTextureARB
 Lib_glAlphaFunc
+Lib_glAreTexturesResident
 Lib_glArrayElement
 Lib_glBegin
 Lib_glBindTexture
+Lib_glBlendEquation
 Lib_glBlendFunc
+Lib_glBlendFuncSeparate
 Lib_glClear
 Lib_glClearColor
 Lib_glClearDepth
@@ -20,6 +23,8 @@ Lib_glColorMask
 Lib_glColorMaterial
 Lib_glColorPointer
 Lib_glColorTable
+Lib_glCopyTexImage2D
+Lib_glCopyTexSubImage2D
 Lib_glCullFace
 Lib_glDeleteTextures
 Lib_glDepthFunc
@@ -30,6 +35,9 @@ Lib_glDisableClientState
 Lib_glDrawArrays
 Lib_glDrawBuffer
 Lib_glDrawElements
+Lib_glEdgeFlag
+Lib_glEdgeFlagPointer
+Lib_glEdgeFlagv
 Lib_glEnable
 Lib_glEnableClientState
 Lib_glEnd
@@ -49,10 +57,12 @@ Lib_glGetLightfv
 Lib_glGetLightiv
 Lib_glGetMaterialfv
 Lib_glGetMaterialiv
+Lib_glGetPointerv
 Lib_glGetString
 Lib_glHint
 Lib_glInterleavedArrays
 Lib_glIsEnabled
+Lib_glIsTexture
 Lib_glLightf
 Lib_glLightfv
 Lib_glLighti
@@ -61,6 +71,7 @@ Lib_glLightModelf
 Lib_glLightModelfv
 Lib_glLightModeli
 Lib_glLightModeliv
+Lib_glLineWidth
 Lib_glLoadIdentity
 Lib_glLoadMatrixd
 Lib_glLoadMatrixf
@@ -82,7 +93,9 @@ Lib_glPointSize
 Lib_glPolygonMode
 Lib_glPolygonOffset
 Lib_glPopMatrix
+Lib_glPrioritizeTextures
 Lib_glPushMatrix
+Lib_glReadBuffer
 Lib_glReadPixels
 Lib_glRotated
 Lib_glRotatef
@@ -127,6 +140,7 @@ Lib_mglChoosePixelDepth
 Lib_mglChooseTextureBufferSize
 Lib_mglChooseVertexBufferSize
 Lib_mglChooseWindowMode
+Lib_mglChooseZBufferDepth
 Lib_mglClearPointer
 Lib_mglCreateContext
 Lib_mglCreateContextFromID

@@ -82,24 +82,23 @@ Build system, targets and the ET_REL contract:
 ## Versions and compatibility
 
 ```
-MINIGL_VERSION               19
-MINIGL_MIN_VERSION           10
-MINIGL_DISPATCH_ABI_VERSION   3
-sizeof(MGLDispatchTable)     0x238
+MINIGL_VERSION               29
+MINIGL_MIN_VERSION           29
+MINIGL_DISPATCH_ABI_VERSION   5
+sizeof(MGLDispatchTable)     0x354
 ```
 
-The released WarpOS **V10 dispatch layout is frozen** as the prefix of the V19
-table: no field through `GLPolygonOffset` was removed, reordered or resized.
-V19 appends `glClientActiveTextureARB`, `glInterleavedArrays`,
-`glMultiDrawArrays`, `mglEmergencyCloseScreen`, `glMGLForceNewRenderPass` and
-the FastPath V2 entries (`mglBeginFastPath`, `mglEndFastPath`,
-`mglGetFastPathCapabilities`). A V19 client rejects an old V10 DLL by
-`structSize`; a V10 client accepts the V19 DLL because its prefix is unchanged.
-
-The Silent Hill reference DLL has a private three-entry extension in the same
-tail region; `SilentHill.elf` was verified to use only the frozen prefix, so it
-is compatible with the `0x238` table. Do not claim compatibility for other
-clients that call the private extension. Full ABI and synchronization rules:
+The dispatch ABI follows upstream minigl.library **29.1**: slots 1..205 are
+upstream's layout field for field (the released WarpOS V10 layout is still
+the frozen prefix through `GLPolygonOffset`), the GL tokens carry OpenGL's own
+values, and the FastPath V2 entries follow as slots 206..208. New since V19:
+fixed-function lighting, display lists, GLU (quadrics, `gluBuild2DMipmaps`),
+GLUT, framebuffer-to-texture copies, `glLineWidth`, the GL 1.1 query and edge
+flag entry points and `mglCreateContextFromWindow`/`FromBitMap`; the per-slot
+status for each DLL is in [docs/dispatch-abi.md](docs/dispatch-abi.md).
+`MiniGLOpen` requires the ABI to match exactly, so V19 (ABI 3) clients must be
+rebuilt. The Silent Hill binary insists on ABI 3 and needs an ABI-3 DLL in
+its own directory. Full ABI and synchronization rules:
 [docs/dispatch-abi.md](docs/dispatch-abi.md).
 
 ## Design rules

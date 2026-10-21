@@ -857,6 +857,20 @@ struct MiniGLR200Context {
      * the end: no existing field offsets change (68k strict alignment:
      * ULONG after ULONG). Big-endian safe: single-word bitmask. */
     ULONG texCoordFeedMask;
+    /* V29 parity state, appended for the same reason (no offset moves).
+     * lineWidth: glLineWidth; widths above 1.5 expand lines on the CPU
+     * (EmitWideLines), and polygon-mode edges always use it. edgeFlag and
+     * edgeFlagArray: glEdgeFlag/glEdgeFlagPointer state, queryable but not
+     * yet honoured by the GL_LINE polygon-mode decomposition. (glReadBuffer
+     * reuses the existing readBuffer: ReadSourceSurface honours it on the
+     * native path, but PPC readback is served by the host's own context,
+     * which reads its current target until a protocol word carries the
+     * selection.) textureEnvColor: GL_TEXTURE_ENV_COLOR per
+     * unit, stored for the texture-stage record that will consume it. */
+    GLfloat lineWidth;
+    ULONG edgeFlag;
+    struct ArrayState edgeFlagArray;
+    GLfloat textureEnvColor[2][4];
 };
 
 /* ------------------------------------------------------------------ */

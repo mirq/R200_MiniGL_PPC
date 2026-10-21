@@ -313,6 +313,7 @@ struct GLcontext_t
 	W3D_Context *           w3dContext;
 	struct Window *         w3dWindow;
 	struct Screen *         w3dScreen;
+	GLboolean               externalWindow;
 
 	GLboolean		ArrayTexBound;
 
@@ -441,6 +442,8 @@ struct GLcontext_t
 	GLfloat		LineWidth; // Cowcat
 
 	GLubyte*        GeneratedTextures;  /* Array to keep track of generated textures */
+
+    GLboolean externalBitMap; /* v27: caller owns render target; never free/present it. */
 
 };
 

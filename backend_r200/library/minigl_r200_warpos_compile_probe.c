@@ -1961,6 +1961,58 @@ static void FrontendDropCachedSurfacesForCommand(ULONG command)
     }
 }
 
+#include "../generated/r200_wire_enum.h"
+
+/* Packs two 16-bit wire enums (format low, type high), as protocol >= 15
+ * carries them in one control word. Every value either side uses fits. */
+static ULONG WirePackedToNative(ULONG packed)
+{
+    return (ULONG)WireEnumToNative((GLenum)(packed & 0xffffUL)) |
+           ((ULONG)WireEnumToNative((GLenum)(packed >> 16)) << 16);
+}
+
+/*
+ * ABI 5: the frontend speaks OpenGL's token values, the 68k host and native
+ * library the classic numbering (r200_wire_enum.h). These are the protocol-16
+ * control words that carry a raw GL enum; every other word is a count, a
+ * name, a pointer or a protocol-private code. Translating is idempotent
+ * (no native value is also an OpenGL key), so a retried control block is
+ * safe. Error codes in GL_ERROR replies go the other way, in
+ * FrontendSetTransportError.
+ */
+static void WireTranslateRequest(ULONG command)
+{
+    ULONG *value = FrontendPlatform.control.value;
+
+    switch (command) {
+    case MGLPPC_CMD_BIND_TEXTURE:
+        value[0] = WireEnumToNative((GLenum)value[0]);
+        break;
+    case MGLPPC_CMD_READ_PIXELS_SHARED:
+        value[4] = WireEnumToNative((GLenum)value[4]);
+        value[5] = WireEnumToNative((GLenum)value[5]);
+        break;
+    case MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN:
+        value[0] = WireEnumToNative((GLenum)value[0]);
+        value[2] = WireEnumToNative((GLenum)value[2]);
+        value[6] = WireEnumToNative((GLenum)value[6]);
+        value[7] = WireEnumToNative((GLenum)value[7]);
+        break;
+    case MGLPPC_CMD_TEXTURE_UPLOAD_SHARED:
+        value[0] = WireEnumToNative((GLenum)value[0]);
+        value[2] = WireEnumToNative((GLenum)value[2]);
+        value[5] = FrontendPlatform.peerProtocol >= 15UL
+            ? WirePackedToNative(value[5])
+            : WireEnumToNative((GLenum)value[5]);
+        break;
+    case MGLPPC_CMD_TEXTURE_SUBIMAGE_SHARED:
+        value[6] = WirePackedToNative(value[6]);
+        break;
+    default:
+        break;
+    }
+}
+
 static BOOL PlatformCall(ULONG command, ULONG contextId)
 {
 #if MGLPPC_PROFILE
@@ -1969,6 +2021,7 @@ static BOOL PlatformCall(ULONG command, ULONG contextId)
     BOOL result;
 
     FrontendDropCachedSurfacesForCommand(command);
+    WireTranslateRequest(command);
 
     FrontendPlatform.control.command = command;
     FrontendPlatform.control.contextId = contextId;
@@ -5404,13 +5457,14 @@ static void FrontendSetTransportError(struct MiniGLR200Context *context)
     /* Forward a host-provided GL error only when it actually is one. The
      * mailbox message is reused in place, so a handler that fails without
      * writing value[0] leaves the REQUEST's value[0] in the reply (a token,
-     * a count, a serial, an address). Classic MiniGL error codes are the
-     * contiguous range GL_INVALID_ENUM (88) .. GL_OUT_OF_MEMORY (123);
-     * anything outside that range cannot be a real error and would surface
-     * as a bogus client-visible code. */
+     * a count, a serial, an address). The host reports the native library's
+     * classic error numbering; WireNativeErrorToGL maps exactly those codes
+     * to OpenGL's and answers 0 for anything else, which would otherwise
+     * surface as a bogus client-visible code. */
     if (FrontendPlatform.control.status == MGLPPC_STATUS_GL_ERROR) {
-        GLenum reported = (GLenum)FrontendPlatform.control.value[0];
-        if (reported >= GL_INVALID_ENUM && reported <= GL_OUT_OF_MEMORY)
+        GLenum reported = WireNativeErrorToGL(
+            (GLenum)FrontendPlatform.control.value[0]);
+        if (reported)
             error = reported;
     }
     SetError(context, error);
@@ -5883,28 +5937,6 @@ static ULONG FrontendSourceToBGRA32(GLenum format, GLenum type,
         a = src[0]; r = src[1]; g = src[2]; b = src[3];
     }
     return (b << 24) | (g << 16) | (r << 8) | a;
-}
-
-/* The 68k host and the native library compile against the classic
- * client enum (MGL_UBYTE_BGRA=237, MGL_UNSIGNED_SHORT_5_6_5=239, ...),
- * while dispatch clients compile against include/mgl/gl.h (233/235/...)
- * — the WOS header re-anchored GL_TEXTURE0_ARB and shifted the tail.
- * Source formats/types cross the protocol as raw client values, so
- * translate the four below-the-anchor tail constants to the native
- * numbering when packing a wire message. Everything else is identical
- * in both headers and passes through unchanged. */
-static GLenum FrontendWireSourceFormat(GLenum format)
-{
-    if (format == MGL_UBYTE_BGRA) return (GLenum)237U;
-    if (format == MGL_UBYTE_ARGB) return (GLenum)238U;
-    return format;
-}
-
-static GLenum FrontendWireSourceType(GLenum type)
-{
-    if (type == MGL_UNSIGNED_SHORT_5_6_5) return (GLenum)239U;
-    if (type == MGL_UNSIGNED_SHORT_4_4_4_4) return (GLenum)240U;
-    return type;
 }
 
 /* 565 -> 8-bit expansion tables, built once on first use. The values are
@@ -7126,14 +7158,11 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
      * never carries raw indices because the native palette is not
      * synchronized across CPUs. */
     BOOL paletted = (format == GL_COLOR_INDEX && type == GL_UNSIGNED_BYTE);
-    /* Classic MiniGL clients (original V19 headers, 68k ports and
-     * MOS2WOS conversions like Silent Hill) use the pre-re-anchor tail
-     * numbering: BGRA 237, ARGB 238, 565 239, 4444 240, plus the legacy
-     * 16-bit pairing (format = GL_UNSIGNED_SHORT, type = 565/4444).
-     * Accept both numberings and normalise to the dispatch numbering
-     * the validation, wire translation and native backend use. */
-    if (format >= 237U && format <= 240U) format -= 4U;
-    if (type >= 239U && type <= 240U) type -= 4U;
+    /* The legacy 16-bit pairing of 68k ports and MOS2WOS conversions
+     * (format = GL_UNSIGNED_SHORT, type = 565/4444) is normalised to the
+     * type-driven form. (The V19 pre-re-anchor tail numbering, BGRA 237 ..
+     * 4444 240, is gone: ABI 5 refuses every client built with it, and
+     * under OpenGL values those integers are not tokens at all.) */
     if (format == GL_UNSIGNED_SHORT) {
         if (type == MGL_UNSIGNED_SHORT_5_6_5) format = GL_RGB;
         else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) format = GL_RGBA;
@@ -7450,13 +7479,13 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[4] = (ULONG)height;
         if (canonical) {
             FrontendPlatform.control.value[5] =
-                (ULONG)(FrontendWireSourceFormat(MGL_UBYTE_BGRA) |
+                (ULONG)(MGL_UBYTE_BGRA |
                         (GL_UNSIGNED_BYTE << 16));
         } else {
             FrontendPlatform.control.value[5] =
                 FrontendPlatform.peerProtocol >= 15UL
-                    ? (FrontendWireSourceFormat(format) |
-                       (FrontendWireSourceType(type) << 16)) : format;
+                    ? (format |
+                       (type << 16)) : format;
         }
         FrontendPlatform.control.value[6] =
             (ULONG)FrontendPlatform.textureUploadBuffer;
@@ -7512,9 +7541,9 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         FrontendPlatform.control.value[4] = (ULONG)height;
         FrontendPlatform.control.value[5] = (ULONG)border;
         FrontendPlatform.control.value[6] =
-            (ULONG)FrontendWireSourceFormat(format);
+            (ULONG)format;
         FrontendPlatform.control.value[7] =
-            (ULONG)FrontendWireSourceType(type);
+            (ULONG)type;
         if (!PlatformCall(MGLPPC_CMD_TEXTURE_UPLOAD_BEGIN,
                           FrontendPlatform.contextId)) {
             FrontendSetTransportError(context);
@@ -7633,9 +7662,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     } else if (format == MGL_UNSIGNED_SHORT_4_4_4_4 && type == GL_UNSIGNED_SHORT) {
         format = GL_RGBA; type = MGL_UNSIGNED_SHORT_4_4_4_4;
     }
-    /* Classic numbering/pairing compatibility, see TexImage2D. */
-    if (format >= 237U && format <= 240U) format -= 4U;
-    if (type >= 239U && type <= 240U) type -= 4U;
+    /* Legacy 16-bit pairing, see TexImage2D. */
     if (format == GL_UNSIGNED_SHORT) {
         if (type == MGL_UNSIGNED_SHORT_5_6_5) format = GL_RGB;
         else if (type == MGL_UNSIGNED_SHORT_4_4_4_4) format = GL_RGBA;
@@ -7878,7 +7905,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     FrontendPlatform.control.value[4] = width;
     FrontendPlatform.control.value[5] = height;
     FrontendPlatform.control.value[6] =
-        (ULONG)(FrontendWireSourceFormat(MGL_UBYTE_BGRA) |
+        (ULONG)(MGL_UBYTE_BGRA |
                 (GL_UNSIGNED_BYTE << 16));
     FrontendPlatform.control.value[7] = (ULONG)FrontendPlatform.textureUploadBuffer;
     /* Native may fail AFTER replacing residency. Never keep a stale handle,
@@ -8003,6 +8030,149 @@ void R200PPCDispatchDeleteTextures(GLsizei count, const GLuint *names)
         done += (GLsizei)chunk;
     }
     if (bindingChanged) BumpSemanticStateSerial(context);
+}
+
+/*
+ * glCopyTexImage2D / glCopyTexSubImage2D (upstream 29.1 slots 139/140),
+ * stage A: read the framebuffer back through the shared READ_PIXELS path
+ * and upload it through the normal texture path. Correct, not fast -- every
+ * copy is a GPU drain plus two transfers; a GPU-side colour-to-texture copy
+ * would need a new Radeon3D service operation.
+ *
+ * Both run with tight pixel-store state (alignment 4, no row length or
+ * skips) and restore the client's afterwards: GL defines the copies in
+ * terms of the framebuffer, not of pack/unpack parameters. Reads are split
+ * into strips that fit MGLPPC_READ_PIXELS_MAX_BYTES.
+ *
+ * PowerOpen (vbcc) clients pass a ninth argument at a different stack slot
+ * than this SysV DLL reads. For CopyTexImage2D that is border, which GL
+ * requires to be 0 and which is therefore never read; for CopyTexSubImage2D
+ * it is height, which still needs an ABI-bridge trampoline (a garbled
+ * height fails the readback bounds check with GL_INVALID_VALUE).
+ */
+struct CopyPixelStore {
+    ULONG packAlignment, packRowLength, packSkipPixels, packSkipRows;
+    ULONG unpackAlignment, unpackRowLength, unpackSkipPixels, unpackSkipRows;
+};
+
+static void CopyPixelStoreEnter(struct MiniGLR200Context *context,
+                                struct CopyPixelStore *saved)
+{
+    saved->packAlignment = context->packAlignment;
+    saved->packRowLength = context->packRowLength;
+    saved->packSkipPixels = context->packSkipPixels;
+    saved->packSkipRows = context->packSkipRows;
+    saved->unpackAlignment = context->unpackAlignment;
+    saved->unpackRowLength = context->unpackRowLength;
+    saved->unpackSkipPixels = context->unpackSkipPixels;
+    saved->unpackSkipRows = context->unpackSkipRows;
+    context->packAlignment = context->unpackAlignment = 4;
+    context->packRowLength = context->unpackRowLength = 0;
+    context->packSkipPixels = context->unpackSkipPixels = 0;
+    context->packSkipRows = context->unpackSkipRows = 0;
+}
+
+static void CopyPixelStoreLeave(struct MiniGLR200Context *context,
+                                const struct CopyPixelStore *saved)
+{
+    context->packAlignment = saved->packAlignment;
+    context->packRowLength = saved->packRowLength;
+    context->packSkipPixels = saved->packSkipPixels;
+    context->packSkipRows = saved->packSkipRows;
+    context->unpackAlignment = saved->unpackAlignment;
+    context->unpackRowLength = saved->unpackRowLength;
+    context->unpackSkipPixels = saved->unpackSkipPixels;
+    context->unpackSkipRows = saved->unpackSkipRows;
+}
+
+/* Reads width x height RGBA8 framebuffer pixels at (x, y) into a fresh
+ * allocation the caller frees with FreeVec; NULL with the GL error set. */
+static UBYTE *CopyReadFramebuffer(struct MiniGLR200Context *context,
+                                  GLint x, GLint y, GLsizei width,
+                                  GLsizei height)
+{
+    ULONG rowBytes = (ULONG)width * 4UL, strip, row;
+    UBYTE *pixels;
+
+    if ((ULONG)height > 0x7fffffffUL / rowBytes) {
+        SetError(context, GL_INVALID_VALUE);
+        return NULL;
+    }
+    pixels = AllocVec(rowBytes * (ULONG)height, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!pixels) {
+        SetError(context, GL_OUT_OF_MEMORY);
+        return NULL;
+    }
+    strip = MGLPPC_READ_PIXELS_MAX_BYTES / rowBytes;
+    if (!strip) {
+        FreeVec(pixels);
+        SetError(context, GL_INVALID_VALUE);
+        return NULL;
+    }
+    for (row = 0; row < (ULONG)height; row += strip) {
+        ULONG rows = (ULONG)height - row;
+        GLenum before = context->error;
+        if (rows > strip) rows = strip;
+        R200PPCDispatchReadPixels(x, y + (GLint)row, width, (GLsizei)rows,
+                                  GL_RGBA, GL_UNSIGNED_BYTE,
+                                  pixels + row * rowBytes);
+        if (before == GL_NO_ERROR && context->error != GL_NO_ERROR) {
+            FreeVec(pixels);
+            return NULL;
+        }
+    }
+    return pixels;
+}
+
+void Lib_glCopyTexImage2D(GLenum target, GLint level, GLenum internalFormat,
+                          GLint x, GLint y, GLsizei width, GLsizei height,
+                          GLint border)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    struct CopyPixelStore saved;
+    UBYTE *pixels;
+
+    (void)border; /* must be 0; see the PowerOpen note above */
+    if (!StateChangeAllowed(context)) return;
+    if (target != GL_TEXTURE_2D) { SetError(context, GL_INVALID_ENUM); return; }
+    if (width <= 0 || height <= 0) {
+        if (width < 0 || height < 0) SetError(context, GL_INVALID_VALUE);
+        return;
+    }
+    CopyPixelStoreEnter(context, &saved);
+    pixels = CopyReadFramebuffer(context, x, y, width, height);
+    if (pixels) {
+        R200PPCDispatchTexImage2D(target, level, (GLint)internalFormat,
+                                  width, height, 0, GL_RGBA,
+                                  GL_UNSIGNED_BYTE, pixels);
+        FreeVec(pixels);
+    }
+    CopyPixelStoreLeave(context, &saved);
+}
+
+void Lib_glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
+                             GLint yoffset, GLint x, GLint y, GLsizei width,
+                             GLsizei height)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    struct CopyPixelStore saved;
+    UBYTE *pixels;
+
+    if (!StateChangeAllowed(context)) return;
+    if (target != GL_TEXTURE_2D) { SetError(context, GL_INVALID_ENUM); return; }
+    if (width <= 0 || height <= 0) {
+        if (width < 0 || height < 0) SetError(context, GL_INVALID_VALUE);
+        return;
+    }
+    CopyPixelStoreEnter(context, &saved);
+    pixels = CopyReadFramebuffer(context, x, y, width, height);
+    if (pixels) {
+        R200PPCDispatchTexSubImage2D(target, level, xoffset, yoffset,
+                                     width, height, GL_RGBA,
+                                     GL_UNSIGNED_BYTE, pixels);
+        FreeVec(pixels);
+    }
+    CopyPixelStoreLeave(context, &saved);
 }
 
 #endif

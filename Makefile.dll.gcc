@@ -14,10 +14,14 @@ MGLQ3_DEPS = $(wildcard $(MGLQ3_DIR)/src/*.c $(MGLQ3_DIR)/src/*.h \
 
 CFLAGS = $(WOS_ARCH_CFLAGS) -O3 -Wall \
          -fomit-frame-pointer \
-         -I$(MGLQ3_DIR)/include -Iinclude -Ihyperion_dll \
+         -I$(MGLQ3_DIR)/include -Iinclude -Ihyperion_dll -Ippc_common \
          $(WOS_CPPFLAGS)
 
 OBJS = $(OBJDIR)/minigl_ppc_dispatch.o \
+       $(OBJDIR)/minigl_ppc_generic.o \
+       $(OBJDIR)/minigl_ppc_lists.o \
+       $(OBJDIR)/minigl_ppc_glu.o \
+       $(OBJDIR)/minigl_ppc_glut.o \
        $(OBJDIR)/dllstartup.o \
        $(OBJDIR)/dll.o \
        $(OBJDIR)/dllimport.o
@@ -38,6 +42,15 @@ $(OBJDIR) bin:
 	mkdir -p $@
 
 $(OBJDIR)/minigl_ppc_dispatch.o: ppc_dll/minigl_ppc_dispatch.c include/libraries/minigl_dispatch.h Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_generic.o: ppc_common/minigl_ppc_generic.c include/libraries/minigl_dispatch.h Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_lists.o: ppc_common/minigl_ppc_lists.c ppc_common/minigl_ppc_lists_thunks.c include/libraries/minigl_dispatch.h Makefile.wos.gcc.common | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_glu.o $(OBJDIR)/minigl_ppc_glut.o: $(OBJDIR)/%.o: ppc_common/%.c include/libraries/minigl_dispatch.h Makefile.wos.gcc.common | $(OBJDIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c Makefile.wos.gcc.common | $(OBJDIR)

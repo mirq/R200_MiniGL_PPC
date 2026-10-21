@@ -24,6 +24,9 @@
 #endif
 
 #include "sysinc.h"
+
+/* QuarkTex reads optional colors even when the selected mode ignores them. */
+static W3D_Color safe_zero_color = { 0.0f, 0.0f, 0.0f, 0.0f };
 #include "vertexarray.h"
 
 #include <math.h>
@@ -62,11 +65,8 @@ void d_DrawSmoothPoly	(GLcontext);
 void d_DrawNormalPoly	(GLcontext);
 void d_DrawQuadStrip	(GLcontext);
 void d_DrawTrianglesVA	(GLcontext); //Surgeon
-void d_DrawFlat		(GLcontext);
 
 #if 0
-void d_DrawFlatFan	(GLcontext);
-void d_DrawFlatStrip	(GLcontext);
 #endif
 
 INLINE GLvoid v_Transform(GLcontext context);
@@ -3920,56 +3920,9 @@ void d_DrawTrianglesVA(GLcontext context)
 }
 
 
-/*
-** A MGL_FLATFAN / MGL_FLATSTRIP is a triangle fan or strip
-** that is specified in device corrdinates and is drawn
-** regardless of current matrix or viewport
-**
-** Very useful for bypassing the transformation pipeline 
-**
-*/
+/* 29.1: device-coordinate flat draw path removed. */
 
-void d_DrawFlat(GLcontext context)
-{
-	int	i;
-	static	W3D_Vertex *verts[MGL_MAXVERTS];
-	static	W3D_TrianglesV tris;
 
-	if(context->VertexBufferPointer < 3)
-		return; //invalid vertexcount;
-
-	PrepTexCoords(context, 0, context->VertexBufferPointer, GL_FALSE);
-
-	for (i=0; i<context->VertexBufferPointer; i++)
-	{
-		verts[i] = &context->VertexBuffer[i].v;
-
-		context->VertexBuffer[i].v.x = (W3D_Float) context->VertexBuffer[i].bx;
-		context->VertexBuffer[i].v.y = (W3D_Float) context->VertexBuffer[i].by;
-		context->VertexBuffer[i].v.z = (W3D_Double) context->VertexBuffer[i].bz;
-		context->VertexBuffer[i].v.w = (W3D_Float) context->VertexBuffer[i].bw;
-
-	}
-
-	tris.tex = context->w3dTexBuffer[context->CurrentBinding];
-	tris.st_pattern = NULL;
-	tris.v = verts;
-	tris.vertexcount = context->VertexBufferPointer;
-
-	#ifndef NODRAW
-
-	if(context->CurrentPrimitive == MGL_FLATSTRIP)
-	{
-		W3D_DrawTriStripV(context->w3dContext, &tris);
-	}
-
-	else	// MGL_FLATFAN
-	{
-		W3D_DrawTriFanV(context->w3dContext, &tris);
-	}
-
-	#endif
-}
 
 void dh_DrawPoly(GLcontext context, MGLPolygon *poly)
 {
@@ -4052,16 +4005,13 @@ It sets the supplied state-parameters, draws the buffer, and returns the context
 
 void MGLDrawMultitexBuffer (GLcontext context, GLenum BSrc, GLenum BDst, GLenum TexEnv)
 {
-	GLboolean blendfunc_changed = GL_FALSE;
+	GLboolean blendfunc_changed;
 	//GLboolean depthmask_changed;
 	GLbitfield ClientState;
-	GLenum CurBlendSrc, CurBlendDst;
+	GLenum CurBlendSrc = GL_ONE, CurBlendDst = GL_ZERO; /* set before use; quiets -Wmaybe-uninitialized */
 
 	if(polypointer == 0)
 		return;
-
-	CurBlendSrc = context->CurBlendSrc;
-	CurBlendDst = context->CurBlendDst;
 
 #ifdef AUTOMATIC_LOCKING_ENABLE
 
@@ -4111,24 +4061,32 @@ void MGLDrawMultitexBuffer (GLcontext context, GLenum BSrc, GLenum BDst, GLenum 
 		switch(TexEnv)
 		{
 			case GL_MODULATE:
-				W3D_SetTexEnv(context->w3dContext, tex, W3D_MODULATE, NULL);
+				W3D_SetTexEnv(context->w3dContext, tex, W3D_MODULATE, &safe_zero_color);
 				break;
 
 			case GL_DECAL:
-				W3D_SetTexEnv(context->w3dContext, tex, W3D_DECAL, NULL);
+				W3D_SetTexEnv(context->w3dContext, tex, W3D_DECAL, &safe_zero_color);
 				break;
 
 			default:
 			case GL_REPLACE:
-				W3D_SetTexEnv(context->w3dContext, tex, W3D_REPLACE, NULL);
+				W3D_SetTexEnv(context->w3dContext, tex, W3D_REPLACE, &safe_zero_color);
 				break;
 		}
 	}
 
 	if(context->CurBlendSrc != BSrc || context->CurBlendDst != BDst)
 	{
+		CurBlendSrc = context->CurBlendSrc;
+		CurBlendDst = context->CurBlendDst;
+
 		GLBlendFunc(context, BSrc, BDst);
 		blendfunc_changed = GL_TRUE;
+	}
+
+	else
+	{
+		blendfunc_changed = GL_FALSE;
 	}
 
 	//set vertexpointer to the multitexturebuffer
@@ -4217,16 +4175,16 @@ void MGLDrawMultitexBuffer (GLcontext context, GLenum BSrc, GLenum BDst, GLenum 
 		switch(context->CurTexEnv)
 		{
 			case GL_MODULATE:
-				W3D_SetTexEnv(context->w3dContext, tex, W3D_MODULATE, NULL);
+				W3D_SetTexEnv(context->w3dContext, tex, W3D_MODULATE, &safe_zero_color);
 				break;
 
 			case GL_DECAL:
-				W3D_SetTexEnv(context->w3dContext, tex, W3D_DECAL, NULL);
+				W3D_SetTexEnv(context->w3dContext, tex, W3D_DECAL, &safe_zero_color);
 				break;
 
 			default:
 			case GL_REPLACE:
-				W3D_SetTexEnv(context->w3dContext, tex, W3D_REPLACE, NULL);
+				W3D_SetTexEnv(context->w3dContext, tex, W3D_REPLACE, &safe_zero_color);
 				break;
 		}
 	}

@@ -27,7 +27,8 @@ obj/dll-r200/r200_frontend.o: \
  backend_r200/include/libraries/minigl_ppc_semantic_replay.h \
  backend_r200/include/libraries/minigl_ppc_ib_trace.h \
  backend_r200/include/libraries/minigl_ppc_cp_emit.h \
- backend_r200/include/libraries/minigl_ppc_yield.h
+ backend_r200/include/libraries/minigl_ppc_yield.h \
+ backend_r200/library/../generated/r200_wire_enum.h
 
 backend_r200/third_party/radeon3d/include/libraries/Picasso96.h:
 
@@ -92,3 +93,5 @@ backend_r200/include/libraries/minigl_ppc_ib_trace.h:
 backend_r200/include/libraries/minigl_ppc_cp_emit.h:
 
 backend_r200/include/libraries/minigl_ppc_yield.h:
+
+backend_r200/library/../generated/r200_wire_enum.h:

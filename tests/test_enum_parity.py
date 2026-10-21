@@ -46,7 +46,8 @@ PAIRS = [
     ),
 ]
 
-DEFINE_RE = re.compile(r"^#define\s+((?:GL|MGL)_[A-Za-z0-9_]+)\s+(\d+)U?\s*$")
+DEFINE_RE = re.compile(
+    r"^\s*#define\s+((?:GL|MGL)_[A-Za-z0-9_]+)\s+(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*$")
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 ENTRY_RE = re.compile(rf"^\s*({IDENT})\s*(?:=\s*(.+?))?\s*,?\s*(?:/\*.*)?$")
 
@@ -56,7 +57,7 @@ def parse_backend_defines(path):
     for line in path.read_text().splitlines():
         m = DEFINE_RE.match(line)
         if m:
-            values[m.group(1)] = int(m.group(2))
+            values[m.group(1)] = int(m.group(2), 0)
     return values
 
 
@@ -120,6 +121,12 @@ def parse_client_enum(path):
     for name, expr in pending:
         raise SystemExit(
             f"{path.name}: cannot evaluate enum expression for {name}: {expr}")
+    # Since ABI 5 the WOS client header carries OpenGL's values as numeric
+    # #defines rather than enum members; take those as well.
+    for line in text.splitlines():
+        m = DEFINE_RE.match(line)
+        if m and m.group(1) not in values:
+            values[m.group(1)] = int(m.group(2), 0)
     return values
 
 

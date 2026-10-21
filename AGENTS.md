@@ -1,4 +1,4 @@
-# Repository Guide — MiniGL V19 WarpOS + Classic + Radeon driver
+# Repository Guide — MiniGL WarpOS (API 29, ABI 5; V19 lineage) + Classic + Radeon driver
 
 ## Target hardware (physical device — never an emulator)
 
@@ -179,26 +179,52 @@
 
 ## Dispatch ABI
 
-- `MGLDispatchTable` is a positional ABI. ABI version stays `3`;
-  preserve every released V10 field through `GLPolygonOffset` in exact
-  order and append new fields only after that boundary.
+- `MGLDispatchTable` is a positional ABI at version `5`, matching
+  upstream minigl.library 29.1: slots 1..205 are upstream's, field for field
+  (`python3 tools/check_dispatch_layout.py include/libraries/minigl_dispatch.h`
+  against `tools/reference/minigl_dispatch_v29_1.txt`; the R200 build runs it),
+  followed only by the FastPath trio (206..208, `sizeof` `0x354`). GL tokens
+  in `include/mgl/gl.h` carry OpenGL's own values. Never insert above slot
+  205; new upstream slots go before the FastPath block. `MiniGLOpen` tests
+  the ABI for equality, so ABI-3 (V19) clients must be rebuilt.
 - Any dispatch API change must keep the struct and client wrappers in
   `include/libraries/minigl_dispatch.h`, the real positional initializer
   (`ppc_dll/minigl_ppc_dispatch.c`, and the R200 generated table), and
   the stub initializer/implementations synchronized — including all four
   `library/dispatch_table_*.c` in the classic tree and the packaged copy
-  under `dev/include/`.
-- Normal PPC layout; do not force two-byte packing. Do not add
-  `FromWindow`/`CreateContextFromWindow`.
+  under `dev/include/` (the classic tree is still on its own private
+  layout and old tokens: plan P8 in `PLAN_V29_1_PARITY.md`). A slot that can
+  be compiled into a display list also goes into
+  `tools/generate_list_thunks.py`.
+- Every R200 frontend token in `backend_r200/library/minigl_r200.h` takes the
+  same value as `include/mgl/gl.h` (`python3 tests/test_enum_parity.py`).
+  Enums that cross the protocol-16 wire are translated to the 68k library's
+  classic numbering in `WireTranslateRequest`
+  (`backend_r200/generated/r200_wire_enum.h`, generated); a new
+  enum-carrying control word must be added there.
+- Normal PPC layout; do not force two-byte packing.
+- `MGLCreateContextFromWindow`/`FromBitMap` are part of the ABI. The mglQ3
+  DLL implements them with upstream's Warp3D code; the R200 DLL returns
+  `NULL` until the external-target protocol (protocol 17, plan P7) exists.
+  An external window's IDCMP belongs to the application: the host must not
+  poll its `UserPort`.
 - Intentional fallbacks unless implemented and validated:
-  `glClientActiveTextureARB`, `mglResizeContext`,
-  `mglEmergencyCloseScreen`, `glMGLForceNewRenderPass` are no-ops;
+  `mglResizeContext` returns `GL_FALSE`; `mglEmergencyCloseScreen` and
+  `glMGLForceNewRenderPass` are header-only no-ops (no slots since ABI 5);
   `glMultiDrawArrays` loops `GLDrawArrays`; `mglGetInputWindowHandle`
-  returns the ordinary window handle.
+  returns the ordinary window handle; R200 `glBlendEquation` accepts only
+  `GL_FUNC_ADD` and `glTexGenfv` raises `GL_INVALID_OPERATION`; the
+  per-slot list is in `docs/dispatch-abi.md` section 2.2.
+- Display lists, GLU and GLUT are backend-independent (`ppc_common/`),
+  written against the DLL's own table; generic code must call the SysV
+  `MGLPPCTexImage2D`/`MGLPPCTexSubImage2D` hooks, never the
+  `GLTexImage2D`/`GLTexSubImage2D` slots (PowerOpen bridge trampolines).
 - The Silent Hill reference DLL has a private ABI-3 fast-path tail at
   offsets `0x218..0x220`; `SilentHill.elf` was verified not to access
-  those slots (prefix-compatible). Do not claim compatibility for other
-  clients that call the private extension.
+  those slots (prefix-compatible), but its `MiniGLOpen` requires
+  `abiVersion == 3`: the ABI-5 DLL refuses it. Run it with an ABI-3 R200 DLL
+  in its own directory. Do not claim compatibility for other clients that
+  call the private extension.
 
 ## Radeon driver architecture (~/p96-driver)
 

@@ -285,9 +285,11 @@ typedef char rk68_msg_size_check[sizeof(struct rk68_Message) == 20 ? 1 : -1];
 /*
  * MiniGL dispatch table prefix offsets.
  *
- * The 68k minigl.library presents ABI 5; the PPC DLL presents ABI 3. The
- * first 128 function-pointer fields are identical in both tables, so the
- * field numbers from include/libraries/minigl_dispatch.h apply here.
+ * The 68k minigl.library presents its own private "ABI 5" layout; the PPC
+ * DLL presents upstream 29.1's ABI 5 (a different layout under the same
+ * number). The first 128 function-pointer fields are identical in both
+ * tables, so the field numbers from include/libraries/minigl_dispatch.h
+ * apply here.
  * Field i (1-based) is at byte 20 + (i-1)*4 (4 ULONGs + currentContext).
  *
  * A runtime check validates abiVersion before any entry is used.

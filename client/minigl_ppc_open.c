@@ -42,10 +42,11 @@ BOOL MiniGLOpen(void)
     }
 
     /* Both caller and returned function are WarpOS/PPC code.
-     * A V19-compiled client requires the full V19 table. Old V10 clients
-     * were compiled with the smaller sizeof(MGLDispatchTable), so they still
-     * accept this larger V19 table as long as ABI 3 and the V10 prefix stay
-     * unchanged. */
+     * abiVersion is compared for EQUALITY (as upstream minigl_open.c does):
+     * ABI 5 changed the GL token values, so no pairing across the 3 -> 5
+     * boundary can work in either direction. structSize keeps its "at least
+     * mine" test, which is what lets an appended slot keep older ABI-5
+     * clients working. */
     dispatch = getDispatch();
     if (!dispatch ||
         dispatch->abiVersion != MINIGL_DISPATCH_ABI_VERSION ||

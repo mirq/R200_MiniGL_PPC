@@ -1,4 +1,4 @@
-/* Public ABI-3 PPC DLL bind benchmark: [count=256] [same|alternate].
+/* Public ABI-5 PPC DLL bind benchmark: [count=256] [same|alternate].
  * Build: make -f Makefile.import.gcc bin/examples/r200_bind_bench_ppc.warpelf
  * Requires a matched R200 stack with public RGBA ReadPixels support.
  * Baseline sends N binds in either mode; redundant-bind elision should send

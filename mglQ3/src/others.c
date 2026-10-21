@@ -16,6 +16,34 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+/* GetVar searches the calling process's local variables, then ENV:.
+ * Do not cache this globally: minigl.library is shared by applications. */
+static GLint ConfiguredMaxTextureSize(void)
+{
+	UBYTE value[32];
+	LONG length = GetVar((CONST_STRPTR)"MINIGL_MAX_TEXTURE_SIZE", value,
+	                     (LONG)sizeof(value), 0);
+	LONG i = 0;
+	GLint limit = 0;
+	if (length <= 0 || length >= (LONG)sizeof(value) - 1)
+		return 1024;
+	while (i < length && (value[i] == ' ' || value[i] == '\t'))
+		i++;
+	while (i < length && value[i] >= '0' && value[i] <= '9')
+	{
+		limit = limit * 10 + value[i++] - '0';
+		if (limit > 4096)
+			return 1024;
+	}
+	while (i < length && (value[i] == ' ' || value[i] == '\t' ||
+		value[i] == '\r' || value[i] == '\n'))
+		i++;
+	if (i != length || limit < 64 || (limit & (limit - 1)) != 0)
+		return 1024;
+	return limit;
+}
 
 //static char rcsid[] = "$Id: others.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
 
@@ -119,10 +147,10 @@ void GLShadeModel(GLcontext context, GLenum mode)
 void GLBlendFunc(GLcontext context, GLenum sfactor, GLenum dfactor)
 {
 	ULONG src = 0, dest = 0;
+	GLenum w3d_dfactor = dfactor;
 
-	if((context->CurBlendSrc == sfactor) && (context->CurBlendDst == dfactor))
-		return;
-
+	/* Always submit both factors. Warp3D state can change independently of
+	 * MiniGL's cached query values (for example between Carmageddon passes). */
 	context->CurBlendSrc = sfactor;
 	context->CurBlendDst = dfactor;
 
@@ -130,7 +158,20 @@ void GLBlendFunc(GLcontext context, GLenum sfactor, GLenum dfactor)
 	{
 		BLS(ZERO);
 		BLS(ONE);
-		BLS(DST_COLOR);
+		/* (DST_COLOR, ZERO) is algebraically equivalent to
+		 * (ZERO, SRC_COLOR), but avoids the broken source-factor path on
+		 * affected classic Warp3D drivers. Do not rewrite other pairs. */
+		case GL_DST_COLOR:
+			if (dfactor == GL_ZERO)
+			{
+				src = W3D_ZERO;
+				w3d_dfactor = GL_SRC_COLOR;
+			}
+			else
+			{
+				src = W3D_DST_COLOR;
+			}
+			break;
 		BLS(ONE_MINUS_DST_COLOR);
 		BLS(SRC_ALPHA);
 		BLS(ONE_MINUS_SRC_ALPHA);
@@ -142,7 +183,7 @@ void GLBlendFunc(GLcontext context, GLenum sfactor, GLenum dfactor)
 			GLFlagError(context, 1, GL_INVALID_ENUM);
 	}
 
-	switch(dfactor)
+	switch(w3d_dfactor)
 	{
 		BLD(ZERO);
 		BLD(ONE);
@@ -161,7 +202,7 @@ void GLBlendFunc(GLcontext context, GLenum sfactor, GLenum dfactor)
 	// (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) which is supported
 	// by almost all Amiga supported graphics cards
 
-	if (W3D_SetBlendMode(context->w3dContext, src, dest) == W3D_UNSUPPORTEDBLEND)
+	if ((ULONG)W3D_SetBlendMode(context->w3dContext, src, dest) == (ULONG)W3D_UNSUPPORTEDBLEND)
 	{
 		if (context->NoFallbackAlpha == GL_FALSE)
 		{
@@ -281,7 +322,7 @@ void GLGetIntegerv(GLcontext context, GLenum pname, GLint *params)
 			return;
 
 		case GL_MAX_TEXTURE_SIZE:
-			*params = 256 ;
+			*params = ConfiguredMaxTextureSize();
 			//*params = W3D_Query(context->w3dContext, W3D_Q_MAXTEXWIDTH, 0); // future - Cowcat
 			return;
 
@@ -334,6 +375,8 @@ const GLubyte *GLGetString(GLcontext context, GLenum name)
 					case W3D_CHIP_AVENGER_LE:
 						return (GLubyte *)"MiniGL/Warp3D 3DFX Voodoo 3 (avenger)";
 
+					/* WarpOS: Warp3DPPC knows the Radeon chips (upstream's
+					 * 68k Classic SDK does not), so keep their names. */
 					case W3D_CHIP_RADEON:
 						return (GLubyte *)"MiniGL/Warp3D ATI Radeon";
 
@@ -450,27 +493,48 @@ void MGLSetZOffset(GLcontext context, GLfloat offset)
 // NYI:
 void GLReadPixels(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels)
 {
-	GLubyte *pixelrect;
-	GLubyte *dest;
-	int	i;
-
-	pixelrect = (GLubyte *)malloc(context->w3dWindow->Width*context->w3dWindow->Height*3);
-
-	if (!pixelrect)
-		return;
-
-	dest = pixelrect;
-
-	for (i=0; i<context->w3dWindow->Height; i++)
-	{
-		(void)ReadPixelArray(dest, 0, 0, context->w3dWindow->Width, context->w3dWindow->RPort, 0, 
-			(UWORD)i, context->w3dWindow->Width, 1, RECTFMT_RGB);
-
-		dest += context->w3dWindow->Width * 3;
+	W3D_Context *w = context->w3dContext;
+	struct RastPort rp;
+	GLubyte *row;
+	GLint i, j, align = context->PackAlign;
+	ULONG channels, stride;
+	GLboolean locked;
+	if (width < 0 || height < 0 || width > 8191) { context->CurrentError = GL_INVALID_VALUE; return; }
+	if (type != GL_UNSIGNED_BYTE || (format != GL_RGB && format != GL_RGBA)) {
+		context->CurrentError = GL_INVALID_ENUM; return;
 	}
-
-	//convert and copy to *pixels ....
-	free(pixelrect);
+	if (!pixels || !width || !height) return;
+	if (!w || !w->drawregion || context->CurrentPrimitive != GL_BASE) {
+		context->CurrentError = GL_INVALID_OPERATION; return;
+	}
+	if (align != 1 && align != 2 && align != 4 && align != 8) align = 4;
+	channels = format == GL_RGBA ? 4 : 3;
+	stride = (width * channels + align - 1) & ~(align - 1);
+	if ((ULONG)height > 0x7fffffffUL / stride) { context->CurrentError = GL_INVALID_VALUE; return; }
+	row = malloc(width * 4);
+	if (!row) { context->CurrentError = GL_OUT_OF_MEMORY; return; }
+	InitRastPort(&rp);
+	rp.BitMap = w->drawregion;
+	locked = context->w3dLocked;
+	/* Complete rendering before reading the actual back bitmap, not the
+	 * visible window. The driver owns any necessary host-to-bitmap transfer. */
+	W3D_WaitIdle(w);
+	if (locked) W3D_UnLockHardware(w);
+	for (i = 0; i < height; ++i) {
+		GLubyte *dest = (GLubyte *)pixels + i * stride;
+		GLint sy = w->height - 1 - (y + i);
+		memset(dest, 0, width * channels);
+		if (x < 0 || x > w->width || width > w->width - x || sy < 0 || sy >= w->height) continue;
+		ReadPixelArray(row, 0, 0, width * 4, &rp, x, sy + w->yoffset, width, 1, RECTFMT_ARGB);
+		for (j = 0; j < width; ++j) {
+			dest[j * channels] = row[j * 4 + 1];
+			dest[j * channels + 1] = row[j * 4 + 2];
+			dest[j * channels + 2] = row[j * 4 + 3];
+			if (channels == 4) dest[j * 4 + 3] = w->destalpha ? row[j * 4] : 255;
+		}
+	}
+	if (locked) context->w3dLocked = W3D_LockHardware(w) == W3D_SUCCESS;
+	free(row);
 }
 
 #if 1 // Cowcat
@@ -480,7 +544,6 @@ void MGLWriteShotPPM(GLcontext context, char *filename)
 	GLubyte *pixelline;
 	FILE	*f;
 	int	i;
-	size_t	bytes;
 
 	pixelline = (GLubyte *)malloc(context->w3dWindow->Width*3);
 
@@ -504,7 +567,7 @@ void MGLWriteShotPPM(GLcontext context, char *filename)
 		(void)ReadPixelArray(pixelline, 0, 0, context->w3dWindow->Width, context->w3dWindow->RPort,
 			0, (UWORD)i, context->w3dWindow->Width, 1, RECTFMT_RGB);
 
-		bytes = fwrite(pixelline, context->w3dWindow->Width*3, 1, f);
+		(void)fwrite(pixelline, context->w3dWindow->Width*3, 1, f);
 	}
 
 	fclose(f);
