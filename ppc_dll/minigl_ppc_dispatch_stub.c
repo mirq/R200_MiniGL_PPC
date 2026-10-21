@@ -121,7 +121,7 @@ void Stub_MGLMinTriArea(GLcontext context, GLfloat area) { stub_call("MGLMinTriA
 void Stub_MGLMouseFunc(GLcontext context, MouseHandlerFn m) { stub_call("MGLMouseFunc"); }
 void Stub_MGLPrintMatrix(GLcontext context, int mode) { stub_call("MGLPrintMatrix"); }
 void Stub_MGLPrintMatrixStack(GLcontext context, int mode) { stub_call("MGLPrintMatrixStack"); }
-void Stub_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height) { stub_call("MGLResizeContext"); }
+GLboolean Stub_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height) { stub_call("MGLResizeContext"); return GL_FALSE; }
 void Stub_MGLSetPointer(GLcontext context) { stub_call("MGLSetPointer"); }
 void Stub_MGLSetState(GLcontext context, GLenum cap, GLboolean state) { stub_call("MGLSetState"); }
 void Stub_MGLSetZOffset(GLcontext context, GLfloat offset) { stub_call("MGLSetZOffset"); }
@@ -159,14 +159,80 @@ static void Stub_GLMultiDrawArrays(GLcontext context, GLenum mode, const GLint *
 {
     (void)context; (void)mode; (void)first; (void)count; (void)primcount; stub_call("GLMultiDrawArrays");
 }
-static void Stub_MGLEmergencyCloseScreen(GLcontext context)
-{
-    (void)context; stub_call("MGLEmergencyCloseScreen");
-}
-static void Stub_MGLForceNewRenderPass(GLcontext context)
-{
-    (void)context; stub_call("MGLForceNewRenderPass");
-}
+/* Upstream 29.1 slots 133..205: log the call and return zero. */
+static void Stub_GLBlendEquation(GLcontext context, GLenum mode) { stub_call("GLBlendEquation"); }
+static void Stub_GLBlendFuncSeparate(GLcontext context, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) { stub_call("GLBlendFuncSeparate"); }
+static GLboolean Stub_GLIsTexture(GLcontext context, GLuint texture) { stub_call("GLIsTexture"); return (GLboolean)0; }
+static void Stub_mglChooseZBufferDepth(int bits) { stub_call("mglChooseZBufferDepth"); }
+static void Stub_GLLineWidth(GLcontext context, GLfloat width) { stub_call("GLLineWidth"); }
+static void Stub_GLTexGenfv(GLcontext context, GLenum coord, GLenum pname, const GLfloat *params) { stub_call("GLTexGenfv"); }
+static void Stub_GLCopyTexImage2D(GLcontext context, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) { stub_call("GLCopyTexImage2D"); }
+static void Stub_GLCopyTexSubImage2D(GLcontext context, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) { stub_call("GLCopyTexSubImage2D"); }
+static GLboolean Stub_GLAreTexturesResident(GLcontext context, GLsizei n, const GLuint *textures, GLboolean *residences) { stub_call("GLAreTexturesResident"); return (GLboolean)0; }
+static void Stub_GLEdgeFlag(GLcontext context, GLboolean flag) { stub_call("GLEdgeFlag"); }
+static void Stub_GLEdgeFlagPointer(GLcontext context, GLsizei stride, const GLvoid *pointer) { stub_call("GLEdgeFlagPointer"); }
+static void Stub_GLEdgeFlagv(GLcontext context, const GLboolean *flag) { stub_call("GLEdgeFlagv"); }
+static void Stub_GLGetDoublev(GLcontext context, GLenum pname, GLdouble *params) { stub_call("GLGetDoublev"); }
+static void Stub_GLGetPointerv(GLcontext context, GLenum pname, GLvoid **params) { stub_call("GLGetPointerv"); }
+static void Stub_GLIndexi(GLcontext context, GLint c) { stub_call("GLIndexi"); }
+static void Stub_GLIndexiv(GLcontext context, const GLint *c) { stub_call("GLIndexiv"); }
+static void Stub_GLIndexPointer(GLcontext context, GLenum type, GLsizei stride, const GLvoid *pointer) { stub_call("GLIndexPointer"); }
+static void Stub_GLPrioritizeTextures(GLcontext context, GLsizei n, const GLuint *textures, const GLclampf *priorities) { stub_call("GLPrioritizeTextures"); }
+static void Stub_GLReadBuffer(GLcontext context, GLenum mode) { stub_call("GLReadBuffer"); }
+static void * Stub_MGLCreateContextFromWindow(struct Window *window) { stub_call("MGLCreateContextFromWindow"); return (void *)0; }
+static void * Stub_MGLCreateContextFromBitMap(struct BitMap *bitmap) { stub_call("MGLCreateContextFromBitMap"); return (void *)0; }
+static void Stub_GLLightf(GLcontext context, GLenum light, GLenum pname, GLfloat param) { stub_call("GLLightf"); }
+static void Stub_GLLightfv(GLcontext context, GLenum light, GLenum pname, const GLfloat *params) { stub_call("GLLightfv"); }
+static void Stub_GLMaterialf(GLcontext context, GLenum face, GLenum pname, GLfloat param) { stub_call("GLMaterialf"); }
+static void Stub_GLMaterialfv(GLcontext context, GLenum face, GLenum pname, const GLfloat *params) { stub_call("GLMaterialfv"); }
+static void Stub_GLLightModelf(GLcontext context, GLenum pname, GLfloat param) { stub_call("GLLightModelf"); }
+static void Stub_GLLightModelfv(GLcontext context, GLenum pname, const GLfloat *params) { stub_call("GLLightModelfv"); }
+static void Stub_GLGetLightfv(GLcontext context, GLenum light, GLenum pname, GLfloat *params) { stub_call("GLGetLightfv"); }
+static void Stub_GLGetMaterialfv(GLcontext context, GLenum face, GLenum pname, GLfloat *params) { stub_call("GLGetMaterialfv"); }
+static GLuint Stub_GLGenLists(GLcontext context, GLsizei range) { stub_call("GLGenLists"); return (GLuint)0; }
+static void Stub_GLDeleteLists(GLcontext context, GLuint list, GLsizei range) { stub_call("GLDeleteLists"); }
+static GLboolean Stub_GLIsList(GLcontext context, GLuint list) { stub_call("GLIsList"); return (GLboolean)0; }
+static void Stub_GLNewList(GLcontext context, GLuint list, GLenum mode) { stub_call("GLNewList"); }
+static void Stub_GLEndList(GLcontext context) { stub_call("GLEndList"); }
+static void Stub_GLCallList(GLcontext context, GLuint list) { stub_call("GLCallList"); }
+static GLint Stub_GLUBuild2DMipmaps(GLcontext context, GLenum target, GLint internalFormat, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *data) { stub_call("GLUBuild2DMipmaps"); return (GLint)0; }
+static const GLubyte * Stub_GLUErrorString(GLenum errCode) { stub_call("GLUErrorString"); return (const GLubyte *)0; }
+static GLUquadricObj * Stub_GLUNewQuadric(void) { stub_call("GLUNewQuadric"); return (GLUquadricObj *)0; }
+static void Stub_GLUDeleteQuadric(GLUquadricObj *q) { stub_call("GLUDeleteQuadric"); }
+static void Stub_GLUQuadricNormals(GLUquadricObj *q, GLenum normals) { stub_call("GLUQuadricNormals"); }
+static void Stub_GLUQuadricTexture(GLUquadricObj *q, GLboolean textureCoords) { stub_call("GLUQuadricTexture"); }
+static void Stub_GLUQuadricDrawStyle(GLUquadricObj *q, GLenum drawStyle) { stub_call("GLUQuadricDrawStyle"); }
+static void Stub_GLUQuadricOrientation(GLUquadricObj *q, GLenum orientation) { stub_call("GLUQuadricOrientation"); }
+static void Stub_GLUCylinder(GLUquadricObj *q, GLdouble base, GLdouble top, GLdouble height, GLint slices, GLint stacks) { stub_call("GLUCylinder"); }
+static void Stub_GLUSphere(GLUquadricObj *q, GLdouble radius, GLint slices, GLint stacks) { stub_call("GLUSphere"); }
+static void Stub_GLUDisk(GLUquadricObj *q, GLdouble inner, GLdouble outer, GLint slices, GLint loops) { stub_call("GLUDisk"); }
+static void Stub_GLUTInit(int *argcp, char **argv) { stub_call("GLUTInit"); }
+static void Stub_GLUTInitDisplayMode(unsigned int mode) { stub_call("GLUTInitDisplayMode"); }
+static void Stub_GLUTInitWindowSize(int width, int height) { stub_call("GLUTInitWindowSize"); }
+static void Stub_GLUTInitWindowPosition(int x, int y) { stub_call("GLUTInitWindowPosition"); }
+static int Stub_GLUTCreateWindow(const char *title) { stub_call("GLUTCreateWindow"); return (int)0; }
+static void Stub_GLUTMainLoop(void) { stub_call("GLUTMainLoop"); }
+static void Stub_GLUTDisplayFunc(void (*func)(void)) { stub_call("GLUTDisplayFunc"); }
+static void Stub_GLUTIdleFunc(void (*func)(void)) { stub_call("GLUTIdleFunc"); }
+static void Stub_GLUTKeyboardFunc(void (*func)(unsigned char key, int x, int y)) { stub_call("GLUTKeyboardFunc"); }
+static void Stub_GLUTReshapeFunc(void (*func)(int width, int height)) { stub_call("GLUTReshapeFunc"); }
+static void Stub_GLUTSwapBuffers(void) { stub_call("GLUTSwapBuffers"); }
+static void Stub_GLUTPostRedisplay(void) { stub_call("GLUTPostRedisplay"); }
+static int Stub_GLUTGet(GLenum state) { stub_call("GLUTGet"); return (int)0; }
+static void Stub_GLUTGameModeString(const char *string) { stub_call("GLUTGameModeString"); }
+static int Stub_GLUTEnterGameMode(void) { stub_call("GLUTEnterGameMode"); return (int)0; }
+static void Stub_GLUTLeaveGameMode(void) { stub_call("GLUTLeaveGameMode"); }
+static int Stub_GLUTGameModeGet(GLenum query) { stub_call("GLUTGameModeGet"); return (int)0; }
+static void Stub_GLUTSolidCube(GLdouble size) { stub_call("GLUTSolidCube"); }
+static void Stub_GLUTSolidSphere(GLdouble radius, GLint slices, GLint stacks) { stub_call("GLUTSolidSphere"); }
+static void Stub_GLUTSolidCone(GLdouble base, GLdouble height, GLint slices, GLint stacks) { stub_call("GLUTSolidCone"); }
+static void Stub_GLUTSolidTorus(GLdouble innerRadius, GLdouble outerRadius, GLint sides, GLint rings) { stub_call("GLUTSolidTorus"); }
+static void Stub_GLUTSolidDodecahedron(void) { stub_call("GLUTSolidDodecahedron"); }
+static void Stub_GLNormalPointer(GLcontext context, GLenum type, GLsizei stride, const GLvoid *pointer) { stub_call("GLNormalPointer"); }
+static void Stub_GLUQuadricCallback(GLUquadricObj *q, GLenum which, MGLUfuncptr fn) { stub_call("GLUQuadricCallback"); }
+static void Stub_GLColorMaterial(GLcontext context, GLenum face, GLenum mode) { stub_call("GLColorMaterial"); }
+static void Stub_GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, const GLfloat *params) { stub_call("GLTexEnvfv"); }
+static void Stub_GLNormal3fv(GLcontext context, GLfloat *n) { stub_call("GLNormal3fv"); }
 static GLboolean Stub_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp)
 {
     (void)primitive; (void)attributes; (void)fp;
@@ -319,13 +385,87 @@ const MGLDispatchTable MiniGLDispatchTable = {
     Stub_GLClientActiveTextureARB,
     Stub_GLInterleavedArrays,
     Stub_GLMultiDrawArrays,
-    Stub_MGLEmergencyCloseScreen,
-    Stub_MGLForceNewRenderPass,
+    Stub_GLBlendEquation,
+    Stub_GLBlendFuncSeparate,
+    Stub_GLIsTexture,
+    Stub_mglChooseZBufferDepth,
+    Stub_GLLineWidth,
+    Stub_GLTexGenfv,
+    Stub_GLCopyTexImage2D,
+    Stub_GLCopyTexSubImage2D,
+    Stub_GLAreTexturesResident,
+    Stub_GLEdgeFlag,
+    Stub_GLEdgeFlagPointer,
+    Stub_GLEdgeFlagv,
+    Stub_GLGetDoublev,
+    Stub_GLGetPointerv,
+    Stub_GLIndexi,
+    Stub_GLIndexiv,
+    Stub_GLIndexPointer,
+    Stub_GLPrioritizeTextures,
+    Stub_GLReadBuffer,
+    Stub_MGLCreateContextFromWindow,
+    Stub_MGLCreateContextFromBitMap,
+    Stub_GLLightf,
+    Stub_GLLightfv,
+    Stub_GLMaterialf,
+    Stub_GLMaterialfv,
+    Stub_GLLightModelf,
+    Stub_GLLightModelfv,
+    Stub_GLGetLightfv,
+    Stub_GLGetMaterialfv,
+    Stub_GLGenLists,
+    Stub_GLDeleteLists,
+    Stub_GLIsList,
+    Stub_GLNewList,
+    Stub_GLEndList,
+    Stub_GLCallList,
+    Stub_GLUBuild2DMipmaps,
+    Stub_GLUErrorString,
+    Stub_GLUNewQuadric,
+    Stub_GLUDeleteQuadric,
+    Stub_GLUQuadricNormals,
+    Stub_GLUQuadricTexture,
+    Stub_GLUQuadricDrawStyle,
+    Stub_GLUQuadricOrientation,
+    Stub_GLUCylinder,
+    Stub_GLUSphere,
+    Stub_GLUDisk,
+    Stub_GLUTInit,
+    Stub_GLUTInitDisplayMode,
+    Stub_GLUTInitWindowSize,
+    Stub_GLUTInitWindowPosition,
+    Stub_GLUTCreateWindow,
+    Stub_GLUTMainLoop,
+    Stub_GLUTDisplayFunc,
+    Stub_GLUTIdleFunc,
+    Stub_GLUTKeyboardFunc,
+    Stub_GLUTReshapeFunc,
+    Stub_GLUTSwapBuffers,
+    Stub_GLUTPostRedisplay,
+    Stub_GLUTGet,
+    Stub_GLUTGameModeString,
+    Stub_GLUTEnterGameMode,
+    Stub_GLUTLeaveGameMode,
+    Stub_GLUTGameModeGet,
+    Stub_GLUTSolidCube,
+    Stub_GLUTSolidSphere,
+    Stub_GLUTSolidCone,
+    Stub_GLUTSolidTorus,
+    Stub_GLUTSolidDodecahedron,
+    Stub_GLNormalPointer,
+    Stub_GLUQuadricCallback,
+    Stub_GLColorMaterial,
+    Stub_GLTexEnvfv,
+    Stub_GLNormal3fv,
     Stub_mglBeginFastPath,
     Stub_mglEndFastPath,
     Stub_mglGetFastPathCapabilities,
 };
 
+
+typedef char StubDispatchABI5SizeCheck[
+    sizeof(MGLDispatchTable) == 0x354 ? 1 : -1];
 
 const MGLDispatchTable * __saveds MGLGetDispatchTable(void)
 {

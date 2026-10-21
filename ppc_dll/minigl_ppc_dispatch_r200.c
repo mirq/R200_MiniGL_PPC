@@ -12,6 +12,7 @@
 
 #include <libraries/minigl_dispatch.h>
 #include "dll.h"
+#include "minigl_ppc_generic.h"
 
 GLcontext mini_CurrentContext = (GLcontext)0;
 
@@ -24,6 +25,10 @@ extern void *R200PPCDispatchCreateContextFromID(GLint id, GLint *width,
 extern void R200PPCDispatchDeleteContext(void);
 extern void R200PPCPlatformResetClientDefaults(void);
 extern void R200PPCTraceStr(const char *line);
+extern void R200PPCSetError(GLenum error);
+extern GLboolean R200PPCGetClientArray(GLenum array, const GLvoid **pointer,
+                                       GLint *size, GLenum *type,
+                                       GLsizei *stride, GLboolean *enabled);
 
 static struct Task *R200ClientOwner;
 static BOOL R200LegacyClient;
@@ -60,6 +65,7 @@ void *R200ABI3CreateContextFromID(GLint id, GLint *width, GLint *height)
 
 void R200ABI3DeleteContext(void)
 {
+    MGLGeneric_ListsContextGone();
     R200PPCDispatchDeleteContext();
     R200ReleaseLegacyClient();
 }
@@ -89,7 +95,6 @@ void R200ABI3DeleteContext(void)
 #define Lib_glTexSubImage2D R200PPCDispatchTexSubImage2D
 #define Lib_glReadPixels R200PPCDispatchReadPixels
 #define Lib_mglWriteShotPPM R200PPCDispatchWriteShotPPM
-#define Lib_mglEmergencyCloseScreen R200PPCDispatchEmergencyCloseScreen
 
 /* GLTexImage2D/glTexSubImage2D are the only table entries with more than
  * eight arguments; PowerOpen (vbcc/WarpOS) clients pass the overflow
@@ -101,10 +106,35 @@ extern void R200PowerTexSubImage2D(void);
 #define R200_TABLE_GLTexImage2D R200PowerTexImage2D
 #define R200_TABLE_GLTexSubImage2D R200PowerTexSubImage2D
 
-#include "../backend_r200/generated/dispatch_table_abi3.c"
+#include "../backend_r200/generated/dispatch_table_abi5.c"
 
-typedef char R200DispatchABI3SizeCheck[
-    sizeof(MGLDispatchTable) == 0x238 ? 1 : -1];
+/* ABI 5: upstream 29.1's 205 slots plus the three FastPath slots. */
+typedef char R200DispatchABI5SizeCheck[
+    sizeof(MGLDispatchTable) == 0x354 ? 1 : -1];
+
+/* Hooks for the backend-independent layer (ppc_common). */
+MGLDispatchTable *const MGLPPCSelfTable = &MiniGLDispatchTable;
+
+void MGLPPCSetError(GLcontext context, GLenum error)
+{
+    (void)context;
+    R200PPCSetError(error);
+}
+
+/* The generated SysV thunks; the table slots are the PowerOpen bridges. */
+void (*const MGLPPCTexImage2D)(GLcontext, GLenum, GLint, GLint, GLsizei,
+                               GLsizei, GLint, GLenum, GLenum,
+                               const GLvoid *) = R200_GLTexImage2D;
+void (*const MGLPPCTexSubImage2D)(GLcontext, GLenum, GLint, GLint, GLint,
+                                  GLsizei, GLsizei, GLenum, GLenum,
+                                  const GLvoid *) = R200_GLTexSubImage2D;
+
+GLboolean MGLPPCClientArray(GLcontext context, GLenum array, MGLPPCArray *out)
+{
+    (void)context;
+    return R200PPCGetClientArray(array, &out->pointer, &out->size, &out->type,
+                                 &out->stride, &out->enabled);
+}
 
 /* PowerOpen (vbcc) client ABI bridge -- see MGLTexImage2DArgs in
  * include/libraries/minigl_dispatch.h. PowerOpen places arguments 9+
@@ -140,11 +170,6 @@ void R200PPCDispatchExit(void)
     R200PPCTraceStr("dispatch exit done");
 }
 
-void R200PPCDispatchEmergencyCloseScreen(void)
-{
-    R200PPCDispatchExit();
-}
-
 BOOL __saveds MGLPPCClientAttach(void)
 {
     struct Task *task = FindTask(NULL);
@@ -167,14 +192,16 @@ void __saveds MGLPPCClientDetach(void)
 {
     if (!R200ClientOwner || R200ClientOwner != FindTask(NULL))
         return;
+    MGLGeneric_ListsContextGone();
     R200PPCPlatformClose();
     mini_CurrentContext = (GLcontext)0;
     R200ClientOwner = NULL;
     R200LegacyClient = FALSE;
 }
 
-/* Old ABI-3 import archives know only this export. Their normal context
- * delete path releases the transport while still executing in this task. */
+/* Import archives without MGLPPCClientAttach (the pre-attach "legacy" clients)
+ * know only this export. Their normal context delete path releases the
+ * transport while still executing in this task. */
 const MGLDispatchTable * __saveds MGLGetDispatchTable(void)
 {
     struct Task *task = FindTask(NULL);

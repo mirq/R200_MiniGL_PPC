@@ -1492,6 +1492,16 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
     case GL_MAX_LIGHTS:
         *value = (GLint)R200_MAX_LIGHTS;
         break;
+    case GL_READ_BUFFER: *value = (GLint)context->readBuffer; break;
+    case GL_BLEND_EQUATION: *value = (GLint)GL_FUNC_ADD; break;
+    /* The only depth format the RV280 service programs
+     * (R200_DEPTH_FORMAT_16BIT_INT_Z); see Lib_mglChooseZBufferDepth. */
+    case GL_DEPTH_BITS: *value = 16; break;
+    case GL_PACK_ALIGNMENT: *value = (GLint)context->packAlignment; break;
+    case GL_UNPACK_ALIGNMENT: *value = (GLint)context->unpackAlignment; break;
+    case GL_EDGE_FLAG_ARRAY_STRIDE:
+        *value = (GLint)context->edgeFlagArray.stride;
+        break;
     case GL_MAX_TEXTURE_SIZE:
         /* Same limit Lib_glTexImage2D enforces. This case is mandatory:
          * the default path leaves *value untouched and only raises
@@ -1765,6 +1775,7 @@ void Lib_glGetBooleanv(GLenum name, GLboolean *value)
     }
     switch (name) {
     case GL_DEPTH_WRITEMASK: *value = context->depthMask ? GL_TRUE : GL_FALSE; break;
+    case GL_EDGE_FLAG: *value = context->edgeFlag ? GL_TRUE : GL_FALSE; break;
     default: SetError(context, GL_INVALID_ENUM); break;
     }
 }
@@ -1840,6 +1851,8 @@ void Lib_glGetFloatv(GLenum name, GLfloat *value)
     case GL_COLOR_MATERIAL_PARAM:
         value[0] = (GLfloat)context->colorMaterialMode;
         break;
+    case GL_LINE_WIDTH: value[0] = context->lineWidth; break;
+    case GL_POINT_SIZE: value[0] = context->pointSize; break;
     default: SetError(context, GL_INVALID_ENUM); break;
     }
 }
@@ -2627,4 +2640,159 @@ static void WriteLightingHeader(struct MiniGLR200Context *context,
     }
 
     *options |= RADEON3D_DRAW_LIGHTING;
+}
+
+/*
+ * V29 parity entry points (upstream minigl.library 29.1 slots 137..151).
+ * Every one is real state with GL 1.1 validation; where the hardware path
+ * does not consume the state yet, the field comment in
+ * minigl_r200_internal.h says so.
+ */
+void Lib_glLineWidth(GLfloat width)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    if (width <= 0.0f) { SetError(context, GL_INVALID_VALUE); return; }
+    /* Same ceiling as glPointSize. Lines are expanded at draw time, so the
+     * width is not part of any record header and needs no serial bump. */
+    if (width > 64.0f) width = 64.0f;
+    context->lineWidth = width;
+}
+
+void Lib_glEdgeFlag(GLboolean flag)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    /* Legal between glBegin and glEnd, like every other current attribute. */
+    if (!context) return;
+    context->edgeFlag = flag ? TRUE : FALSE;
+}
+
+void Lib_glEdgeFlagv(const GLboolean *flag)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!context) return;
+    if (!flag) { SetError(context, GL_INVALID_VALUE); return; }
+    context->edgeFlag = *flag ? TRUE : FALSE;
+}
+
+void Lib_glEdgeFlagPointer(GLsizei stride, const GLvoid *pointer)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    if (stride < 0) { SetError(context, GL_INVALID_VALUE); return; }
+    context->edgeFlagArray.pointer = pointer;
+    context->edgeFlagArray.size = 1;
+    context->edgeFlagArray.type = GL_UNSIGNED_BYTE;
+    context->edgeFlagArray.stride = stride ? (ULONG)stride :
+                                    (ULONG)sizeof(GLboolean);
+}
+
+void Lib_glReadBuffer(GLenum mode)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    if (mode != GL_FRONT && mode != GL_BACK && mode != GL_FRONT_LEFT &&
+        mode != GL_BACK_LEFT && mode != GL_LEFT) {
+        SetError(context, GL_INVALID_ENUM);
+        return;
+    }
+    /* Single-view: the left buffers are the front and back buffers, and
+     * ReadSourceSurface tests for GL_FRONT. */
+    context->readBuffer = mode == GL_BACK || mode == GL_BACK_LEFT ? GL_BACK
+                                                                  : GL_FRONT;
+}
+
+void Lib_glGetPointerv(GLenum name, GLvoid **value)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!context) return;
+    if (!value) { SetError(context, GL_INVALID_VALUE); return; }
+    switch (name) {
+    case GL_VERTEX_ARRAY_POINTER:
+        *value = (GLvoid *)context->vertexArray.pointer;
+        break;
+    case GL_COLOR_ARRAY_POINTER:
+        *value = (GLvoid *)context->colorArray.pointer;
+        break;
+    case GL_TEXTURE_COORD_ARRAY_POINTER:
+        *value = (GLvoid *)(context->clientActiveTexture ?
+                            context->texcoord1Array.pointer :
+                            context->texcoordArray.pointer);
+        break;
+    case GL_NORMAL_ARRAY_POINTER:
+        *value = (GLvoid *)context->normalArray.pointer;
+        break;
+    case GL_EDGE_FLAG_ARRAY_POINTER:
+        *value = (GLvoid *)context->edgeFlagArray.pointer;
+        break;
+    default:
+        SetError(context, GL_INVALID_ENUM);
+        break;
+    }
+}
+
+/*
+ * glBlendEquation / glBlendFuncSeparate (upstream 29.1 slots 133/134).
+ *
+ * RV280 can do both (RB3D_BLENDCNTL comb function, RB3D_ABLENDCNTL with
+ * SEPARATE_ALPHA_ENABLE -- Mesa r200_state.c), but the Radeon3D fragment
+ * state word this frontend submits carries only one source/destination pair
+ * and no equation. Until the record and emitter grow those fields:
+ *  - GL_FUNC_ADD is the hardware's equation and is accepted silently;
+ *    the other four GL 1.2/ARB_imaging equations are refused with
+ *    GL_INVALID_OPERATION rather than rendered as ADD;
+ *  - glBlendFuncSeparate applies the RGB pair, and refuses a differing
+ *    alpha pair the same way. An identical pair is plain glBlendFunc.
+ */
+void Lib_glBlendEquation(GLenum mode)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    if (mode == GL_FUNC_ADD)
+        return;
+    if (mode == GL_FUNC_SUBTRACT || mode == GL_FUNC_REVERSE_SUBTRACT ||
+        mode == GL_MIN || mode == GL_MAX)
+        SetError(context, GL_INVALID_OPERATION);
+    else
+        SetError(context, GL_INVALID_ENUM);
+}
+
+void Lib_glBlendFuncSeparate(GLenum sourceRGB, GLenum destinationRGB,
+                             GLenum sourceAlpha, GLenum destinationAlpha)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    Lib_glBlendFunc(sourceRGB, destinationRGB);
+    if (sourceAlpha != sourceRGB || destinationAlpha != destinationRGB)
+        SetError(context, GL_INVALID_OPERATION);
+}
+
+/* The PPC DLL's backend-independent layer (ppc_common) raises errors and
+ * reads client array state through these two. */
+void R200PPCSetError(GLenum error)
+{
+    SetError(CurrentContext(), error);
+}
+
+GLboolean R200PPCGetClientArray(GLenum array, const GLvoid **pointer,
+                                GLint *size, GLenum *type, GLsizei *stride,
+                                GLboolean *enabled)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    const struct ArrayState *state;
+    if (!context) return GL_FALSE;
+    switch (array) {
+    case GL_VERTEX_ARRAY: state = &context->vertexArray; break;
+    case GL_COLOR_ARRAY: state = &context->colorArray; break;
+    case GL_NORMAL_ARRAY: state = &context->normalArray; break;
+    case GL_TEXTURE0_ARB: state = &context->texcoordArray; break;
+    case GL_TEXTURE1_ARB: state = &context->texcoord1Array; break;
+    default: return GL_FALSE;
+    }
+    *pointer = state->pointer;
+    *size = state->size;
+    *type = state->type;
+    *stride = (GLsizei)state->stride;
+    *enabled = state->enabled && state->pointer ? GL_TRUE : GL_FALSE;
+    return GL_TRUE;
 }

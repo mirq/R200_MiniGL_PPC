@@ -1687,10 +1687,13 @@ static BOOL AppendScreenSegment(struct MiniGLR200Context *context,
     struct ScreenVertex a=*p0,b=*p0,c=*p1,d=*p1;
     GLfloat dx=p1->x-p0->x,dy=p1->y-p0->y;
     GLfloat length=(GLfloat)sqrt((double)(dx*dx+dy*dy));
+    /* Half of glLineWidth: GL applies the line width to polygon-mode
+     * edges as well as to line primitives. 1.0 keeps the historic 0.5. */
+    GLfloat half=context->lineWidth*0.5f;
     GLfloat px,py;
     if (length==0.0f)
         return TRUE;
-    px=-dy*0.5f/length; py=dx*0.5f/length;
+    px=-dy*half/length; py=dx*half/length;
     a.x+=px; a.y+=py; b.x-=px; b.y-=py;
     c.x-=px; c.y-=py; d.x+=px; d.y+=py;
     return EmitClippedScreenTriangle(context,&a,&b,&c,FALSE) &&
@@ -1773,31 +1776,34 @@ static BOOL AppendScreenTriangleVertices(struct MiniGLR200Context *context,
  * Default-sized points keep the cheap hardware path, so this costs nothing
  * unless a client actually asks for large points.
  */
-static BOOL EmitSizedPoints(struct MiniGLR200Context *context,
-                            const struct Vertex *vertices, ULONG count)
-{
+/* The CPU copy of the transform the record header tells the hardware to
+ * apply, shared by the CPU-expanded wide points and wide lines. */
+struct ScreenMapping {
     const GLfloat *matrix;
     GLfloat xScale, xOffset, yScale, yOffset, zScale, zOffset;
-    ULONG index;
+};
 
+static void BeginScreenMapping(struct MiniGLR200Context *context,
+                               struct ScreenMapping *mapping)
+{
     if (!context->combinedMatrixValid) {
         MultiplyMatrix(context->combinedMatrix,
                        context->projection[context->projectionDepth],
                        context->modelview[context->modelviewDepth]);
         context->combinedMatrixValid = TRUE;
     }
-    matrix = context->combinedMatrix;
+    mapping->matrix = context->combinedMatrix;
 
     /* Same viewport and depth-range mapping CapturePendingDrawState writes
      * into header dwords 37..42. */
-    xScale = (GLfloat)context->viewportWidth * 0.5f;
-    xOffset = (GLfloat)context->viewportX + xScale;
-    yScale = -((GLfloat)context->viewportHeight * 0.5f);
-    yOffset = (GLfloat)(context->height - context->viewportY -
-                        context->viewportHeight) +
-              (GLfloat)context->viewportHeight * 0.5f;
-    zScale = (context->depthFar - context->depthNear) * 0.5f;
-    zOffset = (context->depthFar + context->depthNear) * 0.5f;
+    mapping->xScale = (GLfloat)context->viewportWidth * 0.5f;
+    mapping->xOffset = (GLfloat)context->viewportX + mapping->xScale;
+    mapping->yScale = -((GLfloat)context->viewportHeight * 0.5f);
+    mapping->yOffset = (GLfloat)(context->height - context->viewportY -
+                                 context->viewportHeight) +
+                       (GLfloat)context->viewportHeight * 0.5f;
+    mapping->zScale = (context->depthFar - context->depthNear) * 0.5f;
+    mapping->zOffset = (context->depthFar + context->depthNear) * 0.5f;
 
     /* Screen-space vertices are pre-projected. Any pending hardware-transformed
      * geometry is split off by PrepareScreenAppend, which compares
@@ -1806,45 +1812,107 @@ static BOOL EmitSizedPoints(struct MiniGLR200Context *context,
      * between appends and so says nothing about the pending batch. */
     context->screenHardwareTransform = FALSE;
     context->screenProjective = FALSE;
+}
 
+/* FALSE for a vertex at or behind the eye plane, which has no screen
+ * position. */
+static BOOL MapVertexToScreen(const struct ScreenMapping *mapping,
+                              const struct Vertex *input,
+                              struct ScreenVertex *output)
+{
+    const GLfloat *matrix = mapping->matrix;
+    GLfloat clipX, clipY, clipZ, clipW, inverseW;
+
+    clipX = matrix[0] * input->x + matrix[4] * input->y +
+            matrix[8] * input->z + matrix[12] * input->w;
+    clipY = matrix[1] * input->x + matrix[5] * input->y +
+            matrix[9] * input->z + matrix[13] * input->w;
+    clipZ = matrix[2] * input->x + matrix[6] * input->y +
+            matrix[10] * input->z + matrix[14] * input->w;
+    clipW = matrix[3] * input->x + matrix[7] * input->y +
+            matrix[11] * input->z + matrix[15] * input->w;
+    if (clipW <= 0.0f)
+        return FALSE;
+    inverseW = 1.0f / clipW;
+
+    output->x = mapping->xScale * (clipX * inverseW) + mapping->xOffset;
+    output->y = mapping->yScale * (clipY * inverseW) + mapping->yOffset;
+    output->z = mapping->zScale * (clipZ * inverseW) + mapping->zOffset;
+    if (output->z < 0.0f) output->z = 0.0f;
+    if (output->z > 1.0f) output->z = 1.0f;
+    output->rhw = inverseW;
+    output->nx = input->nx;
+    output->ny = input->ny;
+    output->nz = input->nz;
+    output->color = input->color;
+    output->s = input->s;
+    output->t = input->t;
+    output->s1 = input->s1;
+    output->t1 = input->t1;
+    output->fog = input->fog;
+    return TRUE;
+}
+
+static BOOL EmitSizedPoints(struct MiniGLR200Context *context,
+                            const struct Vertex *vertices, ULONG count)
+{
+    struct ScreenMapping mapping;
+    ULONG index;
+
+    BeginScreenMapping(context, &mapping);
     for (index = 0; index < count; ++index) {
-        const struct Vertex *input = &vertices[index];
         struct ScreenVertex point;
-        GLfloat clipX, clipY, clipZ, clipW, inverseW;
-
-        clipX = matrix[0] * input->x + matrix[4] * input->y +
-                matrix[8] * input->z + matrix[12] * input->w;
-        clipY = matrix[1] * input->x + matrix[5] * input->y +
-                matrix[9] * input->z + matrix[13] * input->w;
-        clipZ = matrix[2] * input->x + matrix[6] * input->y +
-                matrix[10] * input->z + matrix[14] * input->w;
-        clipW = matrix[3] * input->x + matrix[7] * input->y +
-                matrix[11] * input->z + matrix[15] * input->w;
-
-        /* Points at or behind the eye plane have no screen position. */
-        if (clipW <= 0.0f)
-            continue;
-        inverseW = 1.0f / clipW;
-
-        point.x = xScale * (clipX * inverseW) + xOffset;
-        point.y = yScale * (clipY * inverseW) + yOffset;
-        point.z = zScale * (clipZ * inverseW) + zOffset;
-        if (point.z < 0.0f) point.z = 0.0f;
-        if (point.z > 1.0f) point.z = 1.0f;
-        point.rhw = inverseW;
-        point.nx = input->nx;
-        point.ny = input->ny;
-        point.nz = input->nz;
-        point.color = input->color;
-        point.s = input->s;
-        point.t = input->t;
-        point.s1 = input->s1;
-        point.t1 = input->t1;
-        point.fog = input->fog;
-
-        if (!AppendScreenPoint(context, &point))
+        if (MapVertexToScreen(&mapping, &vertices[index], &point) &&
+            !AppendScreenPoint(context, &point))
             return FALSE;
     }
+    return TRUE;
+}
+
+/*
+ * Lines wider than one pixel (glLineWidth, upstream 29.1 slot 137).
+ *
+ * Like points, wide lines are expanded on the CPU into screen-space quads
+ * through AppendScreenSegment, the decomposition polygon-mode GL_LINE edges
+ * already use, so default-width lines keep the hardware line primitives. A
+ * segment with an endpoint at or behind the eye plane is dropped whole
+ * rather than clipped, the same simplification EmitSizedPoints makes.
+ */
+static BOOL EmitWideLines(struct MiniGLR200Context *context,
+                          const struct Vertex *vertices, ULONG count,
+                          GLenum primitive)
+{
+    struct ScreenMapping mapping;
+    struct ScreenVertex first, previous, current;
+    BOOL havePrevious = FALSE, haveFirst;
+    ULONG index;
+
+    if (count < 2UL)
+        return TRUE;
+    BeginScreenMapping(context, &mapping);
+    if (primitive == GL_LINES) {
+        for (index = 0; index + 1UL < count; index += 2UL)
+            if (MapVertexToScreen(&mapping, &vertices[index], &previous) &&
+                MapVertexToScreen(&mapping, &vertices[index + 1UL], &current) &&
+                !AppendScreenSegment(context, &previous, &current))
+                return FALSE;
+        return TRUE;
+    }
+    haveFirst = MapVertexToScreen(&mapping, &vertices[0], &first);
+    previous = first;
+    havePrevious = haveFirst;
+    for (index = 1; index < count; ++index) {
+        BOOL haveCurrent = MapVertexToScreen(&mapping, &vertices[index],
+                                             &current);
+        if (havePrevious && haveCurrent &&
+            !AppendScreenSegment(context, &previous, &current))
+            return FALSE;
+        previous = current;
+        havePrevious = haveCurrent;
+    }
+    if (primitive == GL_LINE_LOOP && count > 2UL && havePrevious &&
+        haveFirst && !AppendScreenSegment(context, &previous, &first))
+        return FALSE;
     return TRUE;
 }
 
@@ -1981,6 +2049,10 @@ static BOOL EmitHardwareLine(struct MiniGLR200Context *context,
     struct Vertex line[2];
     line[0] = *a;
     line[1] = *b;
+    /* Polygon-mode edges and long strips land here; they honour
+     * glLineWidth like the line primitives do. */
+    if (context->lineWidth > 1.5f)
+        return EmitWideLines(context, line, 2UL, GL_LINES);
     return EmitHardwareBatch(context, line, 2UL, RADEON3D_EXEC_DRAW_LINES);
 }
 
@@ -2126,6 +2198,8 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
         }
         return TRUE;
     case GL_LINES:
+        if (context->lineWidth > 1.5f)
+            return EmitWideLines(context, vertices, count, primitive);
         for (index = 0; index + 1 < count; index += batch) {
             batch = count - index;
             if (batch > MAX_SCREEN_VERTICES - 1UL)
@@ -2137,6 +2211,8 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
         }
         return TRUE;
     case GL_LINE_STRIP:
+        if (context->lineWidth > 1.5f)
+            return EmitWideLines(context, vertices, count, primitive);
         if (count <= MAX_SCREEN_VERTICES)
             return count < 2UL || EmitHardwareBatch(
                 context, vertices, count, RADEON3D_EXEC_DRAW_LINE_STRIP);
@@ -2146,6 +2222,8 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
                 return FALSE;
         return TRUE;
     case GL_LINE_LOOP:
+        if (context->lineWidth > 1.5f)
+            return EmitWideLines(context, vertices, count, primitive);
         if (count <= MAX_SCREEN_VERTICES)
             return count < 2UL || EmitHardwareBatch(
                 context, vertices, count, RADEON3D_EXEC_DRAW_LINE_LOOP);

@@ -753,6 +753,19 @@ void Lib_mglChoosePixelDepth(int depth)
     ReleaseSemaphore(&LibraryBase->lock);
 }
 
+/* mglChooseZBufferDepth (upstream 29.1 slot 136). The RV280 depth buffer
+ * this stack allocates is 16 bits; 24-bit Z needs the depth request to reach
+ * the 68k library in CREATE_CONTEXT, so other requests are accepted and the
+ * buffer stays 16-bit, which GL_DEPTH_BITS reports truthfully. Like the other
+ * choosers it only has meaning before a context exists. */
+void Lib_mglChooseZBufferDepth(int bits)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    (void)bits;
+    if (context)
+        SetError(context, GL_INVALID_OPERATION);
+}
+
 void Lib_mglChooseWindowMode(GLboolean windowMode)
 {
     struct MiniGLR200Context *context = CurrentContext();

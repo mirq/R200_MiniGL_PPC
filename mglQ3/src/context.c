@@ -770,21 +770,22 @@ static void vid_CloseWindow(GLcontext context)
 
 	//vid_DeletePointer(context->w3dWindow); // maybe - Cowcat
 
-	if (context->w3dWindow)
+	if (context->w3dWindow && context->externalWindow == GL_FALSE)
 	{ 
 		CloseWindow(context->w3dWindow);
 	}
 	context->w3dWindow = NULL;
 
 	// Lock Pub Screen Fix - Cowcat
-	if (context->w3dScreen)
+	if (context->w3dScreen && context->externalWindow == GL_FALSE)
 	{ 
 		UnlockPubScreen(NULL, context->w3dScreen);
 	}
 	context->w3dScreen = NULL;
 
-	if (context->w3dBitMap)
+	if (context->w3dBitMap && !context->externalBitMap)
 		FreeBitMap(context->w3dBitMap);
+    context->w3dBitMap = NULL;
 
 	if (context->w3dRastPort)
 		free(context->w3dRastPort);
@@ -985,6 +986,87 @@ Duh:
 	return GL_FALSE;
 }
 
+/* Create a Warp3D drawing context for a Window owned by the caller (SDL).
+ * The Window and its Screen are borrowed and must never be closed/unlocked by
+ * MiniGL.  The off-screen bitmap, RastPort and Warp3D context remain ours. */
+static GLboolean vid_OpenExistingWindow(GLcontext context, struct Window *window,
+	int *outw, int *outh)
+{
+	ULONG CError;
+	ULONG result;
+	int w, h;
+
+	if (!context || !window || !window->RPort || !window->RPort->BitMap)
+		return GL_FALSE;
+
+	if (GL_FALSE == sys_MaybeOpenVidLibs())
+		return GL_FALSE;
+
+	w = window->Width - window->BorderLeft - window->BorderRight;
+	h = window->Height - window->BorderTop - window->BorderBottom;
+	if (w <= 0 || h <= 0)
+		return GL_FALSE;
+
+	context->externalWindow = GL_TRUE;
+	context->w3dWindow = window;
+	context->w3dScreen = window->WScreen;
+	context->BufNr = 0;
+	context->NumBuffers = 0;
+	context->DoSync = GL_TRUE;
+
+	context->w3dBitMap = AllocBitMap(w, h, 8,
+		BMF_MINPLANES | BMF_DISPLAYABLE, window->RPort->BitMap);
+	if (!context->w3dBitMap)
+		goto Duh;
+
+	context->w3dRastPort = malloc(sizeof(struct RastPort));
+	if (!context->w3dRastPort)
+		goto Duh;
+
+	InitRastPort(context->w3dRastPort);
+	context->w3dRastPort->BitMap = context->w3dBitMap;
+
+	tags[0].ti_Tag = W3D_CC_BITMAP;
+	tags[0].ti_Data = (ULONG)context->w3dBitMap;
+	tags[1].ti_Tag = W3D_CC_DRIVERTYPE;
+	tags[1].ti_Data = W3D_DRIVER_BEST;
+	tags[2].ti_Tag = W3D_CC_FAST;
+	tags[2].ti_Data = FALSE;
+	tags[3].ti_Tag = W3D_CC_YOFFSET;
+	tags[3].ti_Data = 0;
+	tags[4].ti_Tag = W3D_CC_GLOBALTEXENV;
+	tags[4].ti_Data = TRUE;
+	tags[5].ti_Tag = TAG_DONE;
+
+	context->w3dContext = W3D_CreateContext(&CError, tags);
+	if (!context->w3dContext || CError != W3D_SUCCESS)
+		goto Duh;
+
+	W3D_SetState(context->w3dContext, W3D_DITHERING, W3D_ENABLE);
+	W3D_SetState(context->w3dContext, W3D_GOURAUD, W3D_ENABLE);
+	W3D_SetState(context->w3dContext, W3D_PERSPECTIVE, W3D_ENABLE);
+
+	result = W3D_AllocZBuffer(context->w3dContext);
+	(void)result;
+	W3D_SetState(context->w3dContext, W3D_ZBUFFER, W3D_DISABLE);
+	W3D_SetState(context->w3dContext, W3D_ZBUFFERUPDATE, W3D_ENABLE);
+	W3D_SetZCompareMode(context->w3dContext, W3D_Z_LESS);
+
+	GLScissor(context, 0, 0, w, h);
+	context->w3dLocked = GL_FALSE;
+	context->w3dFormat = W3D_R5G6B5;
+	context->w3dAlphaFormat = W3D_A4R4G4B4;
+	context->w3dBytesPerTexel = 2;
+
+	if (outw) *outw = w;
+	if (outh) *outh = h;
+	return GL_TRUE;
+
+Duh:
+	vid_CloseWindow(context);
+	return GL_FALSE;
+}
+
 #if 0 // Cowcat
 void MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
 {
@@ -1008,7 +1090,7 @@ void MGLEmergencyCloseScreen(GLcontext context)
 	int i;
 	GLboolean windowed;
 
-	if (!context)
+	if (!context || context->externalWindow)
 		return;
 
 	windowed = context->w3dBitMap ? GL_TRUE : GL_FALSE;
@@ -1342,6 +1424,11 @@ void MGLSwitchDisplay(GLcontext context)
 {
 	int nowbuf = context->BufNr;
 
+	if (context->externalBitMap) {
+        GLFinish(context);
+        MGLUnlockDisplay(context);
+        return;
+    }
 	MGLUnlockDisplay(context);
 	
 	if (!context->w3dBitMap) // Fullscreen mode
@@ -1660,6 +1747,7 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 	{
 		if (GL_FALSE == vid_OpenDisplay(context, w, h, MGL_SM_BESTMODE))
 		{
+			vid_CloseDisplay(context);
 			free(context);
 
 			printf("Error: opening of display failed\n");
@@ -1671,6 +1759,7 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 	{
 		if (GL_FALSE == vid_OpenWindow(context, w, h))
 		{
+			vid_CloseWindow(context);
 			free(context);
 
 			printf("Error: opening of display failed\n");
@@ -1695,6 +1784,90 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 	context->w3dChipID = context->w3dContext->CurrentChip;
 
 	return context;
+}
+
+void *MGLCreateContextFromWindow(struct Window *windowptr)
+{
+	GLcontext context;
+	int w, h;
+
+	if (!windowptr)
+		return NULL;
+
+	context = malloc(sizeof(struct GLcontext_t));
+	if (!context)
+		return NULL;
+
+	memset(context, 0, sizeof(struct GLcontext_t));
+
+	if (GL_FALSE == vid_OpenExistingWindow(context,
+		(struct Window *)windowptr, &w, &h))
+	{
+		free(context);
+		return NULL;
+	}
+
+	if (GL_FALSE == MGLInitContext(context))
+	{
+		MGLDeleteContext(context);
+		return NULL;
+	}
+
+	GLDepthRange(context, 0.0, 1.0);
+	GLViewport(context, 0, 0, w, h);
+	GLClearColor(context, 1.0, 1.0, 1.0, 1.0);
+	context->w3dChipID = context->w3dContext->CurrentChip;
+	return context;
+}
+
+/* v27: borrow a CGX bitmap; presentation and bitmap lifetime belong to the host. */
+void *MGLCreateContextFromBitMap(struct BitMap *bitmap)
+{
+    GLcontext context;
+    ULONG error = W3D_SUCCESS;
+    ULONG w, h, bytes_per_pixel;
+    if (!bitmap || !sys_MaybeOpenVidLibs()) return NULL;
+    if (!GetCyberMapAttr(bitmap, CYBRMATTR_ISCYBERGFX)) return NULL;
+    w = GetCyberMapAttr(bitmap, CYBRMATTR_WIDTH);
+    h = GetCyberMapAttr(bitmap, CYBRMATTR_HEIGHT);
+    bytes_per_pixel = GetCyberMapAttr(bitmap, CYBRMATTR_BPPIX);
+    if (!w || !h || bytes_per_pixel != 4) return NULL;
+    context = malloc(sizeof(*context));
+    if (!context) return NULL;
+    memset(context, 0, sizeof(*context));
+    context->externalWindow = GL_TRUE;
+    context->externalBitMap = GL_TRUE;
+    context->w3dBitMap = bitmap;
+    context->NumBuffers = 0;
+    context->DoSync = GL_FALSE;
+    tags[0].ti_Tag = W3D_CC_BITMAP; tags[0].ti_Data = (ULONG)bitmap;
+    tags[1].ti_Tag = W3D_CC_DRIVERTYPE; tags[1].ti_Data = W3D_DRIVER_BEST;
+    tags[2].ti_Tag = W3D_CC_FAST; tags[2].ti_Data = FALSE;
+    tags[3].ti_Tag = W3D_CC_YOFFSET; tags[3].ti_Data = 0;
+    tags[4].ti_Tag = W3D_CC_GLOBALTEXENV; tags[4].ti_Data = TRUE;
+    tags[5].ti_Tag = TAG_DONE;
+    context->w3dContext = W3D_CreateContext(&error, tags);
+    if (!context->w3dContext || error != W3D_SUCCESS) goto fail;
+    W3D_SetState(context->w3dContext, W3D_DITHERING, W3D_ENABLE);
+    W3D_SetState(context->w3dContext, W3D_GOURAUD, W3D_ENABLE);
+    W3D_SetState(context->w3dContext, W3D_PERSPECTIVE, W3D_ENABLE);
+    if (W3D_AllocZBuffer(context->w3dContext) != W3D_SUCCESS) goto fail;
+    W3D_SetState(context->w3dContext, W3D_ZBUFFER, W3D_DISABLE);
+    W3D_SetState(context->w3dContext, W3D_ZBUFFERUPDATE, W3D_ENABLE);
+    W3D_SetZCompareMode(context->w3dContext, W3D_Z_LESS);
+    context->w3dFormat = W3D_R5G6B5;
+    context->w3dAlphaFormat = W3D_A4R4G4B4;
+    context->w3dBytesPerTexel = 2;
+    GLScissor(context, 0, 0, w, h);
+    if (!MGLInitContext(context)) goto fail;
+    GLDepthRange(context, 0.0, 1.0);
+    GLViewport(context, 0, 0, w, h);
+    GLClearColor(context, 1.0, 1.0, 1.0, 1.0);
+    context->w3dChipID = context->w3dContext->CurrentChip;
+    return context;
+fail:
+    MGLDeleteContext(context);
+    return NULL;
 }
 
 void MGLDeleteContext(GLcontext context)
@@ -1773,12 +1946,10 @@ void MGLSetState(GLcontext context, const GLenum cap, const GLboolean flag) //su
 
 		case GL_BLEND:
 
-			//surgeon: added state-check
-			if(context->Blend_State != flag)
-			{
-				context->Blend_State = flag;
-				W3D_SetState(context->w3dContext, W3D_BLENDING, ED);
-			}
+			/* Keep the cached value for queries, but always restore the real
+			 * Warp3D state; the driver can lose it while the cache still matches. */
+			context->Blend_State = flag;
+			W3D_SetState(context->w3dContext, W3D_BLENDING, ED);
 
 			break;
 
@@ -1932,6 +2103,7 @@ void *MGLCreateContextFromID(GLint id, GLint *width, GLint *height)
 	{
 		if (GL_FALSE == vid_OpenDisplay(context, -1,-1, (ULONG)id))
 		{
+			vid_CloseDisplay(context);
 			free(context);
 			printf("Error: opening of display failed\n");
 			return NULL;

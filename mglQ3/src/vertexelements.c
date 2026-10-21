@@ -1,5 +1,8 @@
 #include "sysinc.h"
 #include "vertexarray.h"
+#ifdef MINIGL_CLASSIC_ORTHO
+#include "transform_ortho.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +40,6 @@ static void E_DrawQuadStrip	(GLcontext context, const int count, UWORD *idx);
 static void E_DrawTriFan	(GLcontext context, const int count, UWORD *idx);
 static void E_DrawTriStrip	(GLcontext context, const int count, const UWORD *idx);
 static void E_DrawTriangles	(GLcontext context, const int count, const UWORD *idx);
-static void E_DrawFlatFan	(GLcontext context, const int count, const UWORD *idx);
 
 static PolyBuffer clipbuffer[MGL_MAXVERTS>>2];
 
@@ -261,6 +263,11 @@ static INLINE void TransformIndex(GLcontext context, const int size, const UWORD
 
 		if(context->CombinedValid == GL_FALSE)
 			m_CombineMatrices(context);
+
+#ifdef MINIGL_CLASSIC_ORTHO
+		if (TransformIndexOrtho(context, size, idx))
+			return;
+#endif
 
 		a11=a(11); a12=a(12); a13=a(13); a14=a(14);
 		a21=a(21); a22=a(22); a23=a(23); a24=a(24);
@@ -2459,41 +2466,7 @@ static void E_DrawTriangles(GLcontext context, const int count, const UWORD *idx
 	}
 }
 
-static void E_DrawFlatFan(GLcontext context, const int count, const UWORD *idx)
-{
-	int	i;
-	int	vnum;
-	MGLVertex *v;
-	float	*W;
-	float	*V;
-	int	Vstride;
-	int	offs;
 
-	offs	= context->ArrayPointer.transformed;
-	Vstride = context->ArrayPointer.vertexstride;
-
-	i = 0;
-
-	do
-	{
-		vnum = idx[i];
-		v = &context->VertexBuffer[offs+vnum];
-		V = (float*)(context->ArrayPointer.verts + vnum * Vstride);
-
-		v->v.x = V[0];
-		v->v.y = V[1];
-		v->v.z = V[2];
-
-		W = (float*)(context->ArrayPointer.w_buffer + vnum * context->ArrayPointer.texcoordstride);
-		*W = 1.0;
-
-		i++;
-
-	} while (i < count);
-
-	//error = W3D_DrawElements(context->w3dContext, W3D_PRIMITIVE_TRIFAN, W3D_INDEX_UWORD, count, (void *)idx);
-	W3D_DrawElements(context->w3dContext, W3D_PRIMITIVE_TRIANGLES, W3D_INDEX_UWORD, count, (void *)idx); // test Quake3 - Cowcat
-}
 
 //Range guardband-check added 18-05-02 (surgeon)
 
@@ -2861,11 +2834,15 @@ static void E_DrawNULL(GLcontext context, const int count, const UWORD*idx)
 
 void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, const GLvoid *indices)
 {
+    /* Removed SDK modes must not reach the release-build default fan path. */
+    if (mode == 0x7013 || mode == 0x7014) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
 	int	i;
 	UBYTE	*ub;
 	ULONG	*ul;
-	UWORD	*idx;
-	GLboolean use_pipeline = context->VertexArrayPipeline;
+	UWORD	*idx = NULL; /* read only on the pipeline path, which sets it */
 	static EDrawfn E_Draw;
 
 #ifdef VA_SANITY_CHECK
@@ -2887,7 +2864,7 @@ void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, 
 	if(count < 3)
 		return; //invalid vertexcount or primitive
 
-	if(use_pipeline != GL_FALSE)
+	if(context->VertexArrayPipeline == GL_TRUE)
 		switch(type)
 		{
 			case GL_UNSIGNED_SHORT:
@@ -3011,13 +2988,10 @@ void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, 
 		//context->w3dContext->TPFlags[0] = 0; // Cowcat
 	}
 
-	if(use_pipeline != GL_FALSE)
+	if(context->VertexArrayPipeline != GL_FALSE)
 	{
 		switch(mode)
 		{
-			case MGL_FLATFAN:
-				E_Draw = (EDrawfn)E_DrawFlatFan;
-				break;
 
 			case GL_QUADS:
 				E_Draw = (EDrawfn)E_DrawQuads;
@@ -3078,7 +3052,7 @@ void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, 
 		PreDraw(context);
 	}
 
-	if(use_pipeline == GL_FALSE)
+	if(context->VertexArrayPipeline == GL_FALSE)
 	{
 		W3D_DrawElements(context->w3dContext, mode, type, count, (void*)indices);
 	}
@@ -3098,7 +3072,7 @@ void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, 
 		PostDraw(context);
 	}
 
-	if(use_pipeline != GL_FALSE && context->ArrayPointer.locksize == 0)
+	if(context->VertexArrayPipeline != GL_FALSE && context->ArrayPointer.locksize == 0)
 	{
 		context->w3dContext->VPMode = W3D_VERTEX_F_F_F;
 		context->w3dContext->VertexPointer = (void *)&(context->VertexBuffer[0].bx);
@@ -3151,3 +3125,4 @@ void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, 
 
 	#endif
 }
+

@@ -938,7 +938,79 @@ void Lib_glTexEnvf(GLenum target, GLenum pname, GLfloat value)
 void Lib_glTexEnviv(GLenum target, GLenum pname, GLint *value)
 { if (value) Lib_glTexEnvi(target,pname,*value); }
 void Lib_glTexEnvfv(GLenum target, GLenum pname, GLfloat *value)
-{ if (value) Lib_glTexEnvi(target,pname,(GLint)*value); }
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG i;
+    if (!value) {
+        if (context) SetError(context, GL_INVALID_VALUE);
+        return;
+    }
+    if (target != GL_TEXTURE_ENV || pname != GL_TEXTURE_ENV_COLOR) {
+        Lib_glTexEnvi(target, pname, (GLint)*value);
+        return;
+    }
+    /* GL_TEXTURE_ENV_COLOR is four clamped floats; the integer glTexEnvi
+     * cannot carry it. Stored per unit for the texture-stage record that
+     * will consume it (GL_BLEND texenv), see minigl_r200_internal.h. */
+    if (!StateChangeAllowed(context)) return;
+    for (i = 0; i < 4UL; ++i) {
+        GLfloat c = value[i];
+        context->textureEnvColor[context->activeTexture][i] =
+            c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c;
+    }
+}
+
+/* Texture objects (upstream 29.1 slots 135, 141, 150). A name is a texture
+ * once glGenTextures or a first glBindTexture made it one; the frontend's
+ * generated flag is exactly that. */
+GLboolean Lib_glIsTexture(GLuint texture)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return GL_FALSE;
+    return texture && texture < MAX_TEXTURES &&
+           context->textures[texture].generated ? GL_TRUE : GL_FALSE;
+}
+
+GLboolean Lib_glAreTexturesResident(GLsizei count, const GLuint *textures,
+                                    GLboolean *residences)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    GLsizei i;
+    GLboolean all = GL_TRUE;
+    if (!StateChangeAllowed(context)) return GL_FALSE;
+    if (count < 0 || (count && (!textures || !residences))) {
+        SetError(context, GL_INVALID_VALUE);
+        return GL_FALSE;
+    }
+    for (i = 0; i < count; ++i) {
+        GLuint name = textures[i];
+        if (!name || name >= MAX_TEXTURES ||
+            !context->textures[name].generated) {
+            SetError(context, GL_INVALID_VALUE);
+            return GL_FALSE;
+        }
+        if (!context->textures[name].resident)
+            all = GL_FALSE;
+    }
+    /* GL 1.1: residences is written only when the answer is GL_FALSE. */
+    if (!all)
+        for (i = 0; i < count; ++i)
+            residences[i] = context->textures[textures[i]].resident ?
+                            GL_TRUE : GL_FALSE;
+    return all;
+}
+
+void Lib_glPrioritizeTextures(GLsizei count, const GLuint *textures,
+                              const GLclampf *priorities)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (!StateChangeAllowed(context)) return;
+    if (count < 0 || (count && (!textures || !priorities))) {
+        SetError(context, GL_INVALID_VALUE);
+        return;
+    }
+    /* A hint; residency is managed by the host's VRAM pool. */
+}
 
 void Lib_glTexGeni(GLenum coord, GLenum mode, GLenum map)
 {

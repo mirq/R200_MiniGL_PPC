@@ -66,7 +66,7 @@ NOTE:
 
 Transformation and clipping pipeline can be turned on/off with glDisable/glEnable(MGL_ARRAY_TRANSFORMATIONS) before the pointers are set.
 
-The MGL_FLATFAN will work regardless of pipeline state.
+Legacy device-coordinate flat modes are no longer supported.
 
 Tricky stuff:
 
@@ -100,7 +100,6 @@ static void A_DrawQuadStrip	(GLcontext context, int first, int count);
 static void A_DrawTriFan	(GLcontext context, int first, int count);
 static void A_DrawTriStrip	(GLcontext context, int first, int count);
 static void A_DrawTriangles	(GLcontext context, int first, int count);
-static void A_DrawFlatFan	(GLcontext context, int first, int count);
 
 
 extern void TMA_Start(LockTimeHandle *handle);
@@ -1621,6 +1620,26 @@ static void A_DrawTriStrip(GLcontext context, int first, int count)
 	}
 }
 
+/* Submit clipped triangles before their scratch vertices are reused. */
+static void A_FlushClippedTriangles(GLcontext context, int count)
+{
+	int i, j;
+	W3D_Vertex *verts[16];
+	W3D_TrianglesV fan;
+	fan.tex = context->w3dTexBuffer[context->CurrentBinding];
+	fan.st_pattern = NULL;
+	fan.v = verts;
+	for (i = 0; i < count; ++i) {
+		PolyBuffer *p = &CBUF[i];
+		for (j = 0; j < p->numverts; ++j) {
+			verts[j] = &context->VertexBuffer[p->verts[j]].v;
+			V_ToScreen(context, &context->VertexBuffer[p->verts[j]]);
+		}
+		fan.vertexcount = p->numverts;
+		W3D_DrawTriFanV(context->w3dContext, &fan);
+	}
+}
+
 static void A_DrawTriangles(GLcontext context, int first, int count)
 {
 	int	i;
@@ -1842,6 +1861,14 @@ static void A_DrawTriangles(GLcontext context, int first, int count)
 					Convert(context, &context->VertexBuffer[vbptr+1], i+1);
 					Convert(context, &context->VertexBuffer[vbptr+2], i+2);
 
+					/* Seven clipping planes can append two vertices each.
+					 * Flush before recycling the scratch area, never the inputs. */
+					if (free + 14 > context->VertexBufferSize ||
+					    cnum >= sizeof(CBUF) / sizeof(CBUF[0])) {
+						A_FlushClippedTriangles(context, cnum);
+						cnum = 0;
+						free = context->VertexBufferPointer;
+					}
 					cnum += AE_ClipTriangle(context, &clip, &CBUF[cnum], &free, or_code);
 				}
 
@@ -1857,100 +1884,11 @@ static void A_DrawTriangles(GLcontext context, int first, int count)
 		W3D_DrawArray(context->w3dContext, W3D_PRIMITIVE_TRIANGLES, start, chainverts);
 	}
 
-	if (cnum)
-	{
-		int j;
-		static W3D_Vertex *verts[16];
-		static W3D_TrianglesV fan;
-
-		fan.tex = context->w3dTexBuffer[context->CurrentBinding];
-		fan.st_pattern = NULL;
-		fan.v = verts;
-
-		for(i=0; i<cnum; i++)
-		{
-			PolyBuffer *p = &CBUF[i];
-
-			for (j=0; j<p->numverts; j++)
-			{
-				verts[j] = &(context->VertexBuffer[p->verts[j]].v);
-				V_ToScreen(context, &context->VertexBuffer[p->verts[j]]);
-			}
-
-			fan.vertexcount = p->numverts;
-			W3D_DrawTriFanV(context->w3dContext, &fan);
-		}
-	}
+	A_FlushClippedTriangles(context, cnum);
 }
 
 
-static void A_DrawFlatFan(GLcontext context, int first, int count)
-{
-	int	i;
-	MGLVertex *v;
-	UBYTE	*Vpointer;
-	UBYTE	*Wpointer;
-	float	*W;
-	int	Vstride;
-	int	Wstride;
 
-	Vstride = context->ArrayPointer.vertexstride;
-	Wstride = context->ArrayPointer.texcoordstride;
-
-	Wpointer = context->ArrayPointer.w_buffer + first * Wstride;
-	Vpointer = context->ArrayPointer.verts + first * Vstride;
-
-	v = &context->VertexBuffer[0];
-
-	#if defined(FIXPOINT)
-
-	if(context->ArrayPointer.state & AP_FIXPOINT)
-	{
-		int *V;
-		i = count;
-
-		do
-		{
-			V = (int*)Vpointer;
-
-			v->bx = (float)V[0];
-			v->by = (float)V[1];
-			v->bz = (float)V[2];
-
-			W = (float*)Wpointer;
-			*W = 1.0;
-
-			v++; Vpointer += Vstride; Wpointer += Wstride;
-
-		} while (--i);
-	}
-
-	else
-
-	#endif //
-
-	{
-		float *V;
-		i = count;
-
-		do
-		{
-			V = (float*)Vpointer;
-
-			v->bx = V[0];
-			v->by = V[1];
-			v->bz = V[2];
-
-			W = (float*)Wpointer;
-			*W = 1.0;
-
-			v++; Vpointer += Vstride; Wpointer += Wstride;
-
-		} while (--i);
-	}
-
-	W3D_DrawArray(context->w3dContext, W3D_PRIMITIVE_TRIFAN, first, count);
-}
 
 //end of pipeline
 
@@ -2607,6 +2545,11 @@ static void A_DrawDirect(GLcontext context, int first, int count)
 
 void GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count)
 {
+    /* Removed SDK modes must not reach the release-build default fan path. */
+    if (mode == 0x7013 || mode == 0x7014) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
 	static ADrawfn	A_Draw;
 	MGLVertex	*offset;
 
@@ -2625,6 +2568,29 @@ void GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count)
 
 	if(count < 3)
 		return; //invalid vertexcount or primitive
+
+	/* The software transform buffer is finite even when client arrays are
+	 * much larger. Keep triangle boundaries and reserve clipping scratch.
+	 * Each recursive call restores Warp3D's vertex pointer for its first. */
+	if (mode == GL_TRIANGLES && context->VertexArrayPipeline &&
+	    !(context->ArrayPointer.state & AP_COMPILED)) {
+		int limit = context->VertexBufferSize > 14
+			? ((context->VertexBufferSize - 14) / 3) * 3 : 0;
+		if (limit < 3) {
+			GLFlagError(context, 1, GL_INVALID_OPERATION);
+			return;
+		}
+		count -= count % 3;
+		if (count > limit) {
+			while (count > 0) {
+				int chunk = count > limit ? limit : count;
+				GLDrawArrays(context, mode, first, chunk);
+				first += chunk;
+				count -= chunk;
+			}
+			return;
+		}
+	}
 
 	//11-04-02 - check for compiled arrays
 	//sorry - no time to write proper handling for this.
@@ -2707,9 +2673,6 @@ void GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count)
 	{
 		switch(mode)
 		{
-			case MGL_FLATFAN:
-				A_Draw = (ADrawfn)A_DrawFlatFan;
-				break;
 
 			case GL_QUADS:
 				A_Draw = (ADrawfn)A_DrawQuads;
@@ -2809,4 +2772,3 @@ void GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count)
 #endif
 
 }
-

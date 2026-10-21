@@ -455,3 +455,38 @@ defaults into `ENV:` at startup (`MGLPPC_CPEMIT=1`, `MGLPPC_NOALTIVEC=1`,
 `MGLPPC_HOSTPRI=-1`), so set client env vars AFTER the host is up; and on
 this OS build `UnSet` does not reliably remove a variable — use
 `Delete ENV:<name>` and verify with `GetEnv`.
+
+## 13. ABI 5: token values and the V29-parity entry points
+
+- `minigl_r200.h` carries OpenGL's own token values and the whole ABI-5
+  client vocabulary of `include/mgl/gl.h` (358 shared tokens, plus the private
+  `MGL_PERF_*`/`MGL_R200_PRIVATE_*` names at 0x7f2xxxxx and
+  `GL_NORMAL_ARRAY_SIZE` at 0x7f300001). `tests/test_enum_parity.py` checks
+  every shared name. A new frontend token must take its OpenGL value and be
+  added to the client header in the same change.
+- Audit result for the renumbering: arithmetic on tokens is limited to the
+  contiguous `GL_LIGHTi` and `GL_TEXTUREi_ARB` ranges and the private perf
+  ranges; no field uses 0 as "unset" except the error word (`GL_NO_ERROR`
+  was already 0), so `GL_POINTS`, `GL_ZERO` and `GL_NONE` becoming 0 is safe.
+  The V19 "classic tail minus four" upload compatibility (BGRA 237 .. 4444 240)
+  is gone: ABI 5 refuses every client built with it.
+- The wire carries native values: see
+  [transport-protocol.md](transport-protocol.md#11-gl-enum-values-on-the-wire-abi-5).
+- New state is appended to the end of `struct MiniGLR200Context`
+  (`lineWidth`, `edgeFlag`, `edgeFlagArray`, `textureEnvColor`); `readBuffer`
+  already existed. New queries: `GL_LINE_WIDTH`, `GL_POINT_SIZE`,
+  `GL_READ_BUFFER`, `GL_PACK/UNPACK_ALIGNMENT`, `GL_DEPTH_BITS` (16),
+  `GL_BLEND_EQUATION`, `GL_EDGE_FLAG`, `GL_EDGE_FLAG_ARRAY_STRIDE`, and
+  `glGetPointerv` for every client array.
+- `glLineWidth` above 1.5 expands line primitives and polygon-mode edges on
+  the CPU into screen-space quads (`EmitWideLines`, sharing the transform with
+  `EmitSizedPoints`); default-width lines keep the hardware line primitives.
+- `glCopyTex[Sub]Image2D` live in the platform layer
+  (`minigl_r200_warpos_compile_probe.c`): readback plus upload, see
+  [textures.md](textures.md#31-framebuffer-copies-and-mipmap-generation).
+- `glBlendEquation`/`glBlendFuncSeparate` are partial until the fragment
+  record carries an equation and an alpha pair (plan P6): ADD and an equal
+  alpha pair work, anything else raises `GL_INVALID_OPERATION`.
+- The frontend exports `R200PPCSetError` and `R200PPCGetClientArray` for the
+  backend-independent layer (display lists, GLU, GLUT; see
+  [dispatch-abi.md](dispatch-abi.md#4-backend-independent-layer-ppc_common)).

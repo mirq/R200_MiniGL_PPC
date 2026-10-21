@@ -14,6 +14,7 @@
 #include <exec/types.h>
 #include <libraries/minigl_dispatch.h>
 #include "context_access.h"
+#include "minigl_ppc_generic.h"
 
 /* Raises GL_INVALID_OPERATION on the current context; see minigl_r200.c. */
 ULONG LibUnsupported(void);
@@ -151,13 +152,39 @@ void Lib_mglProposeCloseDesktop(GLboolean closeme);
 void Lib_glPolygonOffset(GLfloat factor, GLfloat units);
 void Lib_glClientActiveTextureARB(GLenum unit);
 void Lib_glInterleavedArrays(GLenum format, GLsizei stride, const GLvoid *pointer);
-void Lib_mglEmergencyCloseScreen(void);
+void Lib_glBlendEquation(GLenum mode);
+void Lib_glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+GLboolean Lib_glIsTexture(GLuint texture);
+void Lib_mglChooseZBufferDepth(int bits);
+void Lib_glLineWidth(GLfloat width);
+void Lib_glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
+void Lib_glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+GLboolean Lib_glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences);
+void Lib_glEdgeFlag(GLboolean flag);
+void Lib_glEdgeFlagPointer(GLsizei stride, const GLvoid *pointer);
+void Lib_glEdgeFlagv(const GLboolean *flag);
+void Lib_glGetPointerv(GLenum pname, GLvoid **params);
+void Lib_glPrioritizeTextures(GLsizei n, const GLuint *textures, const GLclampf *priorities);
+void Lib_glReadBuffer(GLenum mode);
+void Lib_glLightf(GLenum light, GLenum pname, GLfloat param);
+void Lib_glLightfv(GLenum light, GLenum pname, const GLfloat *params);
+void Lib_glMaterialf(GLenum face, GLenum pname, GLfloat param);
+void Lib_glMaterialfv(GLenum face, GLenum pname, const GLfloat *params);
+void Lib_glLightModelf(GLenum pname, GLfloat param);
+void Lib_glLightModelfv(GLenum pname, const GLfloat *params);
+void Lib_glGetLightfv(GLenum light, GLenum pname, GLfloat *params);
+void Lib_glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params);
+void Lib_glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
+void Lib_glColorMaterial(GLenum face, GLenum mode);
+void Lib_glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
 GLboolean Lib_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp);
 void Lib_mglEndFastPath(MGLFastPath *fp);
 ULONG Lib_mglGetFastPathCapabilities(void);
 
-/* 0 fields the R200 backend does not implement:
-
+/* 3 fields the R200 backend does not implement:
+ *   GLTexGenfv
+ *   MGLCreateContextFromWindow
+ *   MGLCreateContextFromBitMap
  */
 
 static void R200_GLActiveTextureARB(GLcontext context, GLenum unit)
@@ -804,11 +831,12 @@ static void R200_MGLPrintMatrixStack(GLcontext context, int mode)
     Lib_mglPrintMatrixStack(mode);
 }
 
-static void R200_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
+static GLboolean R200_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
 {
     (void)context;
     (void)width;
     (void)height;
+    return GL_FALSE; /* as upstream 29.1: no resize took place */
 }
 
 static void R200_MGLSetPointer(GLcontext context)
@@ -947,15 +975,176 @@ static void R200_GLMultiDrawArrays(GLcontext context, GLenum mode,
             Lib_glDrawArrays(mode, first[index], count[index]);
 }
 
-static void R200_MGLEmergencyCloseScreen(GLcontext context)
+static void R200_GLBlendEquation(GLcontext context, GLenum mode)
 {
     (void)context;
-    Lib_mglEmergencyCloseScreen();
+    Lib_glBlendEquation(mode);
 }
 
-static void R200_MGLForceNewRenderPass(GLcontext context)
+static void R200_GLBlendFuncSeparate(GLcontext context, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha)
 {
     (void)context;
+    Lib_glBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
+}
+
+static GLboolean R200_GLIsTexture(GLcontext context, GLuint texture)
+{
+    (void)context;
+    return Lib_glIsTexture(texture);
+}
+
+static void R200_mglChooseZBufferDepth(int bits)
+{
+    Lib_mglChooseZBufferDepth(bits);
+}
+
+static void R200_GLLineWidth(GLcontext context, GLfloat width)
+{
+    (void)context;
+    Lib_glLineWidth(width);
+}
+
+static void R200Unsupported_GLTexGenfv(GLcontext context, GLenum coord, GLenum pname, const GLfloat *params)
+{
+    (void)context;
+    (void)coord;
+    (void)pname;
+    (void)params;
+    LibUnsupported();
+}
+
+static void R200_GLCopyTexImage2D(GLcontext context, GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border)
+{
+    (void)context;
+    Lib_glCopyTexImage2D(target, level, internalformat, x, y, width, height, border);
+}
+
+static void R200_GLCopyTexSubImage2D(GLcontext context, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height)
+{
+    (void)context;
+    Lib_glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
+}
+
+static GLboolean R200_GLAreTexturesResident(GLcontext context, GLsizei n, const GLuint *textures, GLboolean *residences)
+{
+    (void)context;
+    return Lib_glAreTexturesResident(n, textures, residences);
+}
+
+static void R200_GLEdgeFlag(GLcontext context, GLboolean flag)
+{
+    (void)context;
+    Lib_glEdgeFlag(flag);
+}
+
+static void R200_GLEdgeFlagPointer(GLcontext context, GLsizei stride, const GLvoid *pointer)
+{
+    (void)context;
+    Lib_glEdgeFlagPointer(stride, pointer);
+}
+
+static void R200_GLEdgeFlagv(GLcontext context, const GLboolean *flag)
+{
+    (void)context;
+    Lib_glEdgeFlagv(flag);
+}
+
+static void R200_GLGetPointerv(GLcontext context, GLenum pname, GLvoid **params)
+{
+    (void)context;
+    Lib_glGetPointerv(pname, params);
+}
+
+static void R200_GLPrioritizeTextures(GLcontext context, GLsizei n, const GLuint *textures, const GLclampf *priorities)
+{
+    (void)context;
+    Lib_glPrioritizeTextures(n, textures, priorities);
+}
+
+static void R200_GLReadBuffer(GLcontext context, GLenum mode)
+{
+    (void)context;
+    Lib_glReadBuffer(mode);
+}
+
+static void * R200Unsupported_MGLCreateContextFromWindow(struct Window *window)
+{
+    (void)window;
+    LibUnsupported();
+    return (void *)0;
+}
+
+static void * R200Unsupported_MGLCreateContextFromBitMap(struct BitMap *bitmap)
+{
+    (void)bitmap;
+    LibUnsupported();
+    return (void *)0;
+}
+
+static void R200_GLLightf(GLcontext context, GLenum light, GLenum pname, GLfloat param)
+{
+    (void)context;
+    Lib_glLightf(light, pname, param);
+}
+
+static void R200_GLLightfv(GLcontext context, GLenum light, GLenum pname, const GLfloat *params)
+{
+    (void)context;
+    Lib_glLightfv(light, pname, params);
+}
+
+static void R200_GLMaterialf(GLcontext context, GLenum face, GLenum pname, GLfloat param)
+{
+    (void)context;
+    Lib_glMaterialf(face, pname, param);
+}
+
+static void R200_GLMaterialfv(GLcontext context, GLenum face, GLenum pname, const GLfloat *params)
+{
+    (void)context;
+    Lib_glMaterialfv(face, pname, params);
+}
+
+static void R200_GLLightModelf(GLcontext context, GLenum pname, GLfloat param)
+{
+    (void)context;
+    Lib_glLightModelf(pname, param);
+}
+
+static void R200_GLLightModelfv(GLcontext context, GLenum pname, const GLfloat *params)
+{
+    (void)context;
+    Lib_glLightModelfv(pname, params);
+}
+
+static void R200_GLGetLightfv(GLcontext context, GLenum light, GLenum pname, GLfloat *params)
+{
+    (void)context;
+    Lib_glGetLightfv(light, pname, params);
+}
+
+static void R200_GLGetMaterialfv(GLcontext context, GLenum face, GLenum pname, GLfloat *params)
+{
+    (void)context;
+    Lib_glGetMaterialfv(face, pname, params);
+}
+
+static void R200_GLNormalPointer(GLcontext context, GLenum type, GLsizei stride, const GLvoid *pointer)
+{
+    (void)context;
+    Lib_glNormalPointer(type, stride, pointer);
+}
+
+static void R200_GLColorMaterial(GLcontext context, GLenum face, GLenum mode)
+{
+    (void)context;
+    Lib_glColorMaterial(face, mode);
+}
+
+static void R200_GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, const GLfloat *params)
+{
+    (void)context;
+    Lib_glTexEnvfv(target, pname, params);
 }
 
 static GLboolean R200_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp)
@@ -981,7 +1170,7 @@ static ULONG R200_mglGetFastPathCapabilities(void)
 #define R200_TABLE_GLTexSubImage2D R200_GLTexSubImage2D
 #endif
 
-const MGLDispatchTable MiniGLDispatchTable = {
+MGLDispatchTable MiniGLDispatchTable = {
     MINIGL_DISPATCH_ABI_VERSION,
     (ULONG)sizeof(MGLDispatchTable),
     MINIGL_BACKEND_FLAG_R200,
@@ -1119,8 +1308,79 @@ const MGLDispatchTable MiniGLDispatchTable = {
     R200_GLClientActiveTextureARB,
     R200_GLInterleavedArrays,
     R200_GLMultiDrawArrays,
-    R200_MGLEmergencyCloseScreen,
-    R200_MGLForceNewRenderPass,
+    R200_GLBlendEquation,
+    R200_GLBlendFuncSeparate,
+    R200_GLIsTexture,
+    R200_mglChooseZBufferDepth,
+    R200_GLLineWidth,
+    R200Unsupported_GLTexGenfv,
+    R200_GLCopyTexImage2D,
+    R200_GLCopyTexSubImage2D,
+    R200_GLAreTexturesResident,
+    R200_GLEdgeFlag,
+    R200_GLEdgeFlagPointer,
+    R200_GLEdgeFlagv,
+    MGLGeneric_GLGetDoublev,
+    R200_GLGetPointerv,
+    MGLGeneric_GLIndexi,
+    MGLGeneric_GLIndexiv,
+    MGLGeneric_GLIndexPointer,
+    R200_GLPrioritizeTextures,
+    R200_GLReadBuffer,
+    R200Unsupported_MGLCreateContextFromWindow,
+    R200Unsupported_MGLCreateContextFromBitMap,
+    R200_GLLightf,
+    R200_GLLightfv,
+    R200_GLMaterialf,
+    R200_GLMaterialfv,
+    R200_GLLightModelf,
+    R200_GLLightModelfv,
+    R200_GLGetLightfv,
+    R200_GLGetMaterialfv,
+    MGLGeneric_GLGenLists,
+    MGLGeneric_GLDeleteLists,
+    MGLGeneric_GLIsList,
+    MGLGeneric_GLNewList,
+    MGLGeneric_GLEndList,
+    MGLGeneric_GLCallList,
+    MGLGeneric_GLUBuild2DMipmaps,
+    MGLGeneric_GLUErrorString,
+    MGLGeneric_GLUNewQuadric,
+    MGLGeneric_GLUDeleteQuadric,
+    MGLGeneric_GLUQuadricNormals,
+    MGLGeneric_GLUQuadricTexture,
+    MGLGeneric_GLUQuadricDrawStyle,
+    MGLGeneric_GLUQuadricOrientation,
+    MGLGeneric_GLUCylinder,
+    MGLGeneric_GLUSphere,
+    MGLGeneric_GLUDisk,
+    MGLGeneric_GLUTInit,
+    MGLGeneric_GLUTInitDisplayMode,
+    MGLGeneric_GLUTInitWindowSize,
+    MGLGeneric_GLUTInitWindowPosition,
+    MGLGeneric_GLUTCreateWindow,
+    MGLGeneric_GLUTMainLoop,
+    MGLGeneric_GLUTDisplayFunc,
+    MGLGeneric_GLUTIdleFunc,
+    MGLGeneric_GLUTKeyboardFunc,
+    MGLGeneric_GLUTReshapeFunc,
+    MGLGeneric_GLUTSwapBuffers,
+    MGLGeneric_GLUTPostRedisplay,
+    MGLGeneric_GLUTGet,
+    MGLGeneric_GLUTGameModeString,
+    MGLGeneric_GLUTEnterGameMode,
+    MGLGeneric_GLUTLeaveGameMode,
+    MGLGeneric_GLUTGameModeGet,
+    MGLGeneric_GLUTSolidCube,
+    MGLGeneric_GLUTSolidSphere,
+    MGLGeneric_GLUTSolidCone,
+    MGLGeneric_GLUTSolidTorus,
+    MGLGeneric_GLUTSolidDodecahedron,
+    R200_GLNormalPointer,
+    MGLGeneric_GLUQuadricCallback,
+    R200_GLColorMaterial,
+    R200_GLTexEnvfv,
+    MGLGeneric_GLNormal3fv,
     R200_mglBeginFastPath,
     R200_mglEndFastPath,
     R200_mglGetFastPathCapabilities,

@@ -64,12 +64,15 @@ R200_INCLUDE   := $(R200_DIR)/include
 R200_THIRDPARTY ?= $(R200_DIR)/third_party/radeon3d/include
 R200_GENERATED := $(R200_DIR)/generated
 R200_SYMBOLS   := $(R200_GENERATED)/r200_symbols.txt
-R200_TABLE     := $(R200_GENERATED)/dispatch_table_abi3.c
+R200_TABLE     := $(R200_GENERATED)/dispatch_table_abi5.c
+# OpenGL <-> classic enum translation for the protocol-16 wire (ABI 5).
+R200_WIRE_ENUM := $(R200_GENERATED)/r200_wire_enum.h
+R200_NATIVE_ENUMS := classic_68k/dev/MiniGL_Library_Source_Code/library/minigl_r200.h
 
 COMMON_CFLAGS = $(WOS_ARCH_CFLAGS) -O2 -std=gnu99 -Wall \
                 -fomit-frame-pointer -fno-common $(WOS_CPPFLAGS)
 DLL_CFLAGS = $(COMMON_CFLAGS) -Iinclude -I$(R200_INCLUDE) \
-             -I$(R200_LIBRARY) -Ihyperion_dll
+             -I$(R200_LIBRARY) -Ihyperion_dll -Ippc_common
 R200_CFLAGS = $(COMMON_CFLAGS) -I$(R200_INCLUDE) -Iinclude \
               -I$(R200_LIBRARY) -I$(R200_THIRDPARTY) \
                -DNO_INLINE_LIBCALLS=1 -DR200_PPC_FRONTEND=1 \
@@ -98,12 +101,16 @@ R200_SOURCES = $(R200_LIBRARY)/minigl_r200_warpos_compile_probe.c \
                $(R200_LIBRARY)/r200_texture.c \
                $(R200_LIBRARY)/r200_surface.c \
                $(R200_LIBRARY)/r200_state.c \
-               $(wildcard $(R200_LIBRARY)/*.h) \
+               $(wildcard $(R200_LIBRARY)/*.h) $(R200_WIRE_ENUM) \
                $(wildcard $(R200_INCLUDE)/libraries/*.h) \
                $(wildcard $(R200_THIRDPARTY)/*.h \
                            $(R200_THIRDPARTY)/*/*.h)
 
 OBJS = $(OBJDIR)/minigl_ppc_dispatch_r200.o \
+       $(OBJDIR)/minigl_ppc_generic.o \
+       $(OBJDIR)/minigl_ppc_lists.o \
+       $(OBJDIR)/minigl_ppc_glu.o \
+       $(OBJDIR)/minigl_ppc_glut.o \
        $(OBJDIR)/r200_frontend.o \
        $(OBJDIR)/r200_cp_emit.o \
        $(OBJDIR)/radeon3d_emit.o \
@@ -156,17 +163,43 @@ $(OBJDIR)/r200_cp_emit.o: $(R200_LIBRARY)/r200_cp_emit.c Makefile.dll.r200.gcc |
 $(OBJDIR)/radeon3d_emit.o: $(R200_EMITTER_ROOT)/src/radeon3d_emit.c Makefile.dll.r200.gcc | $(OBJDIR)
 	$(CC) $(R200_CFLAGS) -I$(R200_EMITTER_ROOT)/include -MMD -MP -c $< -o $@
 
+$(R200_WIRE_ENUM): $(R200_LIBRARY)/minigl_r200.h $(R200_NATIVE_ENUMS) \
+              tools/generate_wire_enums.py | $(R200_GENERATED)
+	$(PYTHON) tools/generate_wire_enums.py $(R200_LIBRARY)/minigl_r200.h \
+		$(R200_NATIVE_ENUMS) $@
+
 $(R200_SYMBOLS): $(OBJDIR)/r200_frontend.o | $(R200_GENERATED)
 	$(NM) --defined-only --format=posix $< | \
 		awk '$$2 == "T" && $$1 ~ /^Lib_/ { print $$1 }' | sort -u > $@
 
 $(R200_TABLE): include/libraries/minigl_dispatch.h $(R200_SYMBOLS) \
-              tools/generate_dispatch_r200.py | $(R200_GENERATED)
+              tools/generate_dispatch_r200.py tools/check_dispatch_layout.py \
+              tools/reference/minigl_dispatch_v29_1.txt | $(R200_GENERATED)
+	$(PYTHON) tools/check_dispatch_layout.py include/libraries/minigl_dispatch.h
 	$(PYTHON) tools/generate_dispatch_r200.py \
 		include/libraries/minigl_dispatch.h $(R200_SYMBOLS) $@
 
 $(OBJDIR)/minigl_ppc_dispatch_r200.o: ppc_dll/minigl_ppc_dispatch_r200.c \
               include/libraries/minigl_dispatch.h $(R200_TABLE) | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_generic.o: ppc_common/minigl_ppc_generic.c \
+              include/libraries/minigl_dispatch.h | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+# Display-list recording thunks, generated from the table declaration and
+# shared by every DLL variant (committed; regenerated when the header moves).
+ppc_common/minigl_ppc_lists_thunks.c: include/libraries/minigl_dispatch.h \
+              tools/generate_list_thunks.py
+	$(PYTHON) tools/generate_list_thunks.py include/libraries/minigl_dispatch.h $@
+
+$(OBJDIR)/minigl_ppc_lists.o: ppc_common/minigl_ppc_lists.c \
+              ppc_common/minigl_ppc_lists_thunks.c \
+              include/libraries/minigl_dispatch.h | $(OBJDIR)
+	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_glu.o $(OBJDIR)/minigl_ppc_glut.o: $(OBJDIR)/%.o: \
+              ppc_common/%.c include/libraries/minigl_dispatch.h | $(OBJDIR)
 	$(CC) $(DLL_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJDIR)/minigl_ppc_transport.o: $(R200_CLIENT)/minigl_ppc_transport.c \

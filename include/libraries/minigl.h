@@ -3,10 +3,15 @@
 
 #include <exec/types.h>
 
-/* WarpOS MiniGL API level.  V10 callers remain supported by the frozen
- * dispatch-table prefix; newer fields are appended only. */
-#define MINIGL_VERSION 19
-#define MINIGL_MIN_VERSION 10
+/* WarpOS MiniGL API level, matching upstream minigl.library 29.x. 19 -> 29 is
+ * a release boundary, not a routine bump: it moves together with
+ * MINIGL_DISPATCH_ABI_VERSION 3 -> 5 (OpenGL token values, upstream slot
+ * layout), which MiniGLOpen tests for equality, so a V19-era client is
+ * refused rather than silently misbound. The frozen V10 prefix is unchanged. */
+#ifndef MINIGL_VERSION
+#define MINIGL_VERSION 29
+#endif
+#define MINIGL_MIN_VERSION 29
 
 #ifndef MINIGL_PPC_DLLNAME
 #define MINIGL_PPC_DLLNAME "minigl_ppc.dll"

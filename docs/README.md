@@ -1,4 +1,7 @@
-# MiniGL V19 WarpOS/PPC — developer documentation
+# MiniGL WarpOS/PPC — developer documentation
+
+API level 29 / dispatch ABI 5 (upstream minigl.library 29.1 parity; the tree
+began as MiniGL V19).
 
 This directory is the single source of developer documentation for the
 WarpOS/PPC MiniGL implementation in this repository. It is **PPC-first**: the
@@ -18,8 +21,9 @@ emulator.
 | 1 | [overview.md](overview.md) | What MiniGL is, what this repo ships, the two runtime paths, repo map |
 | 2 | [architecture.md](architecture.md) | End-to-end data flow, components, tasks, memory, submission lifecycle |
 | 3 | [building.md](building.md) | Toolchains, every makefile and target, ET_REL contract, packaging |
-| 4 | [dispatch-abi.md](dispatch-abi.md) | `MGLDispatchTable` ABI 3, V10/V19 boundary, FastPath, upgrade rules |
+| 4 | [dispatch-abi.md](dispatch-abi.md) | `MGLDispatchTable` ABI 5 (upstream 29.1 layout), per-slot status, the shared `ppc_common` layer (display lists, GLU, GLUT), FastPath, upgrade rules |
 | 5 | [client-guide.md](client-guide.md) | Writing and running PPC clients, runtime requirements, deployment |
+| 5a | [client-porting.md](client-porting.md) | For game developers: building a client against MiniGL 29 / ABI 5, migrating V19 ports, PowerOpen notes, Silent Hill example |
 | 6 | [frontend-r200.md](frontend-r200.md) | PPC semantic frontend internals: state, batching, submission, surfaces |
 | 7 | [transport-protocol.md](transport-protocol.md) | Exec port, ring, mailbox, protocol v15, fences, memory ordering |
 | 8 | [host-68k.md](host-68k.md) | The 68k host `minigl_ppc_host`: loop, handlers, segments, env vars |

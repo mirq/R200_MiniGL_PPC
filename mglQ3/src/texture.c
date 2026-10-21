@@ -14,6 +14,9 @@
 
 #include "sysinc.h"
 
+/* QuarkTex reads optional colors even when the selected mode ignores them. */
+static W3D_Color safe_zero_color = { 0.0f, 0.0f, 0.0f, 0.0f };
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h> //inlined memcpy
@@ -194,28 +197,27 @@ void tex_SetEnv(GLcontext context, GLenum env)
 	if(context->ActiveTexture == 1)
 		return;
 
-	if(context->CurTexEnv == env)
-		return;
-
 	tex = context->w3dTexBuffer[context->CurrentBinding];
 
 	if (!tex)
 		return;
 
+	/* W3D_SetTexEnv applies to the bound texture object. CurTexEnv is only
+	 * context-wide, so it cannot safely suppress this call after a bind. */
 	context->CurTexEnv = env;
 
 	switch(env)
 	{
 		case GL_MODULATE:
-			W3D_SetTexEnv(context->w3dContext, tex, W3D_MODULATE, NULL);
+			W3D_SetTexEnv(context->w3dContext, tex, W3D_MODULATE, &safe_zero_color);
 			break;
 
 		case GL_DECAL:
-			W3D_SetTexEnv(context->w3dContext, tex, W3D_DECAL, NULL);
+			W3D_SetTexEnv(context->w3dContext, tex, W3D_DECAL, &safe_zero_color);
 			break;
 
 		case GL_REPLACE:
-			W3D_SetTexEnv(context->w3dContext, tex, W3D_REPLACE, NULL);
+			W3D_SetTexEnv(context->w3dContext, tex, W3D_REPLACE, &safe_zero_color);
 			break;
 
 		default:
@@ -284,7 +286,7 @@ void tex_SetWrap(GLcontext context, GLenum wrap_s, GLenum wrap_t)
 	else
 		Wt = W3D_CLAMP;
 
-	W3D_SetWrapMode(context->w3dContext, tex, Ws, Wt, NULL);
+	W3D_SetWrapMode(context->w3dContext, tex, Ws, Wt, &safe_zero_color);
 }
 
 void GLTexEnvi(GLcontext context, GLenum target, GLenum pname, GLint param)
@@ -1365,7 +1367,7 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
 		internalformat = GL_RGBA;
 	}
 
-	//LOG(3, glTexImage2DNoMIP, "target = %d level=%d, size=%d�%d", gltarget, level, width, height);
+	//LOG(3, glTexImage2DNoMIP, "target = %d level=%d, size=%d×%d", gltarget, level, width, height);
 	GLFlagError(context, type != GL_UNSIGNED_BYTE && type != MGL_UNSIGNED_SHORT_5_6_5 && type != MGL_UNSIGNED_SHORT_4_4_4_4, GL_INVALID_OPERATION);
 	GLFlagError(context, gltarget != GL_TEXTURE_2D, GL_INVALID_ENUM);
 
@@ -1373,7 +1375,7 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
 	{
 		format = type;
 
-		// kprintf("Texture of MGL_UNSIGNED_SHORT_5_6_5, target = %d, level = %d, size %d�%d\n", gltarget, level, width, height);
+		// kprintf("Texture of MGL_UNSIGNED_SHORT_5_6_5, target = %d, level = %d, size %d×%d\n", gltarget, level, width, height);
 	}
 
 	if (level != 0)
@@ -1894,11 +1896,10 @@ void GLColorTable(GLcontext context, GLenum target, GLenum internalformat, GLint
 
 void GLActiveTextureARB(GLcontext context, GLenum unit)
 {
-	if (unit < GL_TEXTURE0_ARB || unit >= (GL_TEXTURE0_ARB + MAX_TEXUNIT))
-	{
-		GLFlagError(context, 1, GL_INVALID_ENUM);
-		return;
-	}
+	if (unit < GL_TEXTURE0_ARB || unit >= GL_TEXTURE0_ARB + MAX_TEXUNIT) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
 
 	context->ActiveTexture = unit - GL_TEXTURE0_ARB;
 }

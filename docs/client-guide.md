@@ -74,15 +74,40 @@ Rules:
 - Build with the flags from [building.md](building.md); the ET_REL contract is
   not optional.
 - Check the return value of `mglBeginFastPath` before using the FastPath API.
+- Building or rebuilding a game against this version: see
+  [client-porting.md](client-porting.md).
+- **ABI 5 (MiniGL 29).** The headers follow upstream minigl.library 29.1:
+  GL tokens carry OpenGL's own values and the table has upstream's slot
+  layout. A client built against the V19 (ABI 3) headers is refused by
+  `MiniGLOpen` and must be rebuilt, which includes `glqfinal` and ioq3; an
+  ABI-3 DLL likewise refuses a rebuilt client. Source written for 29.1
+  compiles unchanged.
+- Fixed-function lighting (`glLight*`, `glMaterial*`, `glLightModel*`,
+  `glColorMaterial`, `glNormalPointer`), display lists, GLU quadrics and
+  `gluBuild2DMipmaps`, GLUT, `glCopyTex[Sub]Image2D`, `glLineWidth` and the
+  GL 1.1 queries are available; [dispatch-abi.md](dispatch-abi.md#22-fields-130208)
+  gives the status of every new call per backend.
+- GLUT is single-window: `glutCreateWindow`/`glutEnterGameMode` open the one
+  MiniGL context, the window size is fixed, and `glutLeaveMainLoop` is
+  `mglExit`. See `examples/glut_shapes.c`.
+- vbcc (PowerOpen) clients: `glCopyTexSubImage2D` and the GLU quadric /
+  `glutSolid*` calls are not ABI-bridged yet (see
+  [dispatch-abi.md](dispatch-abi.md#8-known-compatibility-limits)); use them
+  from GCC-built clients.
 
 ### Intentional no-ops and limits
 
 | Call | Behaviour |
 |---|---|
-| `glClientActiveTextureARB` | no-op (no independent client-active selector) |
-| `mglResizeContext` | no-op (legacy fullscreen resource path not exposed) |
-| `mglEmergencyCloseScreen` | no-op |
-| `glMGLForceNewRenderPass` | no-op |
+| `glClientActiveTextureARB` | R200: selects the unit-0/unit-1 coordinate array; mglQ3: no-op |
+| `mglResizeContext` | no-op, returns `GL_FALSE` (legacy fullscreen resource path not exposed) |
+| `mglEmergencyCloseScreen` | no-op (no table slot since ABI 5) |
+| `glMGLForceNewRenderPass` | no-op (no table slot since ABI 5) |
+| `glBlendEquation` (R200) | only `GL_FUNC_ADD`; other equations raise `GL_INVALID_OPERATION` |
+| `glTexGenfv` (R200) | `GL_INVALID_OPERATION`: object/eye-linear planes are not carried yet |
+| `mglCreateContextFromWindow`/`FromBitMap` (R200) | return `NULL`: needs protocol 17 (the mglQ3 DLL implements both) |
+| `glTexImage2D` inside a display list | executes immediately, also under `GL_COMPILE` |
+| `glIndex*` | no-op (no colour-index rendering) |
 | `glMultiDrawArrays` | loops `GLDrawArrays` internally |
 | `mglGetInputWindowHandle` | returns the ordinary window handle |
 | `glGetString(GL_RENDERER)` | backend-specific string; do not parse it for caps |
@@ -164,7 +189,9 @@ collide through shared temp files.
 | Example | What it shows |
 |---|---|
 | `examples/r200_triangle_smoke.c` | smallest windowed triangle; use as a service probe |
-| `examples/r200_legacy_smoke.c` | legacy ABI-3 client path |
+| `examples/abi5_smoke.c` | ABI-5 table check, every new slot called once, display-list replay check |
+| `examples/glut_shapes.c` | GLUT window, lit solid shapes, a display list; `-frames N`, prints `GLUT_RUN` |
+| `examples/r200_legacy_smoke.c` | legacy (pre-`MGLPPCClientAttach`) client path |
 | `examples/milestone_gears_stats_library.c` | gears with `-frames N` auto-exit and `GEARS_RUN` summary |
 | `examples/milestone_gears_stats_library.c` + `-DMGL_GEARS_PRECALC=1` | precalculated gears (benchmark reference workload) |
 | `examples/r200_texture_update_test.c` | pixel-verified texture update acceptance |

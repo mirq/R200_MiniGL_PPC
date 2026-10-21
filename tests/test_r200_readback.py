@@ -112,6 +112,19 @@ static BOOL PlatformCall(ULONG cmd, ULONG id) {
     return TRUE;
 }
 '''
+# The harness has one token numbering for both sides, so the wire's
+# native-to-OpenGL error map (backend_r200/generated/r200_wire_enum.h) is the
+# identity on the error codes and rejects every other word, as the real one.
+frontend += r'''
+static GLenum WireNativeErrorToGL(GLenum native)
+{
+    switch (native) {
+    case GL_INVALID_ENUM: case GL_INVALID_VALUE: case GL_INVALID_OPERATION:
+    case GL_OUT_OF_MEMORY: return native;
+    default: return 0;
+    }
+}
+'''
 for signature in ("static BOOL FrontendTextureBarrier(",
                   "static void FrontendSetTransportError(",
                   "static BOOL FrontendEnsureTextureUploadBuffer(",

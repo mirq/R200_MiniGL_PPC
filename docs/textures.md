@@ -86,8 +86,11 @@ flip the default without fixing the deferred-service latency.
 
 ## 3. Formats and conversion
 
-- Source enums are translated from the dispatch/client numbering to the native
-  numbering (the tails differ: BGRA/ARGB/565/4444).
+- The frontend uses OpenGL token values (ABI 5); the native library uses the
+  classic numbering. `WireTranslateRequest` maps the target, internalformat,
+  format and type words of every upload/subimage/readback command
+  (`backend_r200/generated/r200_wire_enum.h`, generated from both headers);
+  see [transport-protocol.md](transport-protocol.md#11-gl-enum-values-on-the-wire-abi-5).
 - Eligible source formats: `GL_RGB`, `GL_RGBA`, `GL_BGRA`, `GL_ARGB`,
   `GL_ALPHA`, `GL_LUMINANCE`, `GL_LA` as `GL_UNSIGNED_BYTE`, plus 565/4444 as
   16-bit halfwords (big-endian on the wire). `COLOR_INDEX` is excluded because
@@ -96,6 +99,18 @@ flip the default without fixing the deferred-service latency.
   shared byte-math helpers — use them rather than open-coding pitch math.
 - Channel order bugs are silent swaps on a big-endian machine. `tests/`
   contains enum parity and pixel verification tests; keep them passing.
+
+## 3.1 Framebuffer copies and mipmap generation
+
+- `glCopyTexImage2D`/`glCopyTexSubImage2D` (R200) read the rectangle back
+  through `READ_PIXELS_SHARED` in strips of at most
+  `MGLPPC_READ_PIXELS_MAX_BYTES` and upload it through the normal
+  `glTexImage2D`/`glTexSubImage2D` path, with pixel-store state forced tight
+  and restored. Every copy is therefore a GPU drain plus two transfers; the
+  cost has not been measured. A GPU colour-to-texture copy would need a new
+  Radeon3D service operation.
+- `gluBuild2DMipmaps` (generic) box-filters `GL_UNSIGNED_BYTE` images to a
+  power of two and uploads every level through the normal path.
 
 ## 4. Performance (measured)
 

@@ -220,6 +220,8 @@ void InitializeFrontendContext(struct MiniGLR200Context *context)
     context->scissorWidth = context->width;
     context->scissorHeight = context->height;
     context->pointSize = 1.0f;
+    context->lineWidth = 1.0f;
+    context->edgeFlag = TRUE;
     context->clearColor = 0xff000000UL;
     context->currentColor = 0xffffffffUL;
     context->currentNormalZ = 1.0f;

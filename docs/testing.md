@@ -91,7 +91,8 @@ More Python suites (each compiles or parses production code):
 | `tests/test_r200_fence_group.py` | fence coalescing |
 | `tests/test_r200_texture_order.py` | texture ordering |
 | `tests/test_frame260_deep_profile.py` | frame-260 deep profiler paths |
-| `tests/test_enum_parity.py` | GL enum parity between the frontend header and `include/mgl/gl.h` |
+| `tests/test_enum_parity.py` | GL enum parity between the frontend header and `include/mgl/gl.h` (all 358 shared ABI-5 tokens; the client header's `#define`s are parsed as well as enums). The second pair (classic native backend vs classic client header) fails on `GL_MAX_TEXTURE_UNITS_ARB` 223 vs 227, identically at HEAD before ABI 5 |
+| `tools/check_dispatch_layout.py` | `MGLDispatchTable` against the vendored upstream 29.1 layout (names, parameter types, ABI 5, FastPath tail); also run by the R200 build |
 | `tests/test_68k_host_classifier.py` | the Sonnet classifier ban list |
 | `tools/test_batch_budget.py` | `r200_batch_budget.h` fits/cost tables |
 | `tools/test_batch_expansion.py` | expansion budgets vs the real driver emitter |
@@ -108,8 +109,8 @@ HEAD.
 
 The readback tests encode the contract; keep it when touching readback:
 
-- Command 27 uses capability bit 10 on protocol 15 without changing ABI 3 or
-  any wire layout.
+- Command 27 uses capability bit 10 on protocol 15 without changing the
+  dispatch ABI or any wire layout.
 - Only `GL_RGBA` + `GL_UNSIGNED_BYTE`; other pairs → `GL_INVALID_ENUM`.
 - Nonempty requests > 2 MiB → `GL_INVALID_OPERATION` (no partial output);
   invalid dimensions/NULL/overflow/out-of-bounds → `GL_INVALID_VALUE`; missing
@@ -129,7 +130,7 @@ The readback tests encode the contract; keep it when touching readback:
 `tests/r200_readback_abi.c` must be compiled separately with both real target
 SDKs; it checks the command/capability, mailbox eligibility, eight-word
 arguments, the 80-byte zero-payload message, the ring control size and the
-160-byte mailbox. The current PPC DLL asserts ABI-3 size **0x238**.
+160-byte mailbox. The current PPC DLL asserts the ABI-5 table size **0x354**.
 
 ## 3. Hardware test suite
 
@@ -152,6 +153,18 @@ values are regenerated.
 
 The Quake console assets are extracted from retail data with
 `python3 tools/extract_quake_console.py [PAK0.PAK] [out.h]` → `examples/quake_console.h`.
+
+ABI-5 hardware smoke tests (not yet run on hardware):
+
+- `bin/examples/abi5_smoke_ppc.warpelf [window|fullscreen]`: table header and
+  no NULL slot, every slot 133..205 called once with its `glGetError`
+  printed, and behavioural checks valid on every backend (display list
+  compiles without executing under `GL_COMPILE` and replays on `glCallList`,
+  `glIsList`, a non-NULL quadric, `glGetDoublev(GL_VIEWPORT)`). Exit code 0
+  and `abi5: done, 0 failure(s)` is a pass.
+- `bin/examples/glut_shapes_ppc.warpelf [-frames N]`: GLUT window, lit solid
+  shapes partly from a display list; prints `GLUT_RUN frames=N ms=M
+  error=0x0000`. Rendering is judged by screenshot.
 
 Runtime acceptance notes:
 

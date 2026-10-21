@@ -18,9 +18,11 @@ Requirements
 ------------
 
 - Relink new PPC applications with this libminigl.a so MiniGLClose can detach
-  explicitly. The supplied Silent Hill ABI-3 build is also supported: it
-  deletes its context before its legacy MiniGLClose, allowing the DLL to
-  release task-owned transport resources safely from that delete call.
+  explicitly. Since MiniGL 29 the DLL is dispatch ABI 5: applications built
+  against the V19 (ABI 3) headers are refused by MiniGLOpen and must be
+  rebuilt. (The supplied Silent Hill ABI-3 build deletes its context before
+  its legacy MiniGLClose; its MiniGLOpen requires ABI 3, so give it an
+  ABI-3 minigl_ppc.dll in its own directory.)
 - Install a matching Radeon9200.chip and Prometheus.card in LIBS:Picasso96/.
 - Back up every installed library and driver before replacing it.
 - Cold reboot after changing Radeon9200.chip or Prometheus.card, then run

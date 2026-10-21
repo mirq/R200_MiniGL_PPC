@@ -111,7 +111,11 @@ MGLPPC_PROFILE=1 make -f Makefile.dll.r200.gcc \
 `OBJS` in `Makefile.dll.r200.gcc`:
 
 ```
-minigl_ppc_dispatch_r200.o   positional ABI-3 table + legacy/attach handling
+minigl_ppc_dispatch_r200.o   positional ABI-5 table + attach handling + ppc_common hooks
+minigl_ppc_generic.o         ppc_common: glGetDoublev, glNormal3fv, gluErrorString, ...
+minigl_ppc_lists.o           ppc_common: display lists (+ generated thunks)
+minigl_ppc_glu.o             ppc_common: gluBuild2DMipmaps, quadrics
+minigl_ppc_glut.o            ppc_common: GLUT
 r200_frontend.o              the whole semantic frontend (unity translation unit)
 r200_cp_emit.o               CP-emitter adapter (record -> CP stream wrapper)
 radeon3d_emit.o              consumer-owned CP emitter from $(R200_EMITTER_ROOT)/src
@@ -137,21 +141,28 @@ removed `Radeon3DExecute`/`Commit*` entry points live in
 `third_party/radeon3d/include/radeon3d_records.h`. Rebuild and record the new
 CRC for every deployment; committed binaries are not authoritative.
 
-### 2.4 Generated dispatch table
+### 2.4 Generated files
 
-The R200 dispatch table is generated from the public header:
+| Output | Generator | Inputs |
+|---|---|---|
+| `backend_r200/generated/dispatch_table_abi5.c` | `tools/generate_dispatch_r200.py` | `include/libraries/minigl_dispatch.h` + `backend_r200/generated/r200_symbols.txt` (nm of `Lib_*` in `r200_frontend.o`) |
+| `backend_r200/generated/r200_wire_enum.h` | `tools/generate_wire_enums.py` | frontend `minigl_r200.h` + native `classic_68k/.../library/minigl_r200.h` |
+| `ppc_common/minigl_ppc_lists_thunks.c` | `tools/generate_list_thunks.py` | `include/libraries/minigl_dispatch.h` |
 
-```
-include/libraries/minigl_dispatch.h
-   + backend_r200/generated/r200_symbols.txt   (nm of Lib_* in r200_frontend.o)
-   -> tools/generate_dispatch_r200.py
-   -> backend_r200/generated/dispatch_table_abi3.c
-```
+Make rules regenerate all three when an input changes; before generating the
+table the R200 makefile runs `tools/check_dispatch_layout.py`, which fails the
+build if the header drifts from the upstream 29.1 layout. Generated files
+must not be hand-edited; see [dispatch-abi.md](dispatch-abi.md) for the
+contracts.
 
-Make rules regenerate `r200_symbols.txt` and the table automatically when the
-frontend object or the dispatch header changes. The generated file must not be
-hand-edited; see [dispatch-abi.md](dispatch-abi.md) for the generation
-contract.
+The bundled mglQ3 DLL (`Makefile.dll.gcc`) links the same four `ppc_common`
+objects, compiled against `mglQ3/include` first. Its core (`mglQ3/src`,
+`mglQ3/include/mgl`) is upstream 29.1's mglQ3 with these WarpOS deltas kept:
+`sysinc.h` (Warp3DPPC inline headers, `INLINE`), the Radeon chip names in
+`others.c`, `matrix.c` (`MGLPrintMatrix*` built without the upstream `NDEBUG`
+guard, since the frozen prefix needs them), corrected `d_Draw*` prototypes in
+`vertexbuffer.c`, and two initialisations that silence upstream
+`-Wmaybe-uninitialized` false positives.
 
 ### 2.5 68k host and the classifier check
 
