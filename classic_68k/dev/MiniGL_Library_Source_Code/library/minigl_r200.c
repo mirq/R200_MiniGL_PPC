@@ -297,6 +297,7 @@ static void DestroyContext(struct MiniGLR200Context *context)
     (void)ReapHostParkedSurfaces(context);
     RestorePrimaryBuffer(context);
     if (context->device) {
+        ReleaseTiledColorTarget(context);
         for (index = 0; index < R200_SCREEN_BUFFERS; ++index) {
             if (context->surfaces[index].Handle)
                 Radeon3DReleaseSurface(context->device,
@@ -321,6 +322,8 @@ static void DestroyContext(struct MiniGLR200Context *context)
         p96FreeBitMap(context->bitmap);
     if (context->depthBitmap)
         p96FreeBitMap(context->depthBitmap);
+    if (context->colorTileBitmap)
+        p96FreeBitMap(context->colorTileBitmap);
     for (index = 0; index < MAX_TEXTURES; ++index) {
         if (context->textures[index].bitmap)
             p96FreeBitMap(context->textures[index].bitmap);

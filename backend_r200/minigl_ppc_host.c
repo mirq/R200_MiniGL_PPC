@@ -1816,6 +1816,7 @@ static BOOL PresentViaCp(MGLPPCHostState *state)
     volatile ULONG *words;
     ULONG slot, offset, datatype, fence = 0, count = 0, why = 0;
     ULONG bytesPerPixel, srcBias, dstBias, srcX, srcY, dstX, dstY;
+    BOOL srcTiled;
 
     if (!state->cpPresent || !state->cpEnabled || state->cpFailed ||
         !state->ringSegmentLeased || !state->ringControl ||
@@ -1830,6 +1831,14 @@ static BOOL PresentViaCp(MGLPPCHostState *state)
         present.deviceEpoch != state->ringDeviceEpoch) {
         ++HostCpPresentNotEligible;
         return FALSE;
+    }
+    /* A macro-tiled source (MINIGL_CTILE) starts on a 2 KiB boundary, so
+     * its bias below is zero and the copy untiles it (SRC tile bit). */
+    srcTiled = (present.format & MGL_R200_SURFACE_FORMAT_TILED) != 0;
+    present.format &= ~MGL_R200_SURFACE_FORMAT_TILED;
+    if (srcTiled && (present.srcGpuAddress & 2047UL)) {
+        why = 5;
+        goto copy_on_cpu;
     }
     if (present.format == RADEON3D_FORMAT_R5G6B5PC)
         datatype = HOST_GMC_DST_16BPP;
@@ -1891,7 +1900,8 @@ static BOOL PresentViaCp(MGLPPCHostState *state)
     words[count++] = HOST_LE32(3UL); /* left-to-right, top-to-bottom */
     words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_SRC_PITCH_OFFSET));
     words[count++] = HOST_LE32(((present.srcPitch >> 6) << 22) |
-                              (present.srcGpuAddress >> 10));
+                              (present.srcGpuAddress >> 10) |
+                              (srcTiled ? (1UL << 30) : 0UL));
     words[count++] = HOST_LE32(HOST_CP_PACKET0(HOST_DST_PITCH_OFFSET));
     words[count++] = HOST_LE32(((present.dstPitch >> 6) << 22) |
                               (present.dstGpuAddress >> 10));

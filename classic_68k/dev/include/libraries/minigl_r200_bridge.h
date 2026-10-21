@@ -30,6 +30,9 @@
 
 /* Read-only metadata for a live surface owned by the current context. */
 #define MGL_R200_PRIVATE_SURFACE_V1_QUERY 0x4d475013UL
+/* Format flag on surface/present descriptors: the surface is rendered
+ * macro-tiled (R200_COLOR_TILE_ENABLE) and must be read with tiling. */
+#define MGL_R200_SURFACE_FORMAT_TILED 0x80000000UL
 #define MGL_R200_PRIVATE_SURFACE_V1_VERSION 1UL
 
 /* surfaceToken is the only input; all other fields are native-owned output.

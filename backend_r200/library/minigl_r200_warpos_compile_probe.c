@@ -6408,7 +6408,7 @@ static struct FrontendLmPool *FrontendLmPoolCreate(
         surface.pitch = FrontendPlatform.control.value[3];
         surface.width = FrontendPlatform.control.value[4];
         surface.height = FrontendPlatform.control.value[5];
-        surface.format = FrontendPlatform.control.value[6];
+        surface.format = FrontendPlatform.control.value[6] & ~MGL_R200_SURFACE_FORMAT_TILED;
         if (!FrontendPoolHashInsert(token, context->deviceEpoch, &surface))
             return NULL;
         pool->slot[index].token = token;
