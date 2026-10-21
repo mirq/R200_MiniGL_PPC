@@ -63,6 +63,17 @@ write from the steady path was one of the largest upload wins (see §4).
 The lease is validated against the device epoch on commit: a stale epoch is
 rejected rather than written.
 
+A full-image `glTexSubImage2D` of a level-0-only texture with a
+non-mipmapped minification filter (Quake 3 RoQ cinematics: 512x256 RGBA every
+frame) starts a retained shadow on the spot, since it overwrites the whole
+image, and sets the mirror's `levelCount` to 1 to match what the direct
+commit publishes (a mismatch fails the reply check, so draws keep the stale
+surface and the video freezes on an early frame). The update then takes the
+shadow patch + direct recommit path: ~18 ms per frame instead of ~280 ms on
+the shared subimage path (68k copy), and the cinematic loop runs 26.5 -> 33
+FPS. `glTexImage2D` cannot route RGBA this way because mip levels may follow
+it; by the first subimage the filter and level set are known.
+
 ### 2.2 Batched two-tile (diagnostics)
 
 The protocol and both sides implement BEGIN2/COMMIT2 (capability bit 14,
