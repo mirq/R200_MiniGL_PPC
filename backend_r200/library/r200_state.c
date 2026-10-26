@@ -64,12 +64,19 @@ static ULONG FragmentState(const struct MiniGLR200Context *context)
                   RADEON3D_FRAGMENT_ALPHA_FUNC_SHIFT) |
                  ((ULONG)ColorByte(context->alphaRef) <<
                   RADEON3D_FRAGMENT_ALPHA_REF_SHIFT);
-    if (context->blendEnabled)
+    if (context->blendEnabled) {
         state |= RADEON3D_FRAGMENT_BLEND |
                  (BlendOption(context->blendSource) <<
                   RADEON3D_FRAGMENT_SRC_SHIFT) |
                  (BlendOption(context->blendDestination) <<
                   RADEON3D_FRAGMENT_DST_SHIFT);
+        if (R200ExtendedFragmentState()) {
+            if (context->blendEquation == GL_FUNC_REVERSE_SUBTRACT)
+                state |= RADEON3D_FRAGMENT_BLEND_RSUB;
+            else if (context->blendEquation == GL_FUNC_SUBTRACT)
+                state |= RADEON3D_FRAGMENT_BLEND_SUB;
+        }
+    }
     return state;
 }
 
@@ -2735,12 +2742,14 @@ void Lib_glGetPointerv(GLenum name, GLvoid **value)
  * glBlendEquation / glBlendFuncSeparate (upstream 29.1 slots 133/134).
  *
  * RV280 can do both (RB3D_BLENDCNTL comb function, RB3D_ABLENDCNTL with
- * SEPARATE_ALPHA_ENABLE -- Mesa r200_state.c), but the Radeon3D fragment
- * state word this frontend submits carries only one source/destination pair
- * and no equation. Until the record and emitter grow those fields:
- *  - GL_FUNC_ADD is the hardware's equation and is accepted silently;
- *    the other four GL 1.2/ARB_imaging equations are refused with
- *    GL_INVALID_OPERATION rather than rendered as ADD;
+ * SEPARATE_ALPHA_ENABLE -- Mesa r200_state.c). The fragment state word
+ * carries one source/destination pair and, while this frontend emits its own
+ * command stream, the subtract equations (GL_EXT_blend_subtract; an older
+ * Radeon3D service rejects those bits):
+ *  - GL_FUNC_ADD is the hardware's default and always accepted;
+ *  - GL_FUNC_SUBTRACT / GL_FUNC_REVERSE_SUBTRACT with the extension, for
+ *    colour and alpha alike; without it, and GL_MIN / GL_MAX always, they are
+ *    refused with GL_INVALID_OPERATION rather than rendered as ADD;
  *  - glBlendFuncSeparate applies the RGB pair, and refuses a differing
  *    alpha pair the same way. An identical pair is plain glBlendFunc.
  */
@@ -2748,8 +2757,15 @@ void Lib_glBlendEquation(GLenum mode)
 {
     struct MiniGLR200Context *context = CurrentContext();
     if (!StateChangeAllowed(context)) return;
-    if (mode == GL_FUNC_ADD)
+    if (mode == GL_FUNC_ADD ||
+        ((mode == GL_FUNC_SUBTRACT || mode == GL_FUNC_REVERSE_SUBTRACT) &&
+         R200ExtendedFragmentState())) {
+        if (context->blendEquation != mode) {
+            context->blendEquation = mode;
+            BumpSemanticStateSerial(context);
+        }
         return;
+    }
     if (mode == GL_FUNC_SUBTRACT || mode == GL_FUNC_REVERSE_SUBTRACT ||
         mode == GL_MIN || mode == GL_MAX)
         SetError(context, GL_INVALID_OPERATION);

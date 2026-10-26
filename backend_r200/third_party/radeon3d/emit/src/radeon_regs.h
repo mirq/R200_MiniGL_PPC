@@ -211,6 +211,8 @@
 #define R200_PP_CNTL                        0x1c38UL
 #define R200_TEX_BLEND_0_ENABLE             0x00001000UL
 #define R200_RB3D_BLENDCNTL                 0x1c20UL
+#define R200_COMB_FCN_SUB_CLAMP             (2UL << 12)
+#define R200_COMB_FCN_RSUB_CLAMP            (6UL << 12)
 #define R200_PP_MISC                        0x1c14UL
 #define R200_ALPHA_TEST_NEVER               (0UL << 8)
 #define R200_ALPHA_TEST_LESS                (1UL << 8)
@@ -459,6 +461,7 @@
 #define R200_TXA_ARG_A_R1_ALPHA             12UL
 #define R200_TXA_ARG_B_R0_ALPHA             (10UL << 5)
 #define R200_TXA_ARG_C_R1_ALPHA             (12UL << 10)
+#define R200_TXC_SCALE_2X                   (1UL << 8)
 #define R200_TXC_CLAMP_0_1                  (1UL << 12)
 #define R200_TXA_CLAMP_0_1                  (1UL << 12)
 #define R200_TXC_OUTPUT_REG_R0              (1UL << 16)

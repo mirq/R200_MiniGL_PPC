@@ -134,7 +134,7 @@ follow upstream's Classic table where the backend cannot do better.
 | 130 | 0x218 | `GLClientActiveTextureARB` | real (unit 0/1 coordinate array) | no-op |
 | 131 | 0x21C | `GLInterleavedArrays` | real | real |
 | 132 | 0x220 | `GLMultiDrawArrays` | loops `glDrawArrays` | loops `GLDrawArrays` |
-| 133 | 0x224 | `GLBlendEquation` | `GL_FUNC_ADD` accepted; other equations `GL_INVALID_OPERATION` until the fragment record carries one | ignored (ADD) |
+| 133 | 0x224 | `GLBlendEquation` | `GL_FUNC_ADD` accepted; `GL_FUNC_SUBTRACT`/`GL_FUNC_REVERSE_SUBTRACT` with `GL_EXT_blend_subtract` (CP emission active); others `GL_INVALID_OPERATION` | ignored (ADD) |
 | 134 | 0x228 | `GLBlendFuncSeparate` | RGB pair applied; a differing alpha pair `GL_INVALID_OPERATION` | RGB pair applied |
 | 135 | 0x22C | `GLIsTexture` | real | `GL_FALSE` |
 | 136 | 0x230 | `mglChooseZBufferDepth` | accepted; Z stays 16-bit (`GL_DEPTH_BITS` = 16) | ignored |

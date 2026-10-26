@@ -748,6 +748,7 @@ struct MiniGLR200Context {
     ULONG mtexQueueCount;
     GLfloat currentS[2], currentT[2];
     GLenum textureEnv[2];
+    GLint textureRgbScale[2];    /* GL_RGB_SCALE: 1, or 2 (extension) */
     GLenum textureGenModeS[2], textureGenModeT[2];
     GLfloat normalMatrix[9];
     GLfloat combinedMatrix[16];
@@ -756,6 +757,7 @@ struct MiniGLR200Context {
     GLfloat fogStart, fogEnd, fogDensity;
     ULONG fogColor;
     GLenum blendSource, blendDestination;
+    GLenum blendEquation;        /* GL_FUNC_ADD, or (extension) *SUBTRACT */
     GLenum shadeModel;
     GLenum cullFaceMode;
     GLenum frontFace;
@@ -1127,6 +1129,15 @@ void R200PPCErrorAt(const char *file, ULONG line, GLenum error);
     (R200PPCErrorAt(__FILE__, __LINE__, (error)), (SetError)((context), (error)))
 #endif
 void BumpSemanticStateSerial(struct MiniGLR200Context *context);
+/* GL_EXT_blend_subtract and GL_MGL_texture_env_rgb_scale need state bits the
+ * Radeon3D service of an older Radeon9200.chip rejects: they exist only
+ * while this frontend emits its own command stream (MGLPPC_CPEMIT=1). */
+#if R200_PPC_FRONTEND
+BOOL R200PPCPlatformCpEmitting(void);
+#define R200ExtendedFragmentState() R200PPCPlatformCpEmitting()
+#else
+#define R200ExtendedFragmentState() FALSE
+#endif
 BOOL StateChangeAllowed(struct MiniGLR200Context *context);
 BOOL ValidPrimitive(GLenum primitive);
 struct Radeon3DSurface *TargetSurface(struct MiniGLR200Context *context);

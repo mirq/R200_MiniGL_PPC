@@ -485,8 +485,21 @@ this OS build `UnSet` does not reliably remove a variable — use
   (`minigl_r200_warpos_compile_probe.c`): readback plus upload, see
   [textures.md](textures.md#31-framebuffer-copies-and-mipmap-generation).
 - `glBlendEquation`/`glBlendFuncSeparate` are partial until the fragment
-  record carries an equation and an alpha pair (plan P6): ADD and an equal
-  alpha pair work, anything else raises `GL_INVALID_OPERATION`.
+  record carries an alpha pair (plan P6): an equal alpha pair works, a
+  different one raises `GL_INVALID_OPERATION`. ADD always works;
+  `GL_FUNC_SUBTRACT`/`GL_FUNC_REVERSE_SUBTRACT` work while the frontend
+  emits its own command stream (`MGLPPC_CPEMIT=1` accepted by the driver),
+  for colour and alpha alike, and `GL_MIN`/`GL_MAX` are refused.
+- Two extensions exist only while the frontend emits its own command stream
+  (`R200PPCPlatformCpEmitting()`), because they use state bits an older
+  Radeon3D service in `Radeon9200.chip` rejects: `GL_EXT_blend_subtract`
+  (fragment bits `RADEON3D_FRAGMENT_BLEND_RSUB`/`_SUB` → `RB3D_BLENDCNTL`
+  `COMB_FCN_RSUB_CLAMP`/`SUB_CLAMP`, as Mesa `r200_state.c`) and
+  `GL_MGL_texture_env_rgb_scale` (`glTexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE,
+  1|2)`; on a `GL_MODULATE` unit 0 texture-state bit `RADEON3D_TEX_SCALE_2X`
+  → `PP_TXCBLEND2_0` `TXC_SCALE_2X`, Mesa `r200_texstate.c`'s `RGBshift`).
+  `glGetString(GL_EXTENSIONS)` lists them only then; clients test the string.
+  Added for WiiStation's PSX renderer (texture × colour × 2, B − F blending).
 - The frontend exports `R200PPCSetError` and `R200PPCGetClientArray` for the
   backend-independent layer (display lists, GLU, GLUT; see
   [dispatch-abi.md](dispatch-abi.md#4-backend-independent-layer-ppc_common)).

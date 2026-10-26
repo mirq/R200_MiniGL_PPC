@@ -2324,6 +2324,14 @@ void R200PPCPlatformResetClientDefaults(void)
     FrontendPlatform.syncSeq = 1;
 }
 
+/* The frontend builds the GPU command stream itself (MGLPPC_CPEMIT=1 and
+ * the driver accepted it): state bits the Radeon3D service does not know
+ * are safe, since this emitter alone interprets them. */
+BOOL R200PPCPlatformCpEmitting(void)
+{
+    return FrontendPlatform.cpEnabled && !FrontendPlatform.cpFailed;
+}
+
 BOOL R200PPCPlatformOpen(void)
 {
     if (FrontendPlatform.opened)

@@ -911,6 +911,12 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                             RADEON3D_FRAGMENT_DST_SHIFT;
         rbControl |= R200_ALPHA_BLEND_ENABLE;
         blendControl = sourceBlend[source] | destinationBlend[destination];
+        /* GL_EXT_blend_subtract, as Mesa r200_state.c: one equation for
+         * colour and alpha (no separate RB3D_ABLENDCNTL). */
+        if (fragmentState & RADEON3D_FRAGMENT_BLEND_RSUB)
+            blendControl |= R200_COMB_FCN_RSUB_CLAMP;
+        else if (fragmentState & RADEON3D_FRAGMENT_BLEND_SUB)
+            blendControl |= R200_COMB_FCN_SUB_CLAMP;
     } else if (options & RADEON3D_DRAW_ALPHA_BLEND) {
         rbControl |= R200_ALPHA_BLEND_ENABLE;
         blendControl = R200_SRC_BLEND_GL_SRC_ALPHA |
@@ -1049,9 +1055,15 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                                         R200_TXC_ARG_B_DIFFUSE_COLOR
                               : textured ? R200_TXC_ARG_C_R0_COLOR
                                        : R200_TXC_ARG_C_DIFFUSE_COLOR) ||
+        /* GL_MGL_texture_env_rgb_scale: GL_RGB_SCALE 2 on a modulated
+         * unit 0 (Mesa r200_texstate.c's RGBshift in the same field). */
         !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND2_0,
                              R200_TXC_CLAMP_0_1 |
-                                 R200_TXC_OUTPUT_REG_R0) ||
+                                 R200_TXC_OUTPUT_REG_R0 |
+                                 (textured && fragmentStatePresent &&
+                                          (textureState & RADEON3D_TEX_MODULATE) &&
+                                          (textureState & RADEON3D_TEX_SCALE_2X)
+                                      ? R200_TXC_SCALE_2X : 0UL)) ||
         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND_0,
                                textured ? R200_TXA_ARG_C_R0_ALPHA
                                         : R200_TXA_ARG_C_DIFFUSE_ALPHA) ||

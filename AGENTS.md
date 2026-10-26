@@ -212,8 +212,9 @@
   `mglResizeContext` returns `GL_FALSE`; `mglEmergencyCloseScreen` and
   `glMGLForceNewRenderPass` are header-only no-ops (no slots since ABI 5);
   `glMultiDrawArrays` loops `GLDrawArrays`; `mglGetInputWindowHandle`
-  returns the ordinary window handle; R200 `glBlendEquation` accepts only
-  `GL_FUNC_ADD` and `glTexGenfv` raises `GL_INVALID_OPERATION`; the
+  returns the ordinary window handle; R200 `glBlendEquation` accepts
+  `GL_FUNC_ADD`, and the subtract modes only with CP emission active
+  (`GL_EXT_blend_subtract`), and `glTexGenfv` raises `GL_INVALID_OPERATION`; the
   per-slot list is in `docs/dispatch-abi.md` section 2.2.
 - Display lists, GLU and GLUT are backend-independent (`ppc_common/`),
   written against the DLL's own table; generic code must call the SysV

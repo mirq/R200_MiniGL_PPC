@@ -259,6 +259,7 @@ typedef unsigned int    GLenum;
 #define GL_TEXTURE_ENV                       0x2300
 #define GL_TEXTURE_ENV_COLOR                 0x2201
 #define GL_TEXTURE_ENV_MODE                  0x2200
+#define GL_RGB_SCALE                         0x8573
 #define GL_TEXTURE_MAG_FILTER                0x2800
 #define GL_TEXTURE_MIN_FILTER                0x2801
 #define GL_TEXTURE_PRIORITY                  0x8066

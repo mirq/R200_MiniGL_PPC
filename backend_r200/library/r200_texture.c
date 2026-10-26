@@ -252,6 +252,10 @@ ULONG TextureState(const struct MiniGLR200Context *context,
 #endif
     if (context->textureEnv[unit] == GL_MODULATE)
         state |= RADEON3D_TEX_MODULATE;
+    /* The emitter scales unit 0's combiner only. */
+    if (unit == 0 && context->textureEnv[0] == GL_MODULATE &&
+        context->textureRgbScale[0] == 2 && R200ExtendedFragmentState())
+        state |= RADEON3D_TEX_SCALE_2X;
     if (texture->wrapS == GL_REPEAT)
         state |= RADEON3D_TEX_REPEAT_S;
     if (texture->wrapT == GL_REPEAT)
@@ -921,6 +925,19 @@ void Lib_glTexEnvi(GLenum target, GLenum pname, GLint value)
     struct MiniGLR200Context *context=CurrentContext();
     if (!StateChangeAllowed(context))
         return;
+    /* GL_MGL_texture_env_rgb_scale: 1 or 2, effective with GL_MODULATE. */
+    if (target==GL_TEXTURE_ENV && pname==GL_RGB_SCALE &&
+        R200ExtendedFragmentState()) {
+        if (value!=1 && value!=2) {
+            SetError(context,GL_INVALID_VALUE);
+            return;
+        }
+        if (context->textureRgbScale[context->activeTexture] != value) {
+            context->textureRgbScale[context->activeTexture]=value;
+            BumpSemanticStateSerial(context);
+        }
+        return;
+    }
     if (target!=GL_TEXTURE_ENV || pname!=GL_TEXTURE_ENV_MODE ||
         (value!=GL_MODULATE && value!=GL_REPLACE)) {
         SetError(context,GL_INVALID_ENUM);

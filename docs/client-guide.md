@@ -103,7 +103,8 @@ Rules:
 | `mglResizeContext` | no-op, returns `GL_FALSE` (legacy fullscreen resource path not exposed) |
 | `mglEmergencyCloseScreen` | no-op (no table slot since ABI 5) |
 | `glMGLForceNewRenderPass` | no-op (no table slot since ABI 5) |
-| `glBlendEquation` (R200) | only `GL_FUNC_ADD`; other equations raise `GL_INVALID_OPERATION` |
+| `glBlendEquation` (R200) | `GL_FUNC_ADD`; `GL_FUNC_SUBTRACT`/`GL_FUNC_REVERSE_SUBTRACT` when `GL_EXT_blend_subtract` is listed (CP emission active); otherwise, and `GL_MIN`/`GL_MAX` always, `GL_INVALID_OPERATION` |
+| `glTexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, 1\|2)` (R200) | when `GL_MGL_texture_env_rgb_scale` is listed: unit 0's modulated colour × 2 |
 | `glTexGenfv` (R200) | `GL_INVALID_OPERATION`: object/eye-linear planes are not carried yet |
 | `mglCreateContextFromWindow`/`FromBitMap` (R200) | return `NULL`: needs protocol 17 (the mglQ3 DLL implements both) |
 | `glTexImage2D` inside a display list | executes immediately, also under `GL_COMPILE` |

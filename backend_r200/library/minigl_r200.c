@@ -244,6 +244,8 @@ void InitializeFrontendContext(struct MiniGLR200Context *context)
     context->fogColor = 0;
     context->blendSource = GL_ONE;
     context->blendDestination = GL_ZERO;
+    context->blendEquation = GL_FUNC_ADD;
+    context->textureRgbScale[0] = context->textureRgbScale[1] = 1;
     context->alphaFunc = GL_ALWAYS;
     context->shadeModel = GL_SMOOTH;
     context->cullFaceMode = GL_BACK;
@@ -506,20 +508,27 @@ const GLubyte *Lib_glGetString(GLenum name)
     static const GLubyte vendor[] = "MiniGL_R200";
     static const GLubyte renderer[] = "Radeon3D semantic R200";
     static const GLubyte version[] = "1.1 MiniGL_R200 phase6";
-    static const GLubyte extensions[] =
-        /* GL_MGL_ARB_multitexture: ioq3's Amiga GLimp only enables
-         * vertex-array multitexture when the extensions string contains
-         * THIS MiniGL-specific token (amiga_glimp.c GLW_InitExtensions);
-         * the standard GL_ARB_multitexture token alone leaves Q3 on the
-         * single-texture path. The R200 stack really drives two TMUs
-         * (texture_format_probe multitexture section, hardware-verified). */
-        "GL_ARB_multitexture GL_MGL_ARB_multitexture "
-        "GL_MGL_performance_counters";
+    /* GL_MGL_ARB_multitexture: ioq3's Amiga GLimp only enables
+     * vertex-array multitexture when the extensions string contains
+     * THIS MiniGL-specific token (amiga_glimp.c GLW_InitExtensions);
+     * the standard GL_ARB_multitexture token alone leaves Q3 on the
+     * single-texture path. The R200 stack really drives two TMUs
+     * (texture_format_probe multitexture section, hardware-verified). */
+#define R200_BASE_EXTENSIONS \
+        "GL_ARB_multitexture GL_MGL_ARB_multitexture " \
+        "GL_MGL_performance_counters"
+    static const GLubyte extensions[] = R200_BASE_EXTENSIONS;
+    /* With the frontend's own command stream: glBlendEquation's subtract
+     * modes and glTexEnv(GL_RGB_SCALE, 2) on a modulated unit 0. */
+    static const GLubyte extensionsEmitting[] = R200_BASE_EXTENSIONS
+        " GL_EXT_blend_subtract GL_MGL_texture_env_rgb_scale";
+#undef R200_BASE_EXTENSIONS
     switch (name) {
     case GL_VENDOR: return vendor;
     case GL_RENDERER: return renderer;
     case GL_VERSION: return version;
-    case GL_EXTENSIONS: return extensions;
+    case GL_EXTENSIONS:
+        return R200ExtendedFragmentState() ? extensionsEmitting : extensions;
     default: SetError(CurrentContext(), GL_INVALID_ENUM); return NULL;
     }
 }

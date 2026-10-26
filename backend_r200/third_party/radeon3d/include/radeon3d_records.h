@@ -187,7 +187,11 @@ typedef char Radeon3DStateBatchV1SizeCheck[
 #define RADEON3D_TEX_MIN_MASK        (7UL << RADEON3D_TEX_MIN_SHIFT)
 #define RADEON3D_TEX_LEVELS_SHIFT    8UL
 #define RADEON3D_TEX_LEVELS_MASK     (15UL << RADEON3D_TEX_LEVELS_SHIFT)
-#define RADEON3D_TEX_STATE_MASK      0x00000f7fUL
+/* GL_MGL_texture_env_rgb_scale: the modulated colour x 2 (PP_TXCBLEND2
+ * SCALE_2X). Set only by a frontend that emits its own command stream: an
+ * older Radeon3D service rejects the bit. */
+#define RADEON3D_TEX_SCALE_2X        (1UL << 7)
+#define RADEON3D_TEX_STATE_MASK      0x00000fffUL
 /* Bits 16-31 carry the client's texture content serial. It changes whenever
  * an in-place texel update reaches the surface, forcing the service to
  * re-emit the texture unit state (including PP_TXOFFSET) so the GPU's
@@ -229,7 +233,11 @@ typedef char Radeon3DStateBatchV1SizeCheck[
 #define RADEON3D_FRAGMENT_SRC_MASK         (15UL << 17)
 #define RADEON3D_FRAGMENT_DST_SHIFT        21UL
 #define RADEON3D_FRAGMENT_DST_MASK         (15UL << 21)
-#define RADEON3D_FRAGMENT_STATE_MASK       0x01ffffffUL
+/* GL_EXT_blend_subtract: RB3D_BLENDCNTL's combine function, D - S (RSUB)
+ * or S - D (SUB). Same rule as RADEON3D_TEX_SCALE_2X. */
+#define RADEON3D_FRAGMENT_BLEND_RSUB       (1UL << 25)
+#define RADEON3D_FRAGMENT_BLEND_SUB        (1UL << 26)
+#define RADEON3D_FRAGMENT_STATE_MASK       0x07ffffffUL
 
 #define RADEON3D_VERTEX_FOG                  (1UL << 0)
 #define RADEON3D_VERTEX_TEXTURE1             (1UL << 1)
