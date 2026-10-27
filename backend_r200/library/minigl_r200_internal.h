@@ -436,6 +436,12 @@ struct TextureObject {
      * ~5.8 MB/s). Zeroed for every other build. */
     UBYTE *shadow;
     ULONG shadowWidth, shadowHeight;
+    /* PPC frontend: the client set GL_TEXTURE_MIN_FILTER itself (a non-mip
+     * one lets a level-0 RGBA upload take the direct path), and the texture
+     * holds a single direct-created level, which a later mip level must
+     * first rebuild on the shared path. */
+    BOOL minFilterSet;
+    BOOL directSingleLevel;
 };
 
 /* Radeon3DExecute consumes semantic records asynchronously.  A slot remains

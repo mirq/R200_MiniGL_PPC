@@ -7228,7 +7228,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     BOOL chunkOk;
     BOOL sharedUpload = FALSE;
     BOOL canonicalStaged = FALSE;  /* textureUploadBuffer holds the BGRA image */
-    BOOL directAllowed;
+    BOOL directAllowed, rgbaDirect;
     /* Paletted sources: Quake's GL_Upload8_EXT path (gl_draw.c:30,
      * GL_COLOR_INDEX8_EXT internalformat with GL_COLOR_INDEX indices).
      * Indices always expand through the frontend palette mirror into
@@ -7356,8 +7356,56 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
      * all world textures, their level>0 uploads then lost). */
     directAllowed = (format == GL_LUMINANCE || format == GL_ALPHA ||
                      format == GL_LUMINANCE_ALPHA);
+    /* A mip level for a texture that holds one direct level (created or
+     * re-committed by the direct path): the native side refuses levels on
+     * such a texture, so level 0 is first rebuilt on the shared path from
+     * the retained shadow, then this level follows as usual. */
+    if (level > 0 && texture->directSingleLevel) {
+        UBYTE *image = texture->shadow;
+        ULONG imageWidth = texture->shadowWidth, imageHeight = texture->shadowHeight;
+        GLint savedAlignment = context->unpackAlignment;
+        GLint savedRowLength = context->unpackRowLength;
+        GLint savedSkipRows = context->unpackSkipRows;
+        GLint savedSkipPixels = context->unpackSkipPixels;
+
+        texture->directSingleLevel = FALSE;
+        if (!image) {
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        texture->minFilterSet = FALSE;  /* keep the rebuild off the direct path */
+        context->unpackAlignment = 4;
+        context->unpackRowLength = 0;
+        context->unpackSkipRows = 0;
+        context->unpackSkipPixels = 0;
+        R200PPCDispatchTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)imageWidth,
+                                  (GLsizei)imageHeight, 0, MGL_UBYTE_BGRA,
+                                  GL_UNSIGNED_BYTE, image);
+        context->unpackAlignment = savedAlignment;
+        context->unpackRowLength = savedRowLength;
+        context->unpackSkipRows = savedSkipRows;
+        context->unpackSkipPixels = savedSkipPixels;
+        texture->minFilterSet = TRUE;
+        texture = &context->textures[context->boundTexture[context->activeTexture]];
+    }
+    /* RGBA level 0 also goes direct when the client has already chosen a
+     * non-mip minification filter: then no mip level is coming (Quake sets
+     * its filters after uploading and keeps the shared path). Creation on
+     * the shared path cost ~90 ms per 256x256 texture (68k copy); WiiStation
+     * creates its texture pages this way. Its retained shadow is required:
+     * partial updates patch it, and a surprise mip level rebuilds from it. */
+    rgbaDirect = !directAllowed && !paletted && level == 0 &&
+                 texture->minFilterSet &&
+                 (texture->minFilter == GL_LINEAR ||
+                  texture->minFilter == GL_NEAREST) &&
+                 (format == GL_RGB || format == GL_RGBA ||
+                  format == MGL_UBYTE_BGRA || format == MGL_UBYTE_ARGB) &&
+                 !(width & (width - 1UL)) && !(height & (height - 1UL)) &&
+                 total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
+                 FrontendShadowEnsure(context, texture, (ULONG)width,
+                                      (ULONG)height);
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
-        directAllowed &&
+        (directAllowed || rgbaDirect) &&
         !paletted &&
         level == 0 && width <= 2048 && height <= 2048 &&
         total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
@@ -7366,7 +7414,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
         /* Two-tile batching: a 565 upload is either queued as the first
          * tile of a pair, paired with the deferred first tile, or the
          * deferred tile is completed before this upload proceeds. */
-        {
+        if (!rgbaDirect) {
             int batch = FrontendDirectBatchOffer(context, (ULONG)width,
                                                  (ULONG)height, format, type,
                                                  source + sourceOffset,
@@ -7414,9 +7462,9 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
          * the last-loaded lightmaps (n=261-266 of 267) ever got one, and
          * their subimages silently fell back to the shared path (2026-09-20
          * trace evidence: 267 dbeg, no subimage recommissions). */
-        if (directAllowed && FrontendShadowEnsure(context, texture,
-                                                  (ULONG)width,
-                                                  (ULONG)height))
+        if ((directAllowed || rgbaDirect) &&
+            FrontendShadowEnsure(context, texture, (ULONG)width,
+                                 (ULONG)height))
             fusedShadow = texture->shadow;
         if (FrontendDirectTextureUpload(context, (ULONG)width,
                                         (ULONG)height, format, type,
@@ -7435,6 +7483,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                 return;
             }
             FrontendMirrorTextureReply(context);
+            texture->directSingleLevel = TRUE;
             /* The fused pass above fills the canonical shadow whenever
              * Ensure succeeded. Stage it separately only when Ensure
              * failed (or the fused write was skipped), so a following
@@ -7447,7 +7496,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                 {
                     ULONG shadowSourceBytes =
                         MGLPPC_TEXTURE_SOURCE_BYTES(format, type);
-                    if (directAllowed &&
+                    if ((directAllowed || rgbaDirect) &&
                         FrontendShadowEnsure(context, texture,
                                              (ULONG)width, (ULONG)height))
                         FrontendStageTextureBGRA(
@@ -7700,6 +7749,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     texture->imageGeneration = generation;
     texture->residentGeneration = generation;
     texture->dirtyLevelMask = 0;
+    texture->directSingleLevel = FALSE;
     /* Keep the level-0 image as the retained shadow when it could take the
      * direct subimage path later: power of two, the canonical BGRA staging
      * still at hand (a memcpy, no conversion), nothing beyond level 0 yet.
@@ -7901,6 +7951,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                 return;
             }
             if (pooled) {
+                texture->directSingleLevel = TRUE;
 #if MGLPPC_PROFILE
                 if (lm) {
                     lm->path = 4;
@@ -7953,6 +8004,7 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                 return;
             }
             FrontendMirrorTextureReply(context);
+            texture->directSingleLevel = TRUE;
 #if MGLPPC_PROFILE
             PlatformProfile.textureSuccesses++;
             PlatformProfile.textureTicks += PerfClock() - textureStart;

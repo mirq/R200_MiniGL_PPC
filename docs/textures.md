@@ -87,6 +87,20 @@ shared path, where the 68k copies the whole image. Measured on the A4000/7410
 in a Silent Hill town scene: texture upload 63 ms -> ~0 ms per frame, the
 scene 9.4 -> 30 FPS.
 
+A level-0 power-of-two RGBA (or RGB, BGRA, ARGB) `glTexImage2D` also takes
+the direct path, if the client has already set a non-mipmapped
+`GL_TEXTURE_MIN_FILTER` itself (`minFilterSet`): then no mip level is coming.
+Quake sets its filters after uploading, so it keeps the shared path. The
+direct path requires a retained shadow for these textures. A texture that
+holds one direct level, whether created like this or re-committed by the
+subimage path or the row pool, is marked `directSingleLevel`. If a mip level
+arrives for it after all, level 0 is first rebuilt on the shared path from the
+shadow; the native side refuses levels on a direct texture. Before, every RGBA
+creation took the shared path (~90 ms per 256x256, 68k copy). WiiStation,
+which creates its texture pages this way, measured on the A4000/7410:
+- Texture work when entering a Silent Hill scene: 7.0 -> 2.8 ms a frame.
+- That stretch: 19.3 -> 21.0 FPS.
+
 `R200_SHADOW_TOTAL_MAX`, the cap on all retained shadows, is 32 MiB (it was 4
 MiB). That holds 128 such 256x256 pages, or every lightmap atlas of a Quake
 map with room to spare. A texture whose shadow does not fit under the cap keeps

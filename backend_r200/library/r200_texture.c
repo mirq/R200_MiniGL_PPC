@@ -620,6 +620,8 @@ void Lib_glDeleteTextures(GLsizei count, const GLuint *names)
         }
         texture->generated=FALSE;
         texture->minFilter=texture->magFilter=GL_NEAREST;
+        texture->minFilterSet=FALSE;
+        texture->directSingleLevel=FALSE;
         texture->wrapS=texture->wrapT=GL_REPEAT;
         if (context->boundTexture[0]==name) {
             context->boundTexture[0]=0;
@@ -886,6 +888,7 @@ void Lib_glTexParameteri(GLenum target, GLenum pname, GLint value)
             SetError(context,GL_INVALID_ENUM);
             return;
         }
+        texture->minFilterSet=TRUE;
         if (LibraryBase && LibraryBase->prohibitMipMapping &&
             (value==GL_NEAREST_MIPMAP_NEAREST || value==GL_NEAREST_MIPMAP_LINEAR))
             value=GL_NEAREST;
