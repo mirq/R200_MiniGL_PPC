@@ -408,6 +408,11 @@ Full tables live in [textures.md](textures.md). Headline figures:
 - `TexSubImage` 256: 408–415 ms → 130 ms; final windowed set 3–15 ms per
   operation.
 - One 64 KiB residency rebuild ≈ 12 ms (0.8 alloc + 0.2 import + 11 copy-back).
+- Partial updates of RGBA textures defined with `glTexImage2D` (2026-10-27,
+  measured). WiiStation, Silent Hill town scene, A4000/7410, same save state:
+  - Before: shared path, texture upload 63 ms per frame, 9.4 FPS.
+  - After: the shadow is kept from TexImage2D; ~0 ms per frame, 30 FPS.
+  - One run each; see textures.md section 2.1.
 
 ### 7.1 Lightmap updates under CP emit (2026-10-20)
 
