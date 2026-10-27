@@ -7,8 +7,13 @@
 - This is real hardware. Do NOT use `amiga_emulator_*` lifecycle/state
   commands and do not treat the local fs-uae status as the target; those
   belong to an unrelated local emulator process.
-- Primary AmigaBridge endpoint: `192.168.1.21:2345`. Always connect with
-  that explicit host and port; localhost defaults fail. After a cold boot
+- Primary AmigaBridge endpoint: `192.168.100.47:2345` (was 192.168.1.21
+  until 2026-10-27). Always connect with that explicit host and port;
+  localhost defaults fail. The development PC is `192.168.100.46`.
+- Large files (anything over a few KB) go over HTTP, not through the bridge:
+  serve them on the PC with `python3 -m http.server 8090 --bind 192.168.100.46`
+  and fetch them on the Amiga with
+  `System:C/wget -q -O <dest> http://192.168.100.46:8090/<file>`, then CRC32-check. After a cold boot
   (80-100 s) poll with `tools/wait_bridge.sh` (this repo), then
   reconnect explicitly; do not rely on a fixed sleep.
 - This machine cannot be recovered through software: after a grey screen,
