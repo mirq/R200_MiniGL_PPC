@@ -1085,9 +1085,16 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                                           (textureState & RADEON3D_TEX_MODULATE) &&
                                           (textureState & RADEON3D_TEX_SCALE_2X)
                                       ? R200_TXC_SCALE_2X : 0UL)) ||
+        /* GL_MODULATE multiplies alpha as well as colour: without the
+         * diffuse term Quake 3's alphaGen vertex/entity fades (smoke,
+         * blood, explosions) drew at full texture alpha. */
         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND_0,
-                               textured ? R200_TXA_ARG_C_R0_ALPHA
-                                        : R200_TXA_ARG_C_DIFFUSE_ALPHA) ||
+                              textured && fragmentStatePresent &&
+                                      (textureState & RADEON3D_TEX_MODULATE)
+                                  ? R200_TXA_ARG_A_R0_ALPHA |
+                                        R200_TXA_ARG_B_DIFFUSE_ALPHA
+                              : textured ? R200_TXA_ARG_C_R0_ALPHA
+                                       : R200_TXA_ARG_C_DIFFUSE_ALPHA) ||
         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND2_0,
                               R200_TXA_CLAMP_0_1 |
                                   R200_TXA_OUTPUT_REG_R0) ||
@@ -1101,7 +1108,10 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                                R200_TXC_CLAMP_0_1 |
                                    R200_TXC_OUTPUT_REG_R0) ||
           !ExecuteEmitRegister(emitter, R200_PP_TXABLEND_1,
-                                 R200_TXA_ARG_C_R1_ALPHA) ||
+                                (texture1State & RADEON3D_TEX_MODULATE)
+                                    ? R200_TXA_ARG_A_R1_ALPHA |
+                                          R200_TXA_ARG_B_R0_ALPHA
+                                    : R200_TXA_ARG_C_R1_ALPHA) ||
           !ExecuteEmitRegister(emitter, R200_PP_TXABLEND2_1,
                                R200_TXA_CLAMP_0_1 |
                                    R200_TXA_OUTPUT_REG_R0))) ||

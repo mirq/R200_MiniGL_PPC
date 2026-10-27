@@ -24,6 +24,7 @@ emulator.
 | 4 | [dispatch-abi.md](dispatch-abi.md) | `MGLDispatchTable` ABI 5 (upstream 29.1 layout), per-slot status, the shared `ppc_common` layer (display lists, GLU, GLUT), FastPath, upgrade rules |
 | 5 | [client-guide.md](client-guide.md) | Writing and running PPC clients, runtime requirements, deployment |
 | 5a | [client-porting.md](client-porting.md) | For game developers: building a client against MiniGL 29 / ABI 5, migrating V19 ports, PowerOpen notes, Silent Hill example |
+| 5b | [porting-games.md](porting-games.md) | Porting a whole game engine: platform layer (timer, files, input, AHI), renderer adaptation, Hyperion plugin DLLs, C++, bring-up order |
 | 6 | [frontend-r200.md](frontend-r200.md) | PPC semantic frontend internals: state, batching, submission, surfaces |
 | 7 | [transport-protocol.md](transport-protocol.md) | Exec port, ring, mailbox, protocol v15, fences, memory ordering |
 | 8 | [host-68k.md](host-68k.md) | The 68k host `minigl_ppc_host`: loop, handlers, segments, env vars |
