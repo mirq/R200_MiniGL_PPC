@@ -74,6 +74,24 @@ the shared subimage path (68k copy), and the cinematic loop runs 26.5 -> 33
 FPS. `glTexImage2D` cannot route RGBA this way because mip levels may follow
 it; by the first subimage the filter and level set are known.
 
+Partial updates work the same way. A level-0 `glTexImage2D` of a
+power-of-two texture on the shared path keeps the canonical BGRA image it has
+just staged as the retained shadow (a `memcpy`, no second conversion). A later
+mip level frees that shadow again. The subimage fast path takes a shadow only
+while the texture has exactly one defined level and a non-mipmapped
+minification filter. It sets `levelCount` to 1 before the re-commit, and the
+row pool then copies only the changed rows. Before this, a client that defines
+a texture once and then updates parts of it (WiiStation's GlesGpu: 256x256
+RGBA texture pages, many small updates a frame) sent every update down the
+shared path, where the 68k copies the whole image. Measured on the A4000/7410
+in a Silent Hill town scene: texture upload 63 ms -> ~0 ms per frame, the
+scene 9.4 -> 30 FPS.
+
+`R200_SHADOW_TOTAL_MAX`, the cap on all retained shadows, is 32 MiB (it was 4
+MiB). That holds 128 such 256x256 pages, or every lightmap atlas of a Quake
+map with room to spare. A texture whose shadow does not fit under the cap keeps
+the shared path.
+
 ### 2.2 Batched two-tile (diagnostics)
 
 The protocol and both sides implement BEGIN2/COMMIT2 (capability bit 14,

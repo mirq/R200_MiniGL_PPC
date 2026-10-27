@@ -6046,9 +6046,10 @@ static void FrontendStageTextureBGRA(UBYTE *destination,
  * the direct path -- the whole residency/redraw stays on the proven
  * direct-pipeline rails with no 68k copyback and no new residency
  * churn. Bounded by R200_SHADOW_TOTAL_MAX so a pathological client
- * cannot exhaust PPC memory: 4 MiB holds every 128x128 lightmap atlas
- * of a full Quake map (35 x 64 KiB) with headroom. */
-#define R200_SHADOW_TOTAL_MAX (4UL * 1024UL * 1024UL)
+ * cannot exhaust PPC memory: 32 MiB holds every 128x128 lightmap atlas
+ * of a full Quake map (35 x 64 KiB) and the 256x256 RGBA texture pages
+ * an emulator such as WiiStation keeps updating (128 x 256 KiB). */
+#define R200_SHADOW_TOTAL_MAX (32UL * 1024UL * 1024UL)
 
 static void FrontendShadowFree(struct TextureObject *texture)
 {
@@ -7158,6 +7159,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
 #endif
     BOOL chunkOk;
     BOOL sharedUpload = FALSE;
+    BOOL canonicalStaged = FALSE;  /* textureUploadBuffer holds the BGRA image */
     BOOL directAllowed;
     /* Paletted sources: Quake's GL_Upload8_EXT path (gl_draw.c:30,
      * GL_COLOR_INDEX8_EXT internalformat with GL_COLOR_INDEX indices).
@@ -7518,6 +7520,7 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
             return;
         }
         sharedUpload = TRUE;
+        canonicalStaged = canonical;
 #if MGLPPC_PROFILE
         PlatformProfile.textureSharedCalls++;
 #endif
@@ -7629,6 +7632,23 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
     texture->imageGeneration = generation;
     texture->residentGeneration = generation;
     texture->dirtyLevelMask = 0;
+    /* Keep the level-0 image as the retained shadow when it could take the
+     * direct subimage path later: power of two, the canonical BGRA staging
+     * still at hand (a memcpy, no conversion), nothing beyond level 0 yet.
+     * Clients that define a texture once and then update parts of it every
+     * frame (GlesGpu's 256x256 texture pages in WiiStation) otherwise send
+     * every partial update down the shared path, where the 68k copies the
+     * whole image: 63 ms a frame in Silent Hill. A mip level defined later
+     * frees the shadow again (the FrontendShadowFree above), and the
+     * subimage fast path requires a single defined level and a non-mip
+     * filter before it re-commits the image as one direct level. */
+    if (canonicalStaged && level == 0 && texture->definedLevels == 1UL &&
+        !(texture->width & (texture->width - 1UL)) &&
+        !(texture->height & (texture->height - 1UL)) &&
+        texture->width == (ULONG)width && texture->height == (ULONG)height &&
+        FrontendShadowEnsure(context, texture, (ULONG)width, (ULONG)height))
+        memcpy(texture->shadow, FrontendPlatform.textureUploadBuffer,
+               (ULONG)width * (ULONG)height * 4UL);
     BumpSemanticStateSerial(context);
 #if MGLPPC_PROFILE
     PlatformProfile.textureSuccesses++;
@@ -7771,6 +7791,9 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         texture->shadowWidth == (ULONG)texture->width &&
         texture->shadowHeight == (ULONG)texture->height &&
         level == 0 &&
+        /* the re-commit installs one level: never for a mipmapped texture */
+        texture->definedLevels == 1UL &&
+        (texture->minFilter == GL_LINEAR || texture->minFilter == GL_NEAREST) &&
         (FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
         texture->width >= (ULONG)(xoffset + width) &&
         texture->height >= (ULONG)(yoffset + height) &&
@@ -7789,6 +7812,10 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         PlatformProfile.textureBarrierCalls++;
         if (lm) lm->path = 2;
 #endif
+        /* A shadow kept from a shared TexImage2D (one defined level, see
+         * there) may sit on an allocated mip chain; the direct commit
+         * publishes one level and the reply check compares levelCount. */
+        texture->levelCount = 1UL;
         PPC_LM_NEXT(PPC_LM_DIRECT_PATCH);
         /* The shadow patch precedes publishing: the client's texels are
          * the truth until the commit completes. */
