@@ -1807,7 +1807,7 @@ static ULONG CpSurfHits, CpSurfMissQueries, CpSurfCapResets,
 /* CP publish sub-phase attribution (plan 2026-09-20 W-10). Raw mftb ticks,
  * exclusive: descriptor-resolve time is subtracted from emit. Cumulative
  * whole-context (setup + load + demo); reported once at teardown. */
-static ULONG CpPhasePublishes;
+static ULONG CpPhasePublishes, CpPhaseCopyDwords;
 static ULONG CpPhaseWaitTicks, CpPhaseResolveTicks, CpPhaseEmitTicks,
              CpPhaseCopyTicks, CpPhasePublishTicks;
 
@@ -3420,6 +3420,7 @@ static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSl
     copyStart = PerfClock();
     for (index = 0; index < count; ++index)
         destination[index] = __builtin_bswap32(staging[index]);
+    CpPhaseCopyDwords += count;
     MGLPPCFlushDataRange((APTR)destination, count * sizeof(ULONG));
     (void)destination[count - 1UL];
     FrontendPlatform.cpEntrySerial[ringSlot] = head;
@@ -5310,6 +5311,73 @@ void R200PPCDispatchSwitchDisplay(void)
         FrontendFirstPresentTick = PerfClock();
 #endif
     Lib_mglSwitchDisplay();
+#if MGLPPC_PROFILE && R200_PERF_AUTOREPORT
+    /* Profile builds: the frontend and CP-publish buckets per present,
+     * every 150 presents, appended to T:mglprof-live.log through
+     * dos.library. The teardown dumps need the client to destroy its
+     * context cleanly, and the DLL's stdout is NIL:, so this is the one
+     * report that reaches a file from any client. */
+    if (R200PPCContext) {
+        static struct PerfMetrics last;
+        static ULONG lastTick, presents;
+        const struct PerfMetrics *perf = &R200PPCContext->perf;
+        if (++presents >= 150UL) {
+            ULONG now = PerfClock(), us = PlatformClockRate / 1000000UL;
+            char line[400];
+            if (!us)
+                us = 1;
+#define LIVE_US(f) (unsigned long)((perf->f - last.f) / us / presents)
+#define LIVE_N(f) (unsigned long)((perf->f - last.f) / presents)
+            sprintf(line, "LIVE per present: wall=%lu us frontend=%lu serialize=%lu "
+                    "execute=%lu wait=%lu draw=%lu append=%lu capture=%lu pending=%lu fetch=%lu present=%lu | prims=%lu "
+                    "verts=%lu submits=%lu flushes=%lu states=%lu snapshots=%lu "
+                    "fast=%lu splits=%lu\n",
+                    (unsigned long)((now - lastTick) / us / presents),
+                    LIVE_US(frontendTicks), LIVE_US(serializeTicks),
+                    LIVE_US(executeTicks), LIVE_US(waitTicks), LIVE_US(drawTicks),
+                    LIVE_US(appendTicks), LIVE_US(matrixTicks), LIVE_US(indexScanTicks),
+                    LIVE_US(vertexFetchTicks), LIVE_US(presentTicks),
+                    LIVE_N(primitives), LIVE_N(inputVertices), LIVE_N(submits),
+                    LIVE_N(flushCalls), LIVE_N(stateCalls), LIVE_N(snapshotBuilds),
+                    LIVE_N(snapshotFastHits), LIVE_N(deferredSplits));
+#undef LIVE_US
+#undef LIVE_N
+            if (lastTick)
+                MGLPPCIBTrace("T:mglprof-live.log", line);
+            {
+                static ULONG lw, le, lr, lc, lp, ld, ln;
+                sprintf(line, "LIVE cp per present: wait=%lu us emit=%lu resolve=%lu copy=%lu "
+                        "publish=%lu | dwords=%lu publishes=%lu\n",
+                        (unsigned long)((CpPhaseWaitTicks - lw) / us / presents),
+                        (unsigned long)((CpPhaseEmitTicks - le) / us / presents),
+                        (unsigned long)((CpPhaseResolveTicks - lr) / us / presents),
+                        (unsigned long)((CpPhaseCopyTicks - lc) / us / presents),
+                        (unsigned long)((CpPhasePublishTicks - lp) / us / presents),
+                        (unsigned long)((CpPhaseCopyDwords - ld) / presents),
+                        (unsigned long)((CpPhasePublishes - ln) / presents));
+                lw = CpPhaseWaitTicks; le = CpPhaseEmitTicks; lr = CpPhaseResolveTicks;
+                lc = CpPhaseCopyTicks; lp = CpPhasePublishTicks; ld = CpPhaseCopyDwords;
+                ln = CpPhasePublishes;
+                if (lastTick)
+                    MGLPPCIBTrace("T:mglprof-live.log", line);
+            }
+            {
+                extern ULONG R200FlushSplit[8];
+                sprintf(line, "LIVE flush split (cumulative): rotate=%lu mode=%lu "
+                        "mismatch=%lu sbfull=%lu records=%lu generated=%lu draws=%lu\n",
+                        (unsigned long)R200FlushSplit[0], (unsigned long)R200FlushSplit[1],
+                        (unsigned long)R200FlushSplit[2], (unsigned long)R200FlushSplit[3],
+                        (unsigned long)R200FlushSplit[4], (unsigned long)R200FlushSplit[5],
+                        (unsigned long)R200FlushSplit[6]);
+                if (lastTick)
+                    MGLPPCIBTrace("T:mglprof-live.log", line);
+            }
+            last = *perf;
+            lastTick = PerfClock();
+            presents = 0;
+        }
+    }
+#endif
 #if MGLPPC_PROFILE && R200_PERF_AUTOREPORT
     /* Wall time the client spent outside the present path: gear() GL calls
      * plus any 68k transitions the example makes (FPS overlay). */

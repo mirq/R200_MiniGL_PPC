@@ -166,6 +166,17 @@ struct Radeon3DEmitter {
     struct Radeon3DEmitState *Live;
     struct Radeon3DEmitState *Build;
     BOOL StateValid;
+    /* Consumer extension (MiniGL, not driver ABI): the value each register
+     * was last given in this submission, so a full state re-emission skips
+     * the registers that did not change. An emulator changes blend or
+     * texture-combine state between most primitives, and each such change
+     * re-emitted the whole ~65-register block. Valid only within one
+     * submission (RegCacheGen moves on in Radeon3DEmitResetCaptures); a
+     * register's slot is (reg >> 2) & 127, a collision is only a miss. */
+    ULONG RegCacheGen;
+    ULONG RegCacheTag[128];
+    ULONG RegCacheKey[128];
+    ULONG RegCacheValue[128];
     /* The MVP matrix and guard-clip scalars are tracked separately from the
      * register block so a matrix-only change between records re-emits ~21
      * dwords instead of the whole TCL state. */
@@ -204,6 +215,12 @@ static inline void Radeon3DEmitResetCaptures(struct Radeon3DEmitter *emitter)
     emitter->Live = &emitter->Captures[0];
     emitter->Build = &emitter->Captures[1];
     emitter->StateValid = FALSE;
+    if (++emitter->RegCacheGen == 0) {
+        ULONG index;
+        for (index = 0; index < 128UL; ++index)
+            emitter->RegCacheTag[index] = 0;
+        emitter->RegCacheGen = 1;
+    }
 }
 
 BOOL Radeon3DEmitStream(struct Radeon3DEmitter *emitter,

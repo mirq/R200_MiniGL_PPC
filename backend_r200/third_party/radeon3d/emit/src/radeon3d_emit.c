@@ -275,8 +275,29 @@ static BOOL ExecuteEmitWord(struct Radeon3DEmitter *emitter,
 static BOOL ExecuteEmitRegister(struct Radeon3DEmitter *emitter,
                                 ULONG reg, ULONG value)
 {
-    return ExecuteEmitWord(emitter, RADEON_CP_PACKET0(reg, 0)) &&
-           ExecuteEmitWord(emitter, value);
+    ULONG slot = (reg >> 2) & 127UL;
+    /* Registers that act when written are always written: the host-path
+     * read-cache invalidate pair, the TCL state flush, and the vector and
+     * scalar index registers that address the data words following them. */
+    BOOL cached = reg != RADEON_HOST_PATH_CNTL &&
+                  reg != R200_SE_TCL_STATE_FLUSH &&
+                  reg != R200_SE_TCL_VECTOR_INDX_REG &&
+                  reg != R200_SE_TCL_SCALAR_INDX_REG;
+
+    if (cached && emitter->RegCacheGen &&
+        emitter->RegCacheTag[slot] == emitter->RegCacheGen &&
+        emitter->RegCacheKey[slot] == reg &&
+        emitter->RegCacheValue[slot] == value)
+        return TRUE;
+    if (!ExecuteEmitWord(emitter, RADEON_CP_PACKET0(reg, 0)) ||
+        !ExecuteEmitWord(emitter, value))
+        return FALSE;
+    if (cached) {
+        emitter->RegCacheTag[slot] = emitter->RegCacheGen;
+        emitter->RegCacheKey[slot] = reg;
+        emitter->RegCacheValue[slot] = value;
+    }
+    return TRUE;
 }
 
 static BOOL ExecuteEmitMatrix(struct Radeon3DEmitter *emitter,

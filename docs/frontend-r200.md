@@ -314,6 +314,19 @@ texture unit; mirroring unit 0 only let a unit-1 bind reuse a stale handle
 validated; FLIP has a documented race. Deep spec:
 [reference/CP_EMITTER.md](reference/CP_EMITTER.md).
 
+The emitter keeps the value each register was last given within the current
+submission (`RegCache*` in `struct Radeon3DEmitter`, reset by
+`Radeon3DEmitResetCaptures`). A state change that is not texture-only
+re-emits the register block, but only the registers whose value changed.
+Registers that act when written are always written: `HOST_PATH_CNTL` (the
+read-cache invalidate pair), `SE_TCL_STATE_FLUSH`, and the TCL vector and
+scalar index registers. A client that changes blend or texture-combine state
+between most primitives (WiiStation: 708 records per frame in a Silent Hill
+scene) re-emitted all ~65 registers per record before. Measured on the
+A4000/7410, same save state:
+- MiniGL time per frame: 12.2-12.8 ms -> 10.9 ms.
+- Frame rate: 29.9 -> 32.0 FPS.
+
 ### 10.1 PPC engine lease (opt-in, `MGLPPC_LEASE=1`)
 
 With the interface-20 lease the frontend writes CP batches straight into the

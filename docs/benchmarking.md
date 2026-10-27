@@ -172,7 +172,13 @@ profiler variants (diagnostics only — never production):
 - **PPC frontend**: `MGLPPC_PROFILE=1 make -f Makefile.dll.r200.gcc
   OBJDIR=obj/dll-r200-prof WARPELF=bin/minigl_ppc_r200_prof.warpelf`.
   On context destroy it writes buckets (control, texture, barrier, publish,
-  yield) to `DH2:mglprof/dll-profile.log`.
+  yield) to `DH2:mglprof/dll-profile.log`. With `MGLPPC_AUTOREPORT=1` as
+  well (own `OBJDIR`/`WARPELF`), every 150 presents it appends per-present
+  frontend buckets (frontend, serialize, execute, append, capture), CP-publish
+  phases (wait, emit, resolve, copy, dwords) and the flush-split counters
+  to `T:mglprof-live.log`. That works for any client; the teardown dumps
+  need a clean context destroy, and the DLL's stdout is `NIL:` unless
+  `MGLPPC_VERBOSE` is set.
 - **68k host**: `MGLPPC_PROFILE=1 R200_HOST=bin/minigl_ppc_host_prof
   make -f Makefile.dll.r200.gcc host`; at shutdown it prints session
   attribution (control/barrier/mailbox/ring ticks, uploads, `HOST_SUBIMAGE`
