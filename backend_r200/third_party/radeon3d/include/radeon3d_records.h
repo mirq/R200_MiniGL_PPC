@@ -191,7 +191,10 @@ typedef char Radeon3DStateBatchV1SizeCheck[
  * SCALE_2X). Set only by a frontend that emits its own command stream: an
  * older Radeon3D service rejects the bit. */
 #define RADEON3D_TEX_SCALE_2X        (1UL << 7)
-#define RADEON3D_TEX_STATE_MASK      0x00000fffUL
+/* GL_MGL_texture_env_alpha_scale: the modulated alpha x 2 (PP_TXABLEND2
+ * SCALE_2X), clamped to 1. Same rule as RADEON3D_TEX_SCALE_2X. */
+#define RADEON3D_TEX_ALPHA_SCALE_2X  (1UL << 12)
+#define RADEON3D_TEX_STATE_MASK      0x00001fffUL
 /* Bits 16-31 carry the client's texture content serial. It changes whenever
  * an in-place texel update reaches the surface, forcing the service to
  * re-emit the texture unit state (including PP_TXOFFSET) so the GPU's

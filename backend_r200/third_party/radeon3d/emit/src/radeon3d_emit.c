@@ -111,6 +111,14 @@ static BOOL TextureOnlyDelta(const struct Radeon3DEmitState *a,
              a->Texture1Bytes != b->Texture1Bytes;
     if (!*unit0 && !*unit1)
         return FALSE;
+    /* The combiner bits live in the full register block (PP_TXCBLEND*,
+     * PP_TXABLEND*), not in the texture atoms: a texture switch that also
+     * flips modulate or a scale is a full state change. */
+    if (((a->TextureState ^ b->TextureState) &
+         (RADEON3D_TEX_MODULATE | RADEON3D_TEX_SCALE_2X |
+          RADEON3D_TEX_ALPHA_SCALE_2X)) ||
+        ((a->Texture1State ^ b->Texture1State) & RADEON3D_TEX_MODULATE))
+        return FALSE;
     if (!(SurfaceSame(&a->Color, a->ColorValid, &b->Color, b->ColorValid) &&
           SurfaceSame(&a->Depth, a->DepthValid, &b->Depth, b->DepthValid) &&
            a->Options == b->Options && a->Left == b->Left &&
@@ -1097,7 +1105,11 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                                        : R200_TXA_ARG_C_DIFFUSE_ALPHA) ||
         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND2_0,
                               R200_TXA_CLAMP_0_1 |
-                                  R200_TXA_OUTPUT_REG_R0) ||
+                                  R200_TXA_OUTPUT_REG_R0 |
+                                  (textured && fragmentStatePresent &&
+                                           (textureState & RADEON3D_TEX_MODULATE) &&
+                                           (textureState & RADEON3D_TEX_ALPHA_SCALE_2X)
+                                       ? R200_TXA_SCALE_2X : 0UL)) ||
         (textured1 &&
          (!ExecuteEmitRegister(emitter, R200_PP_TXCBLEND_1,
                                 (texture1State & RADEON3D_TEX_MODULATE)
@@ -1772,10 +1784,32 @@ BOOL Radeon3DEmitClear(                             struct Radeon3DEmitter *emit
                                 0,
                                 R200_CP_VC_CNTL_PRIM_TYPE_TRI_LIST, NULL);
 }
+#if MGLPPC_PROFILE
+/* Profile builds: Radeon3DEmitDraw's time in validation+decode, state
+ * emission and vertex emission (timebase ticks), for the LIVE report. */
+ULONG R200EmitPhase[3];
+static __inline__ ULONG EmitTb(void) { ULONG t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
+#define EMIT_PHASE(i, start) (R200EmitPhase[i] += EmitTb() - (start))
+#endif
+
+static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
+                                 const ULONG *record, ULONG length,
+                                 ULONG primitiveType);
+
 BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitter,
                              const ULONG *record, ULONG length,
                              ULONG primitiveType)
 {
+    return Radeon3DEmitDrawBody(emitter, record, length, primitiveType);
+}
+
+static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
+                                 const ULONG *record, ULONG length,
+                                 ULONG primitiveType)
+{
+#if MGLPPC_PROFILE
+    ULONG phaseStart = EmitTb();
+#endif
     struct Radeon3DEmitSurface *color;
     struct Radeon3DEmitSurface *depth;
     struct Radeon3DEmitSurface *texture;
@@ -2212,6 +2246,10 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
         }
         return FALSE;
     }
+#if MGLPPC_PROFILE
+    EMIT_PHASE(0, phaseStart);
+    phaseStart = EmitTb();
+#endif
     if (textured && !fragmentStatePresent)
         textureBytes = (texture->Height - 1UL) * texture->Pitch +
                        texture->Width *
@@ -2352,12 +2390,27 @@ BOOL Radeon3DEmitDraw(                             struct Radeon3DEmitter *emitt
             emitter->FailStage = 23UL;
         return FALSE;
     }
+#if MGLPPC_PROFILE
+    EMIT_PHASE(1, phaseStart);
+    phaseStart = EmitTb();
+    {
+        BOOL ok = EmitExecuteVertices(emitter, vertices, vertexCount, useDepth,
+                                      textured, fragmentStatePresent,
+                                      extendedVertex, hardwareTcl,
+                                      normalVertex, compactVertex,
+                                      vertexState,
+                                      primitiveType, color);
+        EMIT_PHASE(2, phaseStart);
+        return ok;
+    }
+#else
     return EmitExecuteVertices(emitter, vertices, vertexCount, useDepth,
                                textured, fragmentStatePresent,
                                extendedVertex, hardwareTcl,
                                normalVertex, compactVertex,
                                vertexState,
                                primitiveType, color);
+#endif
 }
 BOOL Radeon3DEmitVbufDraw(                                struct Radeon3DEmitter *emitter,
                                 ULONG commitOffset, ULONG vertexCount,

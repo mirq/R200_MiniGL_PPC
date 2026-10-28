@@ -5355,6 +5355,18 @@ void R200PPCDispatchSwitchDisplay(void)
                         (unsigned long)((CpPhasePublishTicks - lp) / us / presents),
                         (unsigned long)((CpPhaseCopyDwords - ld) / presents),
                         (unsigned long)((CpPhasePublishes - ln) / presents));
+                {
+                    extern ULONG R200EmitPhase[3];
+                    static ULONG l0, l1, l2;
+                    char line2[160];
+                    sprintf(line2, "LIVE emit split per present: decode=%lu us state=%lu vertices=%lu\n",
+                            (unsigned long)((R200EmitPhase[0] - l0) / us / presents),
+                            (unsigned long)((R200EmitPhase[1] - l1) / us / presents),
+                            (unsigned long)((R200EmitPhase[2] - l2) / us / presents));
+                    l0 = R200EmitPhase[0]; l1 = R200EmitPhase[1]; l2 = R200EmitPhase[2];
+                    if (lastTick)
+                        MGLPPCIBTrace("T:mglprof-live.log", line2);
+                }
                 lw = CpPhaseWaitTicks; le = CpPhaseEmitTicks; lr = CpPhaseResolveTicks;
                 lc = CpPhaseCopyTicks; lp = CpPhasePublishTicks; ld = CpPhaseCopyDwords;
                 ln = CpPhasePublishes;

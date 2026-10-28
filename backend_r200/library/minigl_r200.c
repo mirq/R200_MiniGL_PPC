@@ -246,6 +246,7 @@ void InitializeFrontendContext(struct MiniGLR200Context *context)
     context->blendDestination = GL_ZERO;
     context->blendEquation = GL_FUNC_ADD;
     context->textureRgbScale[0] = context->textureRgbScale[1] = 1;
+    context->textureAlphaScale[0] = context->textureAlphaScale[1] = 1;
     context->alphaFunc = GL_ALWAYS;
     context->shadeModel = GL_SMOOTH;
     context->cullFaceMode = GL_BACK;
@@ -519,9 +520,11 @@ const GLubyte *Lib_glGetString(GLenum name)
         "GL_MGL_performance_counters"
     static const GLubyte extensions[] = R200_BASE_EXTENSIONS;
     /* With the frontend's own command stream: glBlendEquation's subtract
-     * modes and glTexEnv(GL_RGB_SCALE, 2) on a modulated unit 0. */
+     * modes and glTexEnv(GL_RGB_SCALE / GL_ALPHA_SCALE, 2) on a modulated
+     * unit 0. */
     static const GLubyte extensionsEmitting[] = R200_BASE_EXTENSIONS
-        " GL_EXT_blend_subtract GL_MGL_texture_env_rgb_scale";
+        " GL_EXT_blend_subtract GL_MGL_texture_env_rgb_scale"
+        " GL_MGL_texture_env_alpha_scale";
 #undef R200_BASE_EXTENSIONS
     switch (name) {
     case GL_VENDOR: return vendor;

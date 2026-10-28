@@ -256,6 +256,9 @@ ULONG TextureState(const struct MiniGLR200Context *context,
     if (unit == 0 && context->textureEnv[0] == GL_MODULATE &&
         context->textureRgbScale[0] == 2 && R200ExtendedFragmentState())
         state |= RADEON3D_TEX_SCALE_2X;
+    if (unit == 0 && context->textureEnv[0] == GL_MODULATE &&
+        context->textureAlphaScale[0] == 2 && R200ExtendedFragmentState())
+        state |= RADEON3D_TEX_ALPHA_SCALE_2X;
     if (texture->wrapS == GL_REPEAT)
         state |= RADEON3D_TEX_REPEAT_S;
     if (texture->wrapT == GL_REPEAT)
@@ -937,6 +940,19 @@ void Lib_glTexEnvi(GLenum target, GLenum pname, GLint value)
         }
         if (context->textureRgbScale[context->activeTexture] != value) {
             context->textureRgbScale[context->activeTexture]=value;
+            BumpSemanticStateSerial(context);
+        }
+        return;
+    }
+    /* GL_MGL_texture_env_alpha_scale: the same for the modulated alpha. */
+    if (target==GL_TEXTURE_ENV && pname==GL_ALPHA_SCALE &&
+        R200ExtendedFragmentState()) {
+        if (value!=1 && value!=2) {
+            SetError(context,GL_INVALID_VALUE);
+            return;
+        }
+        if (context->textureAlphaScale[context->activeTexture] != value) {
+            context->textureAlphaScale[context->activeTexture]=value;
             BumpSemanticStateSerial(context);
         }
         return;

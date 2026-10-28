@@ -462,6 +462,7 @@
 #define R200_TXA_ARG_B_R0_ALPHA             (10UL << 5)
 #define R200_TXA_ARG_C_R1_ALPHA             (12UL << 10)
 #define R200_TXC_SCALE_2X                   (1UL << 8)
+#define R200_TXA_SCALE_2X                   (1UL << 8)
 #define R200_TXC_CLAMP_0_1                  (1UL << 12)
 #define R200_TXA_CLAMP_0_1                  (1UL << 12)
 #define R200_TXC_OUTPUT_REG_R0              (1UL << 16)

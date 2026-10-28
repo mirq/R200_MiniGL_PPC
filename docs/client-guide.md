@@ -105,6 +105,7 @@ Rules:
 | `glMGLForceNewRenderPass` | no-op (no table slot since ABI 5) |
 | `glBlendEquation` (R200) | `GL_FUNC_ADD`; `GL_FUNC_SUBTRACT`/`GL_FUNC_REVERSE_SUBTRACT` when `GL_EXT_blend_subtract` is listed (CP emission active); otherwise, and `GL_MIN`/`GL_MAX` always, `GL_INVALID_OPERATION` |
 | `glTexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, 1\|2)` (R200) | when `GL_MGL_texture_env_rgb_scale` is listed: unit 0's modulated colour × 2 |
+| `glTexEnvi(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 1\|2)` (R200) | when `GL_MGL_texture_env_alpha_scale` is listed: unit 0's modulated alpha × 2, clamped to 1 |
 | `glTexGenfv` (R200) | `GL_INVALID_OPERATION`: object/eye-linear planes are not carried yet |
 | `mglCreateContextFromWindow`/`FromBitMap` (R200) | return `NULL`: needs protocol 17 (the mglQ3 DLL implements both) |
 | `glTexImage2D` inside a display list | executes immediately, also under `GL_COMPILE` |

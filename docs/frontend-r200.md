@@ -503,16 +503,26 @@ this OS build `UnSet` does not reliably remove a variable — use
   `GL_FUNC_SUBTRACT`/`GL_FUNC_REVERSE_SUBTRACT` work while the frontend
   emits its own command stream (`MGLPPC_CPEMIT=1` accepted by the driver),
   for colour and alpha alike, and `GL_MIN`/`GL_MAX` are refused.
-- Two extensions exist only while the frontend emits its own command stream
+- Three extensions exist only while the frontend emits its own command stream
   (`R200PPCPlatformCpEmitting()`), because they use state bits an older
   Radeon3D service in `Radeon9200.chip` rejects: `GL_EXT_blend_subtract`
   (fragment bits `RADEON3D_FRAGMENT_BLEND_RSUB`/`_SUB` → `RB3D_BLENDCNTL`
-  `COMB_FCN_RSUB_CLAMP`/`SUB_CLAMP`, as Mesa `r200_state.c`) and
+  `COMB_FCN_RSUB_CLAMP`/`SUB_CLAMP`, as Mesa `r200_state.c`),
   `GL_MGL_texture_env_rgb_scale` (`glTexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE,
   1|2)`; on a `GL_MODULATE` unit 0 texture-state bit `RADEON3D_TEX_SCALE_2X`
-  → `PP_TXCBLEND2_0` `TXC_SCALE_2X`, Mesa `r200_texstate.c`'s `RGBshift`).
+  → `PP_TXCBLEND2_0` `TXC_SCALE_2X`, Mesa `r200_texstate.c`'s `RGBshift`) and
+  `GL_MGL_texture_env_alpha_scale` (`GL_ALPHA_SCALE`, the same for the
+  modulated alpha: `RADEON3D_TEX_ALPHA_SCALE_2X` → `PP_TXABLEND2_0`
+  `TXA_SCALE_2X`, Mesa's `Ashift`; the result clamps to 1).
   `glGetString(GL_EXTENSIONS)` lists them only then; clients test the string.
-  Added for WiiStation's PSX renderer (texture × colour × 2, B − F blending).
+  Added for WiiStation's PSX renderer (texture × colour × 2, B − F blending;
+  with alpha × 2 a vertex alpha of 1 makes every texel opaque and 0.5 keeps
+  the texture's 0.5/1 alphas, so opaque and semi-transparent primitives share
+  one texture and one state).
+- A texture switch that also changes unit 0's modulate or scale bits (or
+  unit 1's modulate) is not a texture-only delta: those bits live in the
+  combiner registers of the full block, which the texture-only re-emit leaves
+  alone. Before 2026-10-28 such a switch kept the previous combiner.
 - The frontend exports `R200PPCSetError` and `R200PPCGetClientArray` for the
   backend-independent layer (display lists, GLU, GLUT; see
   [dispatch-abi.md](dispatch-abi.md#4-backend-independent-layer-ppc_common)).

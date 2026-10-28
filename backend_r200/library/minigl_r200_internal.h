@@ -755,6 +755,7 @@ struct MiniGLR200Context {
     GLfloat currentS[2], currentT[2];
     GLenum textureEnv[2];
     GLint textureRgbScale[2];    /* GL_RGB_SCALE: 1, or 2 (extension) */
+    GLint textureAlphaScale[2];  /* GL_ALPHA_SCALE: 1, or 2 (extension) */
     GLenum textureGenModeS[2], textureGenModeT[2];
     GLfloat normalMatrix[9];
     GLfloat combinedMatrix[16];
