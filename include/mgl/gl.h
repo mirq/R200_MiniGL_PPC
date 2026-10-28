@@ -432,6 +432,10 @@ typedef unsigned int    GLenum;
  * MGL_PERSPECTIVE_MAPPING). */
 #define MGL_FLATFAN                          0x7013
 #define MGL_FLATSTRIP                        0x7014
+/* GL_MGL_flat_triangles: screen-space triangles like MGL_FLATFAN's, as a
+ * list (every three vertices one triangle), so one glDrawArrays carries a
+ * whole run of separate primitives. */
+#define MGL_FLATTRIANGLES                    0x701E
 /* Lighting queries/capabilities the R200 frontend implements (OpenGL values). */
 #define GL_MAX_LIGHTS                        0x0D31
 #define GL_RESCALE_NORMAL                    0x803A

@@ -1655,6 +1655,13 @@ static BOOL EmitFlatPrimitive(struct MiniGLR200Context *context,
                                   &vertices[index + 1]))
                 return FALSE;
         }
+    } else if (primitive == MGL_FLATTRIANGLES) {
+        for (index = 0; index + 2 < count; index += 3) {
+            context->flatColor = vertices[index + 2].color;
+            if (!EmitFlatTriangle(context, &vertices[index],
+                                  &vertices[index + 1], &vertices[index + 2]))
+                return FALSE;
+        }
     } else {
         for (index = 0; index + 2 < count; ++index) {
             const struct Vertex *a = &vertices[index];
@@ -2151,7 +2158,8 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
 {
     ULONG index, batch;
 
-    if (primitive == MGL_FLATFAN || primitive == MGL_FLATSTRIP) {
+    if (primitive == MGL_FLATFAN || primitive == MGL_FLATSTRIP ||
+        primitive == MGL_FLATTRIANGLES) {
         context->screenHardwareTransform = FALSE;
         context->screenProjective = FALSE;
         return EmitFlatPrimitive(context, vertices, count, primitive);

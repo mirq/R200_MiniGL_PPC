@@ -239,6 +239,7 @@ typedef GLboolean (*MGLScreenModeCallback)(MGLScreenMode *);
  */
 #define MGL_FLATFAN 0x7013U
 #define MGL_FLATSTRIP 0x7014U
+#define MGL_FLATTRIANGLES 0x701EU
 #define MGL_W_ONE_HINT 0x7016U
 #define MGL_Z_OFFSET 0x7017U
 #define MGL_PERSPECTIVE_MAPPING 0x7015U

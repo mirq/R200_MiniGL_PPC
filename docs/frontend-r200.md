@@ -117,6 +117,14 @@ flowchart LR
   `COMMIT_DRAW_DWORDS` budgets the 4 extra CP dwords for every commit draw
   while indexed mode is on. Quake 3: vertex bytes per frame roughly halve
   (6.8M fetches for 13.8M indices), 49.8 -> 58.9 FPS.
+- Screen-space primitives (`MGL_FLATFAN`, `MGL_FLATSTRIP` and the list form
+  `MGL_FLATTRIANGLES`, extension `GL_MGL_flat_triangles`) skip the transform:
+  `EmitFlatPrimitive` checks each triangle (degenerate, wholly on screen,
+  else `ClipScreenPolygon`) and appends it to the screen buffer, which merges
+  consecutive draws of the same state into one record. The list form lets a
+  client hand over a run of separate primitives in one `glDrawArrays`
+  instead of a `glBegin`/`glEnd` pair and a dozen vertex calls each
+  (WiiStation: ~900 PSX primitives a frame).
 - `glInterleavedArrays` and the client array pointers feed the same machinery.
   `GLLockArrays`/`GLUnlockArrays` only record the locked range: every draw
   reads all attributes live from the client arrays. Clients (Quake's stage

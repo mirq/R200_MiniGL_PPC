@@ -289,7 +289,8 @@ BOOL ValidPrimitive(GLenum primitive)
            primitive == GL_QUAD_STRIP || primitive == GL_POLYGON ||
            primitive == GL_POINTS || primitive == GL_LINES ||
            primitive == GL_LINE_STRIP || primitive == GL_LINE_LOOP ||
-           primitive == MGL_FLATFAN || primitive == MGL_FLATSTRIP;
+           primitive == MGL_FLATFAN || primitive == MGL_FLATSTRIP ||
+           primitive == MGL_FLATTRIANGLES;
 }
 
 struct Radeon3DSurface *TargetSurface(
@@ -517,7 +518,7 @@ const GLubyte *Lib_glGetString(GLenum name)
      * (texture_format_probe multitexture section, hardware-verified). */
 #define R200_BASE_EXTENSIONS \
         "GL_ARB_multitexture GL_MGL_ARB_multitexture " \
-        "GL_MGL_performance_counters"
+        "GL_MGL_performance_counters GL_MGL_flat_triangles"
     static const GLubyte extensions[] = R200_BASE_EXTENSIONS;
     /* With the frontend's own command stream: glBlendEquation's subtract
      * modes and glTexEnv(GL_RGB_SCALE / GL_ALPHA_SCALE, 2) on a modulated
