@@ -6609,8 +6609,20 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
                 (LONG)(pool->slot[index].lastUse - control->head) > 0)
                 break;
         if (index < R200_POOL_SLOTS) {
+            ULONG head = control->head;
+
             if (!Submit(context))
                 return -1;
+            /* Nothing was pending (subimages of one texture back to back,
+             * no draw between -- WiiStation's texture cache does that):
+             * no unpublished entry names a slot, so their last use is the
+             * last published entry. Without this the loop submitted
+             * nothing forever. */
+            if (control->head == head)
+                for (index = 0; index < R200_POOL_SLOTS; ++index)
+                    if (index != pool->current &&
+                        (LONG)(pool->slot[index].lastUse - head) > 0)
+                        pool->slot[index].lastUse = head;
             continue;
         }
         if (spin && !(spin & (MGLPPC_RING_YIELD_SPINS - 1UL)))
