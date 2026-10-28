@@ -6450,6 +6450,10 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
 #define R200_POOL_MAX 64UL
 #define R200_POOL_HISTORY 8UL
 #define R200_POOL_NONE 0xffffffffUL
+/* Up to 1024 x 512 (2 MiB a slot): an atlas of 256 x 256 tiles is updated a
+ * tile at a time, and only the changed rectangle is copied. */
+#define R200_POOL_MAX_W 1024UL
+#define R200_POOL_MAX_H 512UL
 
 struct FrontendLmPoolSlot {
     ULONG token, cpu, lastUse, written;
@@ -6459,6 +6463,7 @@ static struct FrontendLmPool {
     ULONG width, height, epoch, serial, current;
     ULONG histSerial[R200_POOL_HISTORY];
     UWORD histTop[R200_POOL_HISTORY], histEnd[R200_POOL_HISTORY];
+    UWORD histLeft[R200_POOL_HISTORY], histRight[R200_POOL_HISTORY];
     struct FrontendLmPoolSlot slot[R200_POOL_SLOTS];
 } FrontendLmPools[R200_POOL_MAX];
 static ULONG FrontendLmPoolCount;
@@ -6537,12 +6542,14 @@ static struct FrontendLmPool *FrontendLmPoolCreate(
  * 0 when the caller should take the direct re-commit, -1 on failure. */
 static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
                                 struct TextureObject *texture, ULONG name,
+                                ULONG left, ULONG columns,
                                 ULONG top, ULONG rows)
 {
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
     struct FrontendLmPool *pool;
     UBYTE state = FrontendLmPoolState[name];
     ULONG index, pick, serial, first, end, pitch, spin = 0, generation;
+    ULONG x0, x1;
 
     if (state == 255U)
         return 0;
@@ -6584,6 +6591,8 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
     pool->histSerial[index] = serial;
     pool->histTop[index] = (UWORD)top;
     pool->histEnd[index] = (UWORD)(top + rows);
+    pool->histLeft[index] = (UWORD)left;
+    pool->histRight[index] = (UWORD)(left + columns);
     /* Never the current slot; among retired ones the least recently used. */
     for (;;) {
         ULONG retired;
@@ -6630,41 +6639,64 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
         if (control->error || ++spin > 5000000UL)
             return -1;
     }
-    /* Rows changed since this slot was last written. */
+    /* The rectangle changed since this slot was last written. */
     first = 0;
     end = pool->height;
+    x0 = 0;
+    x1 = pool->width;
     if (pool->slot[pick].written != R200_POOL_NONE &&
         serial - pool->slot[pick].written <= R200_POOL_HISTORY) {
         ULONG s;
 
         first = pool->height;
         end = 0;
+        x0 = pool->width;
+        x1 = 0;
         for (s = pool->slot[pick].written + 1UL; s <= serial; ++s) {
             index = s % R200_POOL_HISTORY;
             if (pool->histSerial[index] != s) {
                 first = 0;
                 end = pool->height;
+                x0 = 0;
+                x1 = pool->width;
                 break;
             }
             if (pool->histTop[index] < first)
                 first = pool->histTop[index];
             if (pool->histEnd[index] > end)
                 end = pool->histEnd[index];
+            if (pool->histLeft[index] < x0)
+                x0 = pool->histLeft[index];
+            if (pool->histRight[index] > x1)
+                x1 = pool->histRight[index];
         }
     }
+    if (x1 > pool->width)
+        x1 = pool->width;
+    if (end > pool->height)
+        end = pool->height;
     pitch = pool->width * 4UL;
-    if (end > first) {
+    if (end > first && x1 > x0) {
         /* The shadow is the surface's BGRA32 dword image (pitch == width*4
-         * was verified at creation): a straight dword copy. */
-        volatile ULONG *dst = (volatile ULONG *)(pool->slot[pick].cpu +
-                                                 first * pitch);
-        const ULONG *src = (const ULONG *)(texture->shadow + first * pitch);
-        ULONG count = (end - first) * pool->width;
+         * was verified at creation): dword copies, a row of the rectangle
+         * at a time. */
+        ULONG row;
 
-        while (count--)
-            *dst++ = *src++;
-        MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + first * pitch),
-                             (end - first) * pitch);
+        for (row = first; row < end; ++row) {
+            volatile ULONG *dst = (volatile ULONG *)(pool->slot[pick].cpu +
+                                                     row * pitch) + x0;
+            const ULONG *src = (const ULONG *)(texture->shadow + row * pitch) + x0;
+            ULONG count = x1 - x0;
+
+            while (count--)
+                *dst++ = *src++;
+            if (x1 - x0 < pool->width)
+                MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + row * pitch + x0 * 4UL),
+                                     (x1 - x0) * 4UL);
+        }
+        if (x1 - x0 == pool->width)
+            MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + first * pitch),
+                                 (end - first) * pitch);
     }
     pool->slot[pick].written = serial;
     pool->current = pick;
@@ -7954,8 +7986,9 @@ void R200PPCDispatchTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                             bpp, stride, xoffset, yoffset);
         if (park && !FrontendNoPool && PlatformMailboxReady() &&
             texture->width >= 16UL && texture->height >= 16UL &&
-            texture->width <= 256UL && texture->height <= 256UL) {
+            texture->width <= R200_POOL_MAX_W && texture->height <= R200_POOL_MAX_H) {
             int pooled = FrontendLmPoolUpdate(context, texture, name,
+                                              (ULONG)xoffset, (ULONG)width,
                                               (ULONG)yoffset, (ULONG)height);
 
             if (pooled < 0) {
