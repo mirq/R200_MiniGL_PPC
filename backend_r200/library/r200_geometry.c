@@ -1,4 +1,7 @@
 #include "minigl_r200_internal.h"
+#if R200_PPC_FRONTEND
+extern ULONG MGLPPCSerialStage, MGLPPCSerialStageTicks[2];
+#endif
 #include "r200_batch_budget.h"
 #include <math.h>
 #include "debug_output.h"
@@ -22,6 +25,13 @@ static __inline__ ULONG SwapSegmentWord(ULONG value)
     __asm__ __volatile__ ("ror.w #8,%0\n\tswap %0\n\tror.w #8,%0"
                           : "=d" (value) : "0" (value));
     return value;
+#elif defined(__GNUC__) && defined(__PPC__)
+    /* in registers: a swapped store would become stwbrx, which the VRAM
+     * aperture does not gather (~60 against ~42 ns a dword) */
+    ULONG r;
+    __asm__ ("rlwinm %0,%1,8,0,31\n\trlwimi %0,%1,24,0,7\n\trlwimi %0,%1,24,16,23"
+             : "=&r" (r) : "r" (value));
+    return r;
 #else
     return (value << 24) | ((value << 8) & 0x00ff0000UL) |
            ((value >> 8) & 0x0000ff00UL) | (value >> 24);
@@ -261,6 +271,31 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
     return TRUE;
 }
 
+/* The direct source's vertices into screenVertices, as DrawTrianglesTclFast's
+ * staging loop would have put them */
+static void MaterializeScreenExt(struct MiniGLR200Context *context)
+{
+    const UBYTE *p = context->screenExt;
+    ULONG n = context->screenVertexCount, k, stride = context->screenExtStride;
+    ULONG co = context->screenExtCol, to = context->screenExtTex;
+
+    for (k = 0; k < n; ++k, p += stride) {
+        const GLfloat *f = (const GLfloat *)p;
+        const UBYTE *c = p + co;
+        const GLfloat *st = (const GLfloat *)(p + to);
+        struct ScreenVertex *o = &context->screenVertices[k];
+        o->x = f[0];
+        o->y = f[1];
+        o->z = f[2];
+        o->rhw = 1.0f;
+        o->color = ((ULONG)c[3] << 24) | ((ULONG)c[0] << 16) |
+                   ((ULONG)c[1] << 8) | (ULONG)c[2];
+        o->s = st[0];
+        o->t = st[1];
+    }
+    context->screenExt = NULL;
+}
+
 BOOL FlushScreenVertices(struct MiniGLR200Context *context)
 {
     struct SubmitSlot *slot = BuildSubmitSlot(context);
@@ -342,6 +377,8 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         return FALSE;
     indexCount = context->screenIndexCount;
     context->screenIndexCount = 0;
+    if (context->screenExt && (indexCount || state->perspective))
+        MaterializeScreenExt(context);
 #if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
     /* Geometry being flushed is the last chance to install a deferred
      * direct-texture tile before the records naming the texture are
@@ -724,6 +761,17 @@ BOOL FlushScreenVertices(struct MiniGLR200Context *context)
         }
     }
 serialize_vertices:
+#if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
+    /* the direct kernels: x,y,[z],colour,s,t commit records only */
+    if (context->screenExt &&
+        !(hardwareTransform && useCommit && !state->normalVertex &&
+          (header[5] & RADEON3D_DRAW_NO_W) && state->textured[0] &&
+          !((header[5] & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL) &&
+          (vertexDwords == 5UL || vertexDwords == 6UL) &&
+          sizeof(struct ScreenVertex) == 13UL * sizeof(ULONG)))
+#endif
+    if (context->screenExt)
+        MaterializeScreenExt(context);
     serializeCount = context->screenVertexCount;
     if (indexCount) {
         if (useCommit && commitDraw != ~0UL) {
@@ -787,13 +835,51 @@ serialize_vertices:
             SwapTCL9(destination, serialSource, serialCount,
                      unit0Mask, unit1Mask);
         } else if (!state->normalVertex &&
+                   (header[5] & RADEON3D_DRAW_NO_W) &&
+                   sizeof(struct ScreenVertex) == 13UL * sizeof(ULONG)) {
+            /* x,y,[z],colour,[s,t] (RADEON3D_DRAW_NO_W/NO_Z): ScreenVertex
+             * dwords 0,1,2,7,8,9, swapped in registers and stored with plain
+             * stw (minigl_ppc_serial.s: a C __builtin_bswap32 store became
+             * stwbrx, which the aperture does not gather) */
+            BOOL z = !(header[5] & RADEON3D_DRAW_NO_Z);
+            BOOL st = state->textured[0];
+
+            context->perf.serializeKernelFlushes++;
+            context->perf.serializeKernelVertices += serialCount;
+            if (context->screenExt)
+                (z ? MGLPPCSwapTCL6X : MGLPPCSwapTCL5X)(destination, context->screenExt, serialCount,
+                    context->screenExtStride, context->screenExtCol, context->screenExtTex);
+            else if ((header[5] & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL)  /* the palette row after s,t */
+                (z ? MGLPPCSwapTCL7P : MGLPPCSwapTCL6P)(destination, serialSource, serialCount);
+            else if (z && st)
+                MGLPPCSwapTCL6(destination, serialSource, serialCount);
+            else if (st)
+                MGLPPCSwapTCL5(destination, serialSource, serialCount);
+            else if (z)
+                MGLPPCSwapTCL4(destination, serialSource, serialCount);
+            else
+                MGLPPCSwapTCL3(destination, serialSource, serialCount);
+        } else if (!state->normalVertex &&
                    vertexDwords == R200_TCL_VERTEX_COMPACT_DWORDS) {
             context->perf.serializeKernelFlushes++;
             context->perf.serializeKernelVertices += serialCount;
             if (vector)
                 MGLPPCSwapTCL7Vector(destination, serialSource, serialCount,
                                      unit0Mask);
-            else
+            else if (MGLPPCSerialStage && serialCount <= MAX_SCREEN_VERTICES) {
+                /* MGLPPC_SERIALSTAGE=1 (diagnosis): the kernel into RAM,
+                 * then a plain dword copy into the segment, timed apart. */
+                static ULONG stage[MAX_SCREEN_VERTICES * 7UL];
+                ULONG n = serialCount * 7UL, i, t0 = PerfClock(), t1;
+                volatile ULONG *out = (volatile ULONG *)destination;
+
+                MGLPPCSwapTCL7(stage, serialSource, serialCount, unit0Mask);
+                t1 = PerfClock();
+                for (i = 0; i < n; ++i)
+                    out[i] = stage[i];
+                MGLPPCSerialStageTicks[0] += t1 - t0;
+                MGLPPCSerialStageTicks[1] += PerfClock() - t1;
+            } else
                 MGLPPCSwapTCL7(destination, serialSource, serialCount,
                                unit0Mask);
         } else {
@@ -1026,6 +1112,23 @@ serialize_generic:
                                              : (ULONG)(expr)))
             STORE_DWORD(0, FloatBits(vertex->x));
             STORE_DWORD(1, FloatBits(vertex->y));
+            if (!state->normalVertex && (header[5] & RADEON3D_DRAW_NO_W)) {
+                /* x,y,[z],colour,[s,t] (RADEON3D_DRAW_NO_W/NO_Z) */
+                ULONG k = 2;
+                if (!(header[5] & RADEON3D_DRAW_NO_Z))
+                    STORE_DWORD(k++, FloatBits(vertex->z));
+                STORE_DWORD(k++, vertex->color);
+                if (state->textured[0]) {
+                    STORE_DWORD(k++, FloatBits(vertex->s));
+                    STORE_DWORD(k++, FloatBits(vertex->t));
+                    if ((header[5] & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL) {
+                        STORE_DWORD(k++, FloatBits(vertex->s1));
+                        STORE_DWORD(k++, FloatBits(vertex->t1));
+                    }
+                }
+                destination += vertexDwords;
+                continue;
+            }
             STORE_DWORD(2, FloatBits(vertex->z));
             STORE_DWORD(3, FloatBits(vertex->rhw));
             if (state->normalVertex) {
@@ -1118,7 +1221,21 @@ serialize_done:
             slot->indexOffsets[commitDraw] = indexOffset;
             segmentTail = (volatile ULONG *)(out - 1);
         }
+#if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
+        /* Not per draw: the publish flushes the segment range and reads back
+         * the ring entry it wrote last (PublishCpSlotBody), which drains
+         * these posted writes too, before the CP can fetch a vertex. A read
+         * here stalled every draw until the bus had taken its vertices
+         * (Silent Hill: ~580 draws a present, 7% of the PPC's time).
+         * MGLPPC_SEGREAD=1: read back per draw, as before. */
+        {
+            extern ULONG MGLPPCSegRead;
+            if (MGLPPCSegRead)
+                (void)*segmentTail;
+        }
+#else
         (void)*segmentTail;
+#endif
         slot->segmentCursor += vertexBytes;
         if (indexCount)
             slot->lastDrawValid = FALSE;
@@ -3236,6 +3353,266 @@ void Lib_glArrayElement(GLint index)
     context->vertices[context->vertexCount++] = vertex;
 }
 
+/*
+ * MGL_FLATTRIANGLES from the common array layout (aligned float positions,
+ * unsigned-byte RGBA or no colours, aligned float or no texture coordinates,
+ * no unit-1 coordinates, no normals, no fog, filled polygons): each corner
+ * goes from the client array straight into the screen staging buffer.
+ * EmitFlatTriangle's results for a wholly visible triangle, without the
+ * struct Vertex fetch, the two ScreenVertex copies and a PrepareScreenAppend
+ * per triangle (the state cannot change inside one draw). A triangle that
+ * crosses the drawable takes EmitFlatTriangle's clipper as before.
+ */
+static BOOL FlatArrayLayoutFast(const struct MiniGLR200Context *context)
+{
+    const struct ArrayState *array = &context->vertexArray;
+
+    return array->pointer && array->type == GL_FLOAT && array->size >= 3 &&
+           !(((ULONG)array->pointer | array->stride) & 3UL) &&
+           !(context->normalArray.enabled && context->normalArray.pointer) &&
+           (!context->colorArray.enabled || !context->colorArray.pointer ||
+            (context->colorArray.type == GL_UNSIGNED_BYTE &&
+             context->colorArray.size == 4)) &&
+           (!context->texcoordArray.enabled || !context->texcoordArray.pointer ||
+            (context->texcoordArray.type == GL_FLOAT &&
+             context->texcoordArray.size >= 2 &&
+             !(((ULONG)context->texcoordArray.pointer |
+                context->texcoordArray.stride) & 3UL))) &&
+           !(context->texcoord1Array.enabled && context->texcoord1Array.pointer) &&
+           !context->fogEnabled && context->polygonMode == GL_FILL;
+}
+
+static BOOL DrawFlatTrianglesFast(struct MiniGLR200Context *context,
+                                  ULONG first, ULONG count)
+{
+    /* The array layout, the culling setup and the drawable cannot change
+     * inside one draw: read them once, step the client pointers, and fill
+     * only the ScreenVertex fields this state serializes (no unit 1, no
+     * fog: FlushScreenVertices masks s1/t1/fog). The area is computed once
+     * for the degenerate test and the cull. Results as EmitFlatTriangle's
+     * for a wholly visible triangle; the rest goes through it as before. */
+    const UBYTE *pos = context->vertexArray.pointer +
+                       first * context->vertexArray.stride;
+    ULONG posStride = context->vertexArray.stride;
+    BOOL haveColor = context->colorArray.enabled && context->colorArray.pointer;
+    const UBYTE *col = haveColor ? context->colorArray.pointer +
+                                   first * context->colorArray.stride : NULL;
+    ULONG colStride = haveColor ? context->colorArray.stride : 0;
+    BOOL haveTex = context->texcoordArray.enabled && context->texcoordArray.pointer;
+    const UBYTE *tex = haveTex ? context->texcoordArray.pointer +
+                                 first * context->texcoordArray.stride : NULL;
+    ULONG texStride = haveTex ? context->texcoordArray.stride : 0;
+    ULONG constColor = context->currentColor;
+    GLfloat constS = context->currentS[0], constT = context->currentT[0];
+    GLfloat width = (GLfloat)context->width, height = (GLfloat)context->height;
+    GLfloat minArea = context->minTriArea;
+    BOOL cull = context->cullFaceEnabled != 0;
+    BOOL flat = context->shadeModel == GL_FLAT;
+    ULONG index;
+    BOOL prepared = FALSE;
+
+    context->screenHardwareTransform = FALSE;
+    context->screenProjective = FALSE;
+    for (index = 0; index + 2UL < count; index += 3UL,
+         pos += 3UL * posStride, col += 3UL * colStride, tex += 3UL * texStride) {
+        struct ScreenVertex *out;
+        GLfloat area;
+        ULONG k;
+        BOOL inside = TRUE;
+
+        if (context->screenVertexCount + 3UL > SCREEN_VERTEX_CAPACITY) {
+            if (!FlushScreenVertices(context))
+                return FALSE;
+            prepared = FALSE;
+        }
+        if (!prepared || !context->screenVertexCount) {
+            if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_TRIANGLES))
+                return FALSE;
+            prepared = TRUE;
+        }
+        out = &context->screenVertices[context->screenVertexCount];
+        for (k = 0; k < 3UL; ++k) {
+            const GLfloat *p = (const GLfloat *)(pos + k * posStride);
+            struct ScreenVertex *o = &out[k];
+            GLfloat x = p[0], y = p[1], z = p[2];
+
+            o->x = x;
+            o->y = y;
+            o->z = z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z;
+            o->rhw = 1.0f;
+            if (haveColor) {
+                const UBYTE *rgba = col + k * colStride;
+                o->color = ((ULONG)rgba[3] << 24) | ((ULONG)rgba[0] << 16) |
+                           ((ULONG)rgba[1] << 8) | (ULONG)rgba[2];
+            } else {
+                o->color = constColor;
+            }
+            if (haveTex) {
+                const GLfloat *st = (const GLfloat *)(tex + k * texStride);
+                o->s = st[0];
+                o->t = st[1];
+            } else {
+                o->s = constS;
+                o->t = constT;
+            }
+            if (!(x >= 0.0f && x <= width && y >= 0.0f && y <= height))
+                inside = FALSE;
+        }
+        area = (out[1].x - out[0].x) * (out[2].y - out[0].y) -
+               (out[2].x - out[0].x) * (out[1].y - out[0].y);
+        if (area == 0.0f) {
+            if (context->perfEnabled)
+                context->perf.dropFlatDegenerate++;
+            continue;
+        }
+        if (!inside) {
+            struct Vertex corner[3];
+
+            for (k = 0; k < 3UL; ++k)
+                if (!FetchDrawVertex(context, first + index + k, &corner[k]))
+                    return FALSE;
+            context->flatColor = corner[2].color;
+            if (!EmitFlatTriangle(context, &corner[0], &corner[1], &corner[2]))
+                return FALSE;
+            prepared = FALSE;
+            continue;
+        }
+        if (minArea > 0.0f && (area < 0.0f ? -area : area) < minArea)
+            continue;
+        if (cull && CullScreenTriangle(context, &out[0], &out[1], &out[2]))
+            continue;
+        if (flat)
+            out[0].color = out[1].color = out[2].color;
+        context->screenVertexCount += 3UL;
+    }
+    return TRUE;
+}
+
+/*
+ * GL_TRIANGLES for hardware TCL from the same array layout, without
+ * lighting or sphere maps: each corner goes from the client arrays straight
+ * into the screen staging buffer, as FetchArrayVertex + CopyHardwareVertex
+ * would put it (EmitHardwareBatch's batches of MAX_SCREEN_VERTICES and
+ * appends), with no struct Vertex in between. Unit 1 and fog are off in
+ * this layout, so FlushScreenVertices masks s1/t1/fog. WiiStation's
+ * transformed path: ~4.7k vertices a frame in a Tekken 3 fight.
+ */
+#if R200_PPC_FRONTEND
+extern ULONG MGLPPCTclFastOff;     /* MGLPPC_NOTCLFAST=1 */
+#define TclFastOff MGLPPCTclFastOff
+#else
+#define TclFastOff 0
+#endif
+static BOOL DrawTrianglesTclFast(struct MiniGLR200Context *context,
+                                 ULONG first, ULONG count)
+{
+    const UBYTE *pos = context->vertexArray.pointer +
+                       first * context->vertexArray.stride;
+    ULONG posStride = context->vertexArray.stride;
+    BOOL haveW = context->vertexArray.size > 3;
+    BOOL haveColor = context->colorArray.enabled && context->colorArray.pointer;
+    const UBYTE *col = haveColor ? context->colorArray.pointer +
+                                   first * context->colorArray.stride : NULL;
+    ULONG colStride = haveColor ? context->colorArray.stride : 0;
+    BOOL haveTex = context->texcoordArray.enabled && context->texcoordArray.pointer;
+    const UBYTE *tex = haveTex ? context->texcoordArray.pointer +
+                                 first * context->texcoordArray.stride : NULL;
+    ULONG texStride = haveTex ? context->texcoordArray.stride : 0;
+    ULONG constColor = context->currentColor;
+    GLfloat constS = context->currentS[0], constT = context->currentT[0];
+    BOOL palRow = haveTex && context->paletteLookup &&
+                  context->texcoordArray.size >= 3;
+    ULONG index, batch, k;
+#if R200_PPC_FRONTEND && defined(__PPC__) && !defined(__m68k__)
+    /* One interleaved array (WiiStation's): the flush serializes each batch
+     * straight from it (MGLPPCSwapTCL5X/6X), with no staging copy, so the
+     * batch is flushed before the call returns and the client may reuse
+     * its array. MGLPPC_NODIRECTTCL=1: staged as before. */
+    extern ULONG MGLPPCDirectTcl;
+    BOOL direct = MGLPPCDirectTcl && haveColor && haveTex && !haveW && !palRow &&
+                  colStride == posStride && texStride == posStride &&
+                  col >= pos && (ULONG)(col - pos) + 4UL <= posStride &&
+                  tex >= pos && (ULONG)(tex - pos) + 8UL <= posStride &&
+                  posStride >= 12UL && !(((ULONG)(col - pos) | (ULONG)(tex - pos)) & 3UL);
+#else
+    BOOL direct = FALSE;
+#endif
+
+    count -= count % 3UL;
+    for (index = 0; index < count; index += batch) {
+        batch = count - index;
+        if (batch > MAX_SCREEN_VERTICES) batch = MAX_SCREEN_VERTICES;
+        batch -= batch % 3UL;
+        if (direct) {
+            BOOL ok;
+            if (context->screenVertexCount && !FlushScreenVertices(context))
+                return FALSE;
+            context->screenHardwareTransform = TRUE;
+            context->screenProjective = FALSE;
+            if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_TRIANGLES)) {
+                context->screenHardwareTransform = FALSE;
+                return FALSE;
+            }
+            if (context->screenVertexCount && !FlushScreenVertices(context))
+                return FALSE;
+            context->screenExt = pos;
+            context->screenExtStride = posStride;
+            context->screenExtCol = (ULONG)(col - pos);
+            context->screenExtTex = (ULONG)(tex - pos);
+            context->screenVertexCount = batch;
+            ok = FlushScreenVertices(context);
+            context->screenExt = NULL;
+            context->screenVertexCount = 0;
+            context->screenHardwareTransform = FALSE;
+            if (!ok)
+                return FALSE;
+            pos += batch * posStride;
+            col += batch * colStride;
+            tex += batch * texStride;
+            continue;
+        }
+        if (context->screenVertexCount + batch > MAX_SCREEN_VERTICES &&
+            !FlushScreenVertices(context))
+            return FALSE;
+        context->screenHardwareTransform = TRUE;
+        context->screenProjective = FALSE;
+        if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_TRIANGLES)) {
+            context->screenHardwareTransform = FALSE;
+            return FALSE;
+        }
+        for (k = 0; k < batch; ++k, pos += posStride, col += colStride,
+             tex += texStride) {
+            const GLfloat *p = (const GLfloat *)pos;
+            struct ScreenVertex *o =
+                &context->screenVertices[context->screenVertexCount++];
+
+            o->x = p[0];
+            o->y = p[1];
+            o->z = p[2];
+            o->rhw = haveW ? p[3] : 1.0f;
+            if (haveColor)
+                o->color = ((ULONG)col[3] << 24) | ((ULONG)col[0] << 16) |
+                           ((ULONG)col[1] << 8) | (ULONG)col[2];
+            else
+                o->color = constColor;
+            if (haveTex) {
+                const GLfloat *st = (const GLfloat *)tex;
+                o->s = st[0];
+                o->t = st[1];
+                if (palRow) {           /* MGL_PALETTE_LOOKUP: the row */
+                    o->s1 = st[2];
+                    o->t1 = 0.0f;
+                }
+            } else {
+                o->s = constS;
+                o->t = constT;
+            }
+        }
+        context->screenHardwareTransform = FALSE;
+    }
+    return TRUE;
+}
+
 void Lib_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
     struct MiniGLR200Context *context = CurrentContext();
@@ -3245,6 +3622,52 @@ void Lib_glDrawArrays(GLenum mode, GLint first, GLsizei count)
     if (!count) return;
     if ((ULONG)count > MAX_VERTICES || !context->vertexArray.enabled) {
         SetError(context, GL_INVALID_OPERATION); return;
+    }
+    if (mode == GL_TRIANGLES && FlatArrayLayoutFast(context) &&
+        !context->lightingEnabled && !HardwareSphereMapMask(context) &&
+        !SoftwareSphereMapMask(context, 0) && !TclFastOff) {
+        ULONG start = 0, executeBefore = 0, waitBefore = 0;
+        BOOL ok;
+
+        if (context->perfEnabled) {
+            context->perf.primitives++;
+            context->perf.inputVertices += (ULONG)count;
+            executeBefore = context->perf.executeTicks;
+            waitBefore = context->perf.waitTicks;
+            start = PerfClock();
+        }
+        ok = DrawTrianglesTclFast(context, (ULONG)first, (ULONG)count);
+        if (context->perfEnabled) {
+            ULONG elapsed = PerfClock() - start;
+            ULONG nested = (context->perf.executeTicks - executeBefore) +
+                           (context->perf.waitTicks - waitBefore);
+            context->perf.frontendTicks += elapsed >= nested ? elapsed - nested : 0;
+        }
+        if (!ok)
+            SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+    if (mode == MGL_FLATTRIANGLES && FlatArrayLayoutFast(context)) {
+        ULONG start = 0, executeBefore = 0, waitBefore = 0;
+        BOOL ok;
+
+        if (context->perfEnabled) {
+            context->perf.primitives++;
+            context->perf.inputVertices += (ULONG)count;
+            executeBefore = context->perf.executeTicks;
+            waitBefore = context->perf.waitTicks;
+            start = PerfClock();
+        }
+        ok = DrawFlatTrianglesFast(context, (ULONG)first, (ULONG)count);
+        if (context->perfEnabled) {
+            ULONG elapsed = PerfClock() - start;
+            ULONG nested = (context->perf.executeTicks - executeBefore) +
+                           (context->perf.waitTicks - waitBefore);
+            context->perf.frontendTicks += elapsed >= nested ? elapsed - nested : 0;
+        }
+        if (!ok)
+            SetError(context, GL_INVALID_OPERATION);
+        return;
     }
     for (index=0; index<(ULONG)count; ++index)
         if (!FetchDrawVertex(context, (ULONG)first+index,

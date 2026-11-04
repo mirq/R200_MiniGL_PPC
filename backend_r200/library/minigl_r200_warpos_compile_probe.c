@@ -304,6 +304,30 @@ static ULONG FrontendConsoleVerbose;
 static ULONG FrontendNoPark;
 /* MGLPPC_NOPOOL=1: no PPC-owned lightmap surface pools (A/B). */
 static ULONG FrontendNoPool;
+/* MGLPPC_NOINPLACE=1: GL_MGL_unsync_subimage updates take a spare slot. */
+static ULONG FrontendNoInPlace;
+/* MGLPPC_NOTCLFAST=1: GL_TRIANGLES arrays through FetchDrawVertex (r200_geometry.c). */
+ULONG MGLPPCTclFastOff;
+ULONG MGLPPCDirectTcl = 1;      /* MGLPPC_NODIRECTTCL=1: 0 */
+ULONG MGLPPCSegRead;            /* MGLPPC_SEGREAD=1 */
+ULONG MGLPPCStateMemo = 1;     /* MGLPPC_NOSTATEMEMO=1: 0 (radeon3d_emit.c) */
+/* MGLPPC_NOTCL7=1: unlit TCL vertices keep the 10-dword stride (r200_state.c). */
+ULONG MGLPPCNoTcl7;
+ULONG MGLPPCTcl6;
+ULONG MGLPPCTcl5;
+/* MGLPPC_PALVAR (palette lookup tests): 0 the row as unit 1's s1,t1 through
+ * unit 2's pass-through, 1 s1,t1 in the vertex but the row from the vertex
+ * alpha, 2 no s1,t1 and the row from the vertex alpha */
+ULONG MGLPPCPalVar;
+/* MGLPPC_SERIALSTAGE=1: TCL7 serialize through RAM, split timing (diagnosis). */
+ULONG MGLPPCSerialStage, MGLPPCSerialStageTicks[2];
+/* MGLPPC_POOLSYNCROW=1: a sync after every row of a pool copy, as before. */
+static ULONG FrontendPoolSyncRow;
+/* MGLPPC_POOLNOFLUSH=1 (diagnosis): no dcbf after the rows of a pool copy. */
+static ULONG FrontendPoolNoFlush;
+
+/* MGLPPC_POOLSLOTS=n (2-8): holder surfaces a pool gets (default 3). */
+static ULONG FrontendPoolSlots = 3UL;
 ULONG MGLPPCClearBlend;
 static void FrontendLmPoolReset(void);
 
@@ -2332,6 +2356,112 @@ BOOL R200PPCPlatformCpEmitting(void)
     return FrontendPlatform.cpEnabled && !FrontendPlatform.cpFailed;
 }
 
+/* MiniGL's 68k host (minigl_ppc_host) serves one client session and ends
+ * with it. When its port is missing at open, the library starts one: its
+ * own process from its segment (no shell in between: a host started
+ * through Run served the ring slower, Tekken 3 fights 47 -> 44 fps), at
+ * priority -1 (1 starved the rest of the system). It is looked for as
+ * $MGLPPC_HOST (a full path), PROGDIR:minigl_ppc_host and
+ * LIBS:minigl_ppc_host. SetEnv MGLPPC_NOHOSTSTART 1: never start one
+ * (a host the user starts is used as it is). */
+#include <dos/dostags.h>
+static BOOL R200PPCHostPortUp(void)
+{
+    struct MsgPort *port;
+
+    Forbid();
+    port = FindPort((CONST_STRPTR)MGLPPC_HOST_PORT_NAME);
+    Permit();
+    return port != NULL;
+}
+
+static void R200PPCHostEnsure(void)
+{
+    static const char *const fallback[] = {
+        "PROGDIR:minigl_ppc_host", "LIBS:minigl_ppc_host"
+    };
+    UBYTE value[8];
+    char path[256];
+    BPTR seg = 0, file, home = 0, in, out;
+    struct TagItem tags[11];
+    struct Process *process;
+    LONG wait = 500;
+    ULONG i;
+
+    if (R200PPCHostPortUp())
+        return;
+    value[0] = 0;
+    if (GetVar((CONST_STRPTR)"MGLPPC_NOHOSTSTART", value, (LONG)sizeof(value),
+               GVF_GLOBAL_ONLY) > 0 && value[0] == '1')
+        return;
+    path[0] = 0;
+    if (GetVar((CONST_STRPTR)"MGLPPC_HOST", (STRPTR)path, (LONG)sizeof(path),
+               GVF_GLOBAL_ONLY) <= 0 || !path[0] ||
+        !(file = Lock((CONST_STRPTR)path, ACCESS_READ))) {
+        file = 0;
+        for (i = 0; i < sizeof(fallback) / sizeof(fallback[0]) && !file; ++i) {
+            strcpy(path, fallback[i]);
+            file = Lock((CONST_STRPTR)path, ACCESS_READ);
+        }
+    }
+    if (!file) {
+        printf("MiniGL: no minigl_ppc_host to start (PROGDIR:, LIBS:, $MGLPPC_HOST)\n");
+        return;
+    }
+    /* The host's home directory is its own: without one, a DLL it cannot
+     * load sends it to an "insert volume PROGDIR" requester. */
+    home = ParentDir(file);
+    UnLock(file);
+    seg = LoadSeg((CONST_STRPTR)path);
+    in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
+    out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+    if (!seg || !in || !out)
+        goto fail;
+    tags[0].ti_Tag = NP_Seglist;     tags[0].ti_Data = (ULONG)seg;
+    tags[1].ti_Tag = NP_FreeSeglist; tags[1].ti_Data = TRUE;
+    tags[2].ti_Tag = NP_Name;        tags[2].ti_Data = (ULONG)"minigl_ppc_host";
+    tags[3].ti_Tag = NP_StackSize;   tags[3].ti_Data = 65536;
+    tags[4].ti_Tag = NP_Priority;    tags[4].ti_Data = (ULONG)-1;
+    tags[5].ti_Tag = NP_Input;       tags[5].ti_Data = (ULONG)in;
+    tags[6].ti_Tag = NP_Output;      tags[6].ti_Data = (ULONG)out;
+    tags[7].ti_Tag = NP_Cli;         tags[7].ti_Data = TRUE;
+    tags[8].ti_Tag = NP_CloseInput;  tags[8].ti_Data = TRUE;
+    tags[9].ti_Tag = home ? NP_HomeDir : TAG_IGNORE;
+    tags[9].ti_Data = (ULONG)home;
+    tags[10].ti_Tag = TAG_END;       tags[10].ti_Data = 0;
+    process = CreateNewProc(tags);
+    if (!process)
+        goto fail;
+    /* the process owns seg, in, out and home now */
+    for (i = 0; i < 200UL && !R200PPCHostPortUp(); ++i)
+        Delay(5);
+    if (!R200PPCHostPortUp()) {
+        printf("MiniGL: started %s, but its port did not appear in 20 s\n", path);
+        return;
+    }
+    /* the host's own setup after its port; SetEnv MGLPPC_HOSTWAIT ms */
+    value[0] = 0;
+    if (GetVar((CONST_STRPTR)"MGLPPC_HOSTWAIT", value, (LONG)sizeof(value),
+               GVF_GLOBAL_ONLY) > 0) {
+        wait = 0;
+        for (i = 0; value[i] >= '0' && value[i] <= '9'; ++i)
+            wait = wait * 10 + (value[i] - '0');
+    }
+    if (wait > 0)
+        Delay((wait + 19) / 20);
+    return;
+fail:
+    printf("MiniGL: could not start %s\n", path);
+    if (seg)
+        UnLoadSeg(seg);
+    if (in)
+        Close(in);
+    if (out)
+        Close(out);
+    if (home)
+        UnLock(home);
+}
+
 BOOL R200PPCPlatformOpen(void)
 {
     if (FrontendPlatform.opened)
@@ -2376,6 +2506,59 @@ BOOL R200PPCPlatformOpen(void)
                GVF_GLOBAL_ONLY);
         FrontendNoPool = verbose[0] == '1' ? 1UL : 0UL;
         verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NOINPLACE", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        FrontendNoInPlace = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NOTCLFAST", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCTclFastOff = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NODIRECTTCL", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCDirectTcl = verbose[0] == '1' ? 0UL : 1UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_SEGREAD", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCSegRead = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NOSTATEMEMO", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCStateMemo = verbose[0] == '1' ? 0UL : 1UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_NOTCL7", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCNoTcl7 = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_TCL6", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCTcl6 = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_TCL5", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCTcl5 = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_PALVAR", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCPalVar = (verbose[0] >= '0' && verbose[0] <= '2') ? (ULONG)(verbose[0] - '0') : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_SERIALSTAGE", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        MGLPPCSerialStage = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_POOLSYNCROW", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        FrontendPoolSyncRow = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_POOLNOFLUSH", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        FrontendPoolNoFlush = verbose[0] == '1' ? 1UL : 0UL;
+        verbose[0] = 0;
+        GetVar((CONST_STRPTR)"MGLPPC_POOLSLOTS", verbose, (LONG)sizeof(verbose),
+               GVF_GLOBAL_ONLY);
+        if (verbose[0] >= '2' && verbose[0] <= '8' && !verbose[1])
+            FrontendPoolSlots = (ULONG)(verbose[0] - '0');
+        verbose[0] = 0;
         GetVar((CONST_STRPTR)"MGLPPC_FORCEMIP", verbose, (LONG)sizeof(verbose),
                GVF_GLOBAL_ONLY);
         {
@@ -2410,6 +2593,7 @@ BOOL R200PPCPlatformOpen(void)
                GVF_GLOBAL_ONLY);
         FrontendPlatform.batchDisabled = nobatch[0] == '1' ? 0 : 1;
     }
+    R200PPCHostEnsure();
     if (!MGLPPCTransportOpen(&FrontendPlatform.transport))
         return FALSE;
     memset(&FrontendPlatform.control, 0, sizeof(FrontendPlatform.control));
@@ -3418,6 +3602,8 @@ static BOOL PublishCpSlotBody(struct MiniGLR200Context *context, struct SubmitSl
     destination = (volatile ULONG *)((UBYTE *)FrontendPlatform.cpAddress +
                                      cpOffset);
     copyStart = PerfClock();
+    /* A plain dword loop: dcbz (and stswi) into this copyback aperture
+     * hang the machine, so the stores keep their line fills. */
     for (index = 0; index < count; ++index)
         destination[index] = __builtin_bswap32(staging[index]);
     CpPhaseCopyDwords += count;
@@ -5254,6 +5440,17 @@ static ULONG R200PPCOutsideTicks;
  * diagnostic in R200PPCDispatchSwitchDisplay. */
 void R200PPCDispatchWriteShotPPM(char *filename);
 
+#if MGLPPC_PROFILE
+/* Profile builds: pool updates, the time waiting for a retired slot (and
+ * the submits that wait forced), and the copy, for the LIVE report. */
+static ULONG PoolProfUpdates, PoolProfWaitTicks, PoolProfSubmits, PoolProfCopyTicks;
+/* GL_MGL_unsync_subimage: picks that needed no retirement, updates with a
+ * client point, summed head-retired and point-retired distances. */
+static ULONG PoolProfUnsyncPicks, PoolProfHinted, PoolProfLagSum, PoolProfPointLagSum;
+static ULONG PoolProfInPlace, PoolProfBytes, PoolProfRows, PoolProfFull, PoolProfDrains;
+static ULONG PoolProfFlushTicks;
+#endif
+
 void R200PPCDispatchSwitchDisplay(void)
 {
     /* MGLPPC_SHOT_EVERY diagnostic (default OFF, benchmark-safe): dump
@@ -5344,6 +5541,44 @@ void R200PPCDispatchSwitchDisplay(void)
 #undef LIVE_N
             if (lastTick)
                 MGLPPCIBTrace("T:mglprof-live.log", line);
+            {
+                static ULONG lu, lwt, ls, lct, lft;
+                static ULONG lup, lh, llag, lplag, lip, lby, lro, lfu, ldr;
+                ULONG nu = PoolProfUpdates - lu;
+                sprintf(line, "LIVE pool per present: updates=%lu (in place %lu, hinted %lu, unsynced picks %lu; "
+                        "head-retired %lu, point-retired %ld) flush=%lu us wait=%lu us "
+                        "(forced submits %lu) copy=%lu us bytes=%lu rows=%lu full copies=%lu drains=%lu\n",
+                        (unsigned long)(nu / presents),
+                        (unsigned long)((PoolProfInPlace - lip) / presents),
+                        (unsigned long)((PoolProfHinted - lh) / presents),
+                        (unsigned long)((PoolProfUnsyncPicks - lup) / presents),
+                        (unsigned long)(nu ? (PoolProfLagSum - llag) / nu : 0),
+                        (long)(PoolProfHinted - lh ? (LONG)(PoolProfPointLagSum - lplag) / (LONG)(PoolProfHinted - lh) : 0),
+                        (unsigned long)((PoolProfFlushTicks - lft) / us / presents),
+                        (unsigned long)((PoolProfWaitTicks - lwt) / us / presents),
+                        (unsigned long)((PoolProfSubmits - ls) / presents),
+                        (unsigned long)((PoolProfCopyTicks - lct) / us / presents),
+                        (unsigned long)((PoolProfBytes - lby) / presents),
+                        (unsigned long)((PoolProfRows - lro) / presents),
+                        (unsigned long)(PoolProfFull - lfu),
+                        (unsigned long)(PoolProfDrains - ldr));
+                lu = PoolProfUpdates; lwt = PoolProfWaitTicks; ls = PoolProfSubmits;
+                lup = PoolProfUnsyncPicks; lh = PoolProfHinted; llag = PoolProfLagSum;
+                lplag = PoolProfPointLagSum; lip = PoolProfInPlace;
+                lby = PoolProfBytes; lro = PoolProfRows; lfu = PoolProfFull; ldr = PoolProfDrains;
+                lct = PoolProfCopyTicks; lft = PoolProfFlushTicks;
+                if (lastTick)
+                    MGLPPCIBTrace("T:mglprof-live.log", line);
+                {
+                    static ULONG ls0, ls1;
+                    sprintf(line, "LIVE serial stage per present: kernel to RAM=%lu us, RAM to segment=%lu us\n",
+                            (unsigned long)((MGLPPCSerialStageTicks[0] - ls0) / us / presents),
+                            (unsigned long)((MGLPPCSerialStageTicks[1] - ls1) / us / presents));
+                    ls0 = MGLPPCSerialStageTicks[0]; ls1 = MGLPPCSerialStageTicks[1];
+                    if (lastTick && MGLPPCSerialStage)
+                        MGLPPCIBTrace("T:mglprof-live.log", line);
+                }
+            }
             {
                 static ULONG lw, le, lr, lc, lp, ld, ln;
                 sprintf(line, "LIVE cp per present: wait=%lu us emit=%lu resolve=%lu copy=%lu "
@@ -6130,6 +6365,10 @@ static void FrontendStageTextureBGRA(UBYTE *destination,
  * of a full Quake map (35 x 64 KiB) and the 256x256 RGBA texture pages
  * an emulator such as WiiStation keeps updating (128 x 256 KiB). */
 #define R200_SHADOW_TOTAL_MAX (32UL * 1024UL * 1024UL)
+/* Direct uploads and their shadows: the PPC writes the surface through the
+ * aperture, so no 2 MiB shared staging buffer limits them. 2048 x 512 BGRA
+ * (WiiStation's 16-cell texture atlas) is 4 MiB. */
+#define R200_DIRECT_MAX_BYTES (4UL * 1024UL * 1024UL)
 
 static void FrontendShadowFree(struct TextureObject *texture)
 {
@@ -6154,7 +6393,7 @@ static BOOL FrontendShadowEnsure(struct MiniGLR200Context *context,
         texture->shadowHeight == height)
         return TRUE;
     FrontendShadowFree(texture);
-    if (bytes > MGLPPC_TEXTURE_SHARED_MAX_BYTES ||
+    if (bytes > R200_DIRECT_MAX_BYTES ||
         FrontendPlatform.shadowBytesTotal + bytes > R200_SHADOW_TOTAL_MAX)
         return FALSE;
     shadow = AllocVec(bytes, MEMF_PUBLIC | MEMF_CLEAR);
@@ -6448,7 +6687,7 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
 
 /* PPC-owned lightmap surface pools. A texture that keeps receiving
  * subimages (Quake's lightmap atlases, several per frame with dynamic
- * lights) gets R200_POOL_SLOTS library-owned holder surfaces, created once
+ * lights) gets MGLPPC_POOLSLOTS (default 3) library-owned holder surfaces, created once
  * through the direct BEGIN/COMMIT path under reserved texture names. An
  * update then needs no 68k at all: patch the shadow, publish the records
  * that still name the current slot (its last use is the ring head), pick
@@ -6458,13 +6697,17 @@ static BOOL FrontendDirectTextureUpload(struct MiniGLR200Context *context,
  * slot is rewritten only after its last sampling retired and never while
  * it is the current one; the reuse distance (two other slots in between)
  * is what the free/re-import path already relied on. */
-#define R200_POOL_SLOTS 3UL
+#define R200_POOL_SLOTS_MAX 8UL
 #define R200_POOL_MAX 64UL
-#define R200_POOL_HISTORY 8UL
+/* Uploads remembered per pool: a slot left a few frames while the current
+ * one takes subimages in place (WiiStation: 1-2 a frame) needs all of them,
+ * and at 8 the rotation fell back to copying the whole image (2 MiB of a
+ * 2048 x 512 atlas, ~22 ms over the aperture: Tekken 3 frames of 30-60 ms). */
+#define R200_POOL_HISTORY 128UL
 #define R200_POOL_NONE 0xffffffffUL
-/* Up to 1024 x 512 (2 MiB a slot): an atlas of 256 x 256 tiles is updated a
+/* Up to 2048 x 512 (4 MiB a slot): an atlas of 256 x 256 tiles is updated a
  * tile at a time, and only the changed rectangle is copied. */
-#define R200_POOL_MAX_W 1024UL
+#define R200_POOL_MAX_W 2048UL
 #define R200_POOL_MAX_H 512UL
 
 struct FrontendLmPoolSlot {
@@ -6476,10 +6719,60 @@ static struct FrontendLmPool {
     ULONG histSerial[R200_POOL_HISTORY];
     UWORD histTop[R200_POOL_HISTORY], histEnd[R200_POOL_HISTORY];
     UWORD histLeft[R200_POOL_HISTORY], histRight[R200_POOL_HISTORY];
-    struct FrontendLmPoolSlot slot[R200_POOL_SLOTS];
+    /* The client's MGL_UNPACK_UNSYNC_AFTER for each update (0: none). */
+    ULONG histAfter[R200_POOL_HISTORY];
+    /* Updated in place: the spare slots lag far behind (see the drain). */
+    ULONG inPlace;
+    ULONG slots;                /* FrontendPoolSlots when it was made */
+    struct FrontendLmPoolSlot slot[R200_POOL_SLOTS_MAX];
 } FrontendLmPools[R200_POOL_MAX];
 static ULONG FrontendLmPoolCount;
 static ULONG FrontendLmPoolNextName;
+/* GL_MGL_unsync_subimage: glPixelStorei(MGL_UNPACK_UNSYNC_AFTER). */
+static ULONG FrontendUnsyncAfter;
+
+ULONG R200PPCSyncPoint(void)
+{
+    volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
+
+    /* Records built so far go out in the next ring entry (see the pool's
+     * lastUse); 0 is never a valid point. */
+    ULONG point;
+
+    if (!control)
+        return 0;
+    point = control->head + 1UL;
+    return point ? point : 1UL;
+}
+
+void R200PPCSetUnsyncAfter(ULONG point)
+{
+    FrontendUnsyncAfter = point;
+}
+
+/* GL_MGL_unsync_subimage: slot i may take the updates since it was last
+ * written without waiting for its last sampling to retire when each of
+ * those updates came with a client point that has retired. A draw that
+ * samples one of those rectangles was then issued after its update (it
+ * names a newer slot) or before the point (retired): no in-flight draw on
+ * slot i reads them, and the rest of slot i is rewritten with the texels
+ * it already holds. Never for a full rewrite (history gap). */
+static BOOL FrontendLmPoolUnsyncOk(const struct FrontendLmPool *pool,
+                                   ULONG i, ULONG serial, ULONG retired)
+{
+    ULONG s, written = pool->slot[i].written;
+
+    if (written == R200_POOL_NONE || serial - written > R200_POOL_HISTORY)
+        return FALSE;
+    for (s = written + 1UL; s <= serial; ++s) {
+        ULONG h = s % R200_POOL_HISTORY, after = pool->histAfter[h];
+
+        if (pool->histSerial[h] != s || !after ||
+            (LONG)(retired - after) < 0)
+            return FALSE;
+    }
+    return TRUE;
+}
 /* Per texture name: 0 unseen, 1 one subimage seen, 2+i pool i,
  * 255 not poolable. */
 static UBYTE FrontendLmPoolState[MAX_TEXTURES];
@@ -6501,11 +6794,12 @@ static struct FrontendLmPool *FrontendLmPoolCreate(
     /* Holder names come from the top of the name space; GLQuake-class
      * clients number textures upward from 1. */
     if (FrontendLmPoolCount >= R200_POOL_MAX ||
-        FrontendLmPoolNextName < MAX_TEXTURES - R200_POOL_MAX * R200_POOL_SLOTS)
+        FrontendLmPoolNextName < MAX_TEXTURES - R200_POOL_MAX * R200_POOL_SLOTS_MAX)
         return NULL;
     pool = &FrontendLmPools[FrontendLmPoolCount];
     memset(pool, 0, sizeof(*pool));
-    for (index = 0; index < R200_POOL_SLOTS; ++index) {
+    pool->slots = FrontendPoolSlots;
+    for (index = 0; index < pool->slots; ++index) {
         ULONG holder = FrontendLmPoolNextName--;
         struct MGLPPCEmitSurface surface;
         ULONG token;
@@ -6550,6 +6844,55 @@ static struct FrontendLmPool *FrontendLmPoolCreate(
     return pool;
 }
 
+/* Rows first..end, columns x0..x1 of the shadow into a pool slot. */
+extern void MGLPPCFlushDataRangeNoSync(APTR address, ULONG bytes);
+extern void MGLPPCStoreBarrier(void);
+static void FrontendLmPoolCopy(struct FrontendLmPool *pool, ULONG pick,
+                               const UBYTE *shadow, ULONG pitch,
+                               ULONG first, ULONG end, ULONG x0, ULONG x1)
+{
+    ULONG row;
+
+    if (x1 > pool->width)
+        x1 = pool->width;
+    if (end > pool->height)
+        end = pool->height;
+    if (end <= first || x1 <= x0)
+        return;
+#if MGLPPC_PROFILE
+    PoolProfBytes += (end - first) * (x1 - x0) * 4UL;
+    PoolProfRows += end - first;
+#endif
+    /* The shadow is the surface's BGRA32 dword image (pitch == width*4 was
+     * verified at creation): dword copies, a row of the rectangle at a
+     * time. */
+    /* One sync for the whole rectangle: a sync a row waited for the
+     * row's posted writes to cross the bus every time (~120 us an update
+     * of ~500 texels). */
+    for (row = first; row < end; ++row) {
+        volatile ULONG *dst = (volatile ULONG *)(pool->slot[pick].cpu +
+                                                 row * pitch) + x0;
+        const ULONG *src = (const ULONG *)(shadow + row * pitch) + x0;
+        ULONG count = x1 - x0;
+
+        while (count--)
+            *dst++ = *src++;
+        if (x1 - x0 < pool->width && !FrontendPoolNoFlush) {
+            if (FrontendPoolSyncRow)
+                MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + row * pitch + x0 * 4UL),
+                                     (x1 - x0) * 4UL);
+            else
+                MGLPPCFlushDataRangeNoSync((APTR)(pool->slot[pick].cpu + row * pitch + x0 * 4UL),
+                                           (x1 - x0) * 4UL);
+        }
+    }
+    if (x1 - x0 < pool->width && !FrontendPoolSyncRow)
+        MGLPPCStoreBarrier();
+    if (x1 - x0 == pool->width)
+        MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + first * pitch),
+                             (end - first) * pitch);
+}
+
 /* The shadow already holds this update. Returns 1 when the pool served it,
  * 0 when the caller should take the direct re-commit, -1 on failure. */
 static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
@@ -6560,8 +6903,7 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
     volatile MGLPPCRingControlV1 *control = FrontendPlatform.ring;
     struct FrontendLmPool *pool;
     UBYTE state = FrontendLmPoolState[name];
-    ULONG index, pick, serial, first, end, pitch, spin = 0, generation;
-    ULONG x0, x1;
+    ULONG index, pick, serial, pitch, spin = 0, generation;
 
     if (state == 255U)
         return 0;
@@ -6588,14 +6930,22 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
      * this flush) and can only be published in the next ring entry, so
      * that entry is its last use. Publishing here would split the batch on
      * every upload; the pick loop publishes only when it must. */
+#if MGLPPC_PROFILE
+    ULONG profStart = PerfClock();
+    ++PoolProfUpdates;
+#endif
     if (!FlushScreenVertices(context))
         return -1;
+#if MGLPPC_PROFILE
+    PoolProfFlushTicks += PerfClock() - profStart;
+    profStart = PerfClock();
+#endif
     if (pool->current != R200_POOL_NONE) {
         pool->slot[pool->current].lastUse = control->head + 1UL;
         /* A redefinition (TexImage2D) re-pointed the texture at a native
          * surface: the slots no longer mirror the shadow. */
         if ((ULONG)texture->surface.Handle != pool->slot[pool->current].token)
-            for (index = 0; index < R200_POOL_SLOTS; ++index)
+            for (index = 0; index < pool->slots; ++index)
                 pool->slot[index].written = R200_POOL_NONE;
     }
     serial = ++pool->serial;
@@ -6605,6 +6955,88 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
     pool->histEnd[index] = (UWORD)(top + rows);
     pool->histLeft[index] = (UWORD)left;
     pool->histRight[index] = (UWORD)(left + columns);
+    pool->histAfter[index] = FrontendUnsyncAfter;
+#if MGLPPC_PROFILE
+    MGLPPCInvalidateLine32((APTR)&control->retired);
+    PoolProfLagSum += control->head - control->retired;
+    if (FrontendUnsyncAfter) {
+        ++PoolProfHinted;
+        PoolProfPointLagSum += FrontendUnsyncAfter - control->retired;
+    }
+#endif
+    pitch = pool->width * 4UL;
+    /* GL_MGL_unsync_subimage with a retired point: no draw that is still
+     * in flight, or still to be published, samples this rectangle (see
+     * FrontendLmPoolUnsyncOk), so it goes straight into the current slot
+     * when that slot holds every earlier update. Each texel then crosses
+     * the bus once instead of once per slot (Zorro III: Tekken 3's cache
+     * uploads cost 6-10 ms a present through the spare slots). The content
+     * serial makes the next draw invalidate the host read path, as for any
+     * in-place texel update. */
+    if (!FrontendNoInPlace &&
+        pool->current != R200_POOL_NONE &&
+        (ULONG)texture->surface.Handle == pool->slot[pool->current].token &&
+        pool->slot[pool->current].written == serial - 1UL &&
+        (FrontendUnsyncAfter || pool->inPlace)) {
+        BOOL ok;
+
+        MGLPPCInvalidateLine32((APTR)&control->retired);
+        ok = FrontendUnsyncAfter &&
+             (LONG)(control->retired - FrontendUnsyncAfter) >= 0;
+        /* An update in-flight draws may sample, on a pool that has gone
+         * in place: its spare slots lag hundreds of updates behind, and
+         * one would take the whole image (2 MiB, ~20 ms on the bus; Tekken
+         * 3 had one about every present). Wait for the current slot's
+         * draws to retire instead -- the GPU is mostly idle -- and write
+         * the rectangle in place. */
+        if (!ok && pool->inPlace) {
+            ULONG need = pool->slot[pool->current].lastUse, spins = 0;
+
+#if MGLPPC_PROFILE
+            ++PoolProfDrains;
+#endif
+            for (;;) {
+                MGLPPCInvalidateLine32((APTR)&control->retired);
+                if ((LONG)(control->retired - need) >= 0)
+                    break;
+                if ((LONG)(need - control->head) > 0) {
+                    ULONG head = control->head;
+
+                    if (!Submit(context))
+                        return -1;
+                    if (control->head == head)
+                        need = head;    /* nothing was pending */
+                    continue;
+                }
+                if (spins && !(spins & (MGLPPC_RING_YIELD_SPINS - 1UL)))
+                    MGLPPCYield();
+                if (control->error || ++spins > 5000000UL)
+                    return -1;
+            }
+            ok = TRUE;
+        }
+        if (ok) {
+            pool->inPlace = 1;
+            FrontendLmPoolCopy(pool, pool->current, texture->shadow, pitch,
+                               top, top + rows, left, left + columns);
+            pool->slot[pool->current].written = serial;
+#if MGLPPC_PROFILE
+            ++PoolProfInPlace;
+            PoolProfCopyTicks += PerfClock() - profStart;
+#endif
+            texture->resident = TRUE;
+            generation = texture->imageGeneration + 1UL;
+            if (!generation)
+                generation = 1;
+            texture->imageGeneration = generation;
+            texture->residentGeneration = generation;
+            texture->dirtyLevelMask = 0;
+            if (++texture->contentSerial == 0)
+                texture->contentSerial = 1;
+            BumpSemanticStateSerial(context);
+            return 1;
+        }
+    }
     /* Never the current slot; among retired ones the least recently used. */
     for (;;) {
         ULONG retired;
@@ -6612,26 +7044,36 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
         MGLPPCInvalidateLine32((APTR)&control->retired);
         retired = control->retired;
         pick = R200_POOL_NONE;
-        for (index = 0; index < R200_POOL_SLOTS; ++index) {
+        for (index = 0; index < pool->slots; ++index) {
             if (index == pool->current ||
-                (LONG)(retired - pool->slot[index].lastUse) < 0)
+                ((LONG)(retired - pool->slot[index].lastUse) < 0 &&
+                 !(FrontendUnsyncAfter &&
+                   FrontendLmPoolUnsyncOk(pool, index, serial, retired))))
                 continue;
             if (pick == R200_POOL_NONE ||
                 (LONG)(pool->slot[index].lastUse -
                        pool->slot[pick].lastUse) < 0)
                 pick = index;
         }
-        if (pick != R200_POOL_NONE)
+        if (pick != R200_POOL_NONE) {
+#if MGLPPC_PROFILE
+            if ((LONG)(retired - pool->slot[pick].lastUse) < 0)
+                ++PoolProfUnsyncPicks;
+#endif
             break;
+        }
         /* A slot waiting on the unpublished entry can never retire until
          * that entry is published. */
-        for (index = 0; index < R200_POOL_SLOTS; ++index)
+        for (index = 0; index < pool->slots; ++index)
             if (index != pool->current &&
                 (LONG)(pool->slot[index].lastUse - control->head) > 0)
                 break;
-        if (index < R200_POOL_SLOTS) {
+        if (index < pool->slots) {
             ULONG head = control->head;
 
+#if MGLPPC_PROFILE
+            ++PoolProfSubmits;
+#endif
             if (!Submit(context))
                 return -1;
             /* Nothing was pending (subimages of one texture back to back,
@@ -6640,7 +7082,7 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
              * last published entry. Without this the loop submitted
              * nothing forever. */
             if (control->head == head)
-                for (index = 0; index < R200_POOL_SLOTS; ++index)
+                for (index = 0; index < pool->slots; ++index)
                     if (index != pool->current &&
                         (LONG)(pool->slot[index].lastUse - head) > 0)
                         pool->slot[index].lastUse = head;
@@ -6651,65 +7093,59 @@ static int FrontendLmPoolUpdate(struct MiniGLR200Context *context,
         if (control->error || ++spin > 5000000UL)
             return -1;
     }
-    /* The rectangle changed since this slot was last written. */
-    first = 0;
-    end = pool->height;
-    x0 = 0;
-    x1 = pool->width;
+    /* The rectangles changed since this slot was last written, each copied
+     * on its own: their union spans the whole atlas when they land in
+     * different tiles (WiiStation: a few 256 x 256 cells a frame of a
+     * 1024 x 512 texture copied 2 MiB per upload, ~20 ms at the aperture's
+     * rate). The whole image when the history does not reach back. */
+#if MGLPPC_PROFILE
+    PoolProfWaitTicks += PerfClock() - profStart;
+    profStart = PerfClock();
+#endif
     if (pool->slot[pick].written != R200_POOL_NONE &&
         serial - pool->slot[pick].written <= R200_POOL_HISTORY) {
         ULONG s;
 
-        first = pool->height;
-        end = 0;
-        x0 = pool->width;
-        x1 = 0;
-        for (s = pool->slot[pick].written + 1UL; s <= serial; ++s) {
-            index = s % R200_POOL_HISTORY;
-            if (pool->histSerial[index] != s) {
-                first = 0;
-                end = pool->height;
-                x0 = 0;
-                x1 = pool->width;
+        for (s = pool->slot[pick].written + 1UL; s <= serial; ++s)
+            if (pool->histSerial[s % R200_POOL_HISTORY] != s)
                 break;
+        if (s > serial) {
+            /* the rectangles only while they add up to less than the image */
+            ULONG area = 0;
+            for (s = pool->slot[pick].written + 1UL; s <= serial; ++s) {
+                index = s % R200_POOL_HISTORY;
+                area += (ULONG)(pool->histEnd[index] - pool->histTop[index]) *
+                        (ULONG)(pool->histRight[index] - pool->histLeft[index]);
             }
-            if (pool->histTop[index] < first)
-                first = pool->histTop[index];
-            if (pool->histEnd[index] > end)
-                end = pool->histEnd[index];
-            if (pool->histLeft[index] < x0)
-                x0 = pool->histLeft[index];
-            if (pool->histRight[index] > x1)
-                x1 = pool->histRight[index];
+            if (area >= (ULONG)pool->height * pool->width)
+                s = 0;
+            else
+                s = serial + 1UL;
         }
-    }
-    if (x1 > pool->width)
-        x1 = pool->width;
-    if (end > pool->height)
-        end = pool->height;
-    pitch = pool->width * 4UL;
-    if (end > first && x1 > x0) {
-        /* The shadow is the surface's BGRA32 dword image (pitch == width*4
-         * was verified at creation): dword copies, a row of the rectangle
-         * at a time. */
-        ULONG row;
-
-        for (row = first; row < end; ++row) {
-            volatile ULONG *dst = (volatile ULONG *)(pool->slot[pick].cpu +
-                                                     row * pitch) + x0;
-            const ULONG *src = (const ULONG *)(texture->shadow + row * pitch) + x0;
-            ULONG count = x1 - x0;
-
-            while (count--)
-                *dst++ = *src++;
-            if (x1 - x0 < pool->width)
-                MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + row * pitch + x0 * 4UL),
-                                     (x1 - x0) * 4UL);
+        if (s > serial) {
+            for (s = pool->slot[pick].written + 1UL; s <= serial; ++s) {
+                index = s % R200_POOL_HISTORY;
+                FrontendLmPoolCopy(pool, pick, texture->shadow, pitch,
+                                   pool->histTop[index], pool->histEnd[index],
+                                   pool->histLeft[index], pool->histRight[index]);
+            }
+        } else {
+#if MGLPPC_PROFILE
+            ++PoolProfFull;
+#endif
+            FrontendLmPoolCopy(pool, pick, texture->shadow, pitch,
+                               0, pool->height, 0, pool->width);
         }
-        if (x1 - x0 == pool->width)
-            MGLPPCFlushDataRange((APTR)(pool->slot[pick].cpu + first * pitch),
-                                 (end - first) * pitch);
+    } else {
+#if MGLPPC_PROFILE
+        ++PoolProfFull;
+#endif
+        FrontendLmPoolCopy(pool, pick, texture->shadow, pitch,
+                           0, pool->height, 0, pool->width);
     }
+#if MGLPPC_PROFILE
+    PoolProfCopyTicks += PerfClock() - profStart;
+#endif
     pool->slot[pick].written = serial;
     pool->current = pick;
     texture->surface.Handle = (APTR)pool->slot[pick].token;
@@ -7457,14 +7893,14 @@ void R200PPCDispatchTexImage2D(GLenum target, GLint level,
                  (format == GL_RGB || format == GL_RGBA ||
                   format == MGL_UBYTE_BGRA || format == MGL_UBYTE_ARGB) &&
                  !(width & (width - 1UL)) && !(height & (height - 1UL)) &&
-                 total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
+                 total <= R200_DIRECT_MAX_BYTES &&
                  FrontendShadowEnsure(context, texture, (ULONG)width,
                                       (ULONG)height);
     if ((FrontendPlatform.capabilities & MGLPPC_CAP_TEXTURE_DIRECT_V1) &&
         (directAllowed || rgbaDirect) &&
         !paletted &&
         level == 0 && width <= 2048 && height <= 2048 &&
-        total <= MGLPPC_TEXTURE_SHARED_MAX_BYTES &&
+        total <= R200_DIRECT_MAX_BYTES &&
         !(width & (width - 1UL)) && !(height & (height - 1UL))) {
         UBYTE *fusedShadow = NULL;
         /* Two-tile batching: a 565 upload is either queued as the first

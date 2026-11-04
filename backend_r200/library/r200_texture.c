@@ -261,6 +261,8 @@ ULONG TextureState(const struct MiniGLR200Context *context,
         state |= RADEON3D_TEX_ALPHA_SCALE_2X;
     if (texture->wrapS == GL_REPEAT)
         state |= RADEON3D_TEX_REPEAT_S;
+    else if (texture->wrapS == 0x812DUL && R200ExtendedFragmentState())  /* GL_CLAMP_TO_BORDER */
+        state |= RADEON3D_TEX_BORDER_S;
     if (texture->wrapT == GL_REPEAT)
         state |= RADEON3D_TEX_REPEAT_T;
     if (texture->magFilter == GL_LINEAR)
@@ -905,7 +907,8 @@ void Lib_glTexParameteri(GLenum target, GLenum pname, GLint value)
         texture->minFilter=value;
         BumpSemanticStateSerial(context);
     } else if (pname==GL_TEXTURE_WRAP_S || pname==GL_TEXTURE_WRAP_T) {
-        if (value!=GL_REPEAT && value!=GL_CLAMP) {
+        if (value!=GL_REPEAT && value!=GL_CLAMP &&
+            !(value==0x812D && pname==GL_TEXTURE_WRAP_S && R200ExtendedFragmentState())) {
             SetError(context,GL_INVALID_ENUM);
             return;
         }
@@ -1097,6 +1100,10 @@ void Lib_glPixelStorei(GLenum pname, GLint value)
             return;
         }
         context->unpackSkipRows=(ULONG)value;
+#if R200_PPC_FRONTEND
+    } else if (pname==MGL_UNPACK_UNSYNC_AFTER) {
+        R200PPCSetUnsyncAfter((ULONG)value);
+#endif
     } else if (pname==GL_PACK_ALIGNMENT) {
         if (value!=1 && value!=2 && value!=4 && value!=8) {
             SetError(context,GL_INVALID_VALUE);

@@ -125,6 +125,20 @@ flowchart LR
   client hand over a run of separate primitives in one `glDrawArrays`
   instead of a `glBegin`/`glEnd` pair and a dozen vertex calls each
   (WiiStation: ~900 PSX primitives a frame).
+  `glDrawArrays(MGL_FLATTRIANGLES)` from the common array layout (aligned
+  float positions, `GL_UNSIGNED_BYTE` RGBA or no colours, aligned float or no
+  unit-0 coordinates, no unit-1 array, no normals, fog off, `GL_FILL`) takes
+  `DrawFlatTrianglesFast`: each corner goes from the client array straight
+  into `screenVertices`, and `PrepareScreenAppend` runs once per draw and
+  after a flush instead of once per triangle (the state cannot change inside
+  a draw). A triangle that crosses the drawable is fetched as `struct
+  Vertex` and goes through `EmitFlatTriangle` as before. WiiStation's Crash
+  benchmark (5.5k vertices a present): frontend 2.74 -> 1.97 ms a present.
+- The CP emitter writes screen-space vertices (no TCL, no extended record,
+  no perspective: the flat and clipped 2D paths) in one loop that checks the
+  batch room once and the vertex dwords as before, instead of a
+  bounds-checked `ExecuteEmitWord` per dword: vertex emit 1.62 -> 1.02 ms a
+  present on the same benchmark.
 - `glInterleavedArrays` and the client array pointers feed the same machinery.
   `GLLockArrays`/`GLUnlockArrays` only record the locked range: every draw
   reads all attributes live from the client arrays. Clients (Quake's stage
@@ -265,7 +279,7 @@ atlases) has two CP-path accelerations (2026-10-20):
   (`retired == head`). The host parks the replaced residency and frees it
   once everything retired. `MGLPPC_NOPARK=1` restores the drain.
 - **Lightmap surface pool** (`FrontendLmPoolUpdate`). From a texture's second
-  subimage it gets 3 holder surfaces: library textures under reserved names
+  subimage it gets 3 holder surfaces (`MGLPPC_POOLSLOTS=2..8`): library textures under reserved names
   from `MAX_TEXTURES-1` down, created once through direct BEGIN/COMMIT, with
   descriptors in a 256-entry hash consulted before the descriptor cache.
   An update needs no 68k call:
@@ -275,15 +289,24 @@ atlases) has two CP-path accelerations (2026-10-20):
      entry.
   3. Pick a retired slot that is not current, publishing only if every
      candidate waits on the unpublished entry.
-  4. Copy the rows changed since that slot was last written (8-update
-     history, else the full image) with plain stores, and flush.
+  4. Copy the rectangles changed since that slot was last written, each
+     on its own (8-update history, else the full image), with plain
+     stores, and flush. Their union would span the whole texture when
+     they land in different tiles of an atlas: WiiStation's 1024 x 512
+     atlas then copied 2 MiB per upload (Tekken 3 fights: 17-85 ms of
+     uploads a frame).
   5. Re-point the texture's token at the slot.
 
   A slot is never rewritten while current or before its last sampling
   retired; that is the reuse discipline the free/re-import path already
   relied on for this GPU's non-invalidating texture cache. A redefinition
   (token no longer the current slot) forces full rewrites.
-  `MGLPPC_NOPOOL=1` disables the pool.
+  `MGLPPC_NOPOOL=1` disables the pool. A texture updated more often than it
+  has slots between two retirements waits for the GPU in step 3: Tekken 3
+  under WiiStation updates its atlas planes ~18 times a present and waited
+  ~6 ms a present with 3 slots. 4 slots gave the same, and 6 (36 MiB for
+  its three 1024 x 512 planes) slowed it badly: more slots are not the way
+  out for large textures.
 
 ## 8. Submission feedback and the device epoch
 
@@ -442,6 +465,7 @@ Micro tiling (bit 17) scrambles the 2D untile copy and is slower.
 | `MGLPPC_PROFILE` | frontend profiler buckets (profile builds only) |
 | `MGLPPC_NOPARK` | `1`: subimage re-commits drain the GPU instead of parking the old residency (A/B) |
 | `MGLPPC_NOPOOL` | `1`: no PPC-owned lightmap surface pools (A/B) |
+| `MGLPPC_POOLSLOTS` | `2`-`8`: holder surfaces per pool (default 3; each the texture's size in VRAM) |
 | `MGLPPC_FORCEMIP` | `1`: a `GL_LINEAR`-minified texture with a complete app-uploaded mip chain samples the chain (`LINEAR_MIPMAP_NEAREST`); read at platform open. Breaks pictures that upload only level 0 (Quake HUD/console) |
 | `MGLPPC_CLEARBLEND` | `1`: restore the old depth-only clear workaround (no-op blend `SRC=ZERO, DST=ONE` + full state re-emit) instead of `R200_PLANE_MASK_ENABLE` |
 | `MGLPPC_BATCHDW` | diagnostic: cap the CP batch budget in dwords (>= 1024); used to measure per-IB cost |

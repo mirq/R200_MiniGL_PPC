@@ -408,6 +408,9 @@
 #define R200_WRAPEN_S                       (1UL << 22)
 #define R200_CLAMP_S_MIRROR                 (1UL << 23)
 #define R200_CLAMP_S_CLAMP_LAST             (2UL << 23)
+#define R200_CLAMP_S_CLAMP_BORDER           (4UL << 23)
+#define R200_PP_BORDER_COLOR_0              0x2c14UL
+#define R200_PP_BORDER_COLOR_1              0x2c34UL
 #define R200_WRAPEN_T                       (1UL << 26)
 #define R200_CLAMP_T_MIRROR                 (1UL << 27)
 #define R200_CLAMP_T_CLAMP_LAST             (2UL << 27)
@@ -482,6 +485,8 @@
 #define R200_DIFFUSE_SHADE_GOURAUD          (2UL << 8)
 #define R200_DIFFUSE_SHADE_MASK          (3UL << 8)
 #define R200_ALPHA_SHADE_GOURAUD            (2UL << 10)
+#define R200_ALPHA_SHADE_FLAT               (1UL << 10)
+#define R200_ALPHA_SHADE_MASK               (3UL << 10)
 #define R200_SPECULAR_LIGHTS                 (1UL << 5)
 #define R200_DIFFUSE_SPECULAR_COMBINE       (1UL << 6)
 #define R200_LOCAL_LIGHT_VEC_GL              (1UL << 8)
@@ -611,5 +616,36 @@
 #define RADEON_PLL_WR_EN                     (1UL << 7)
 #define RADEON_PLL_INDEX_MASK                0x3fUL
 #define RADEON_PLL_DIV_SEL                   (3UL << 8)
+
+
+/* Two-pass fragment shader (ATI_fragment_shader), from Mesa r200_reg.h */
+#define R200_MULTI_PASS_ENABLE              0x00080000UL
+#define R200_PP_TXCBLEND_8                  0x2f80UL
+#define R200_PP_TXCBLEND2_8                 0x2f84UL
+#define R200_PP_TXABLEND_8                  0x2f88UL
+#define R200_PP_TXABLEND2_8                 0x2f8cUL
+#define R200_PP_TXCBLEND_9                  0x2f90UL
+#define R200_PP_TXCBLEND2_9                 0x2f94UL
+#define R200_PP_TXABLEND_9                  0x2f98UL
+#define R200_PP_TXABLEND2_9                 0x2f9cUL
+#define R200_PPX_TEX_0_ENABLE               (1UL << 0)
+#define R200_PPX_OUTPUT_REG_2               (1UL << 8)
+#define R200_PPX_FPS_INST0_ENABLE_SHIFT     12
+#define R200_PASS2_COORDS_REG_2             (4UL << 24)
+#define R200_TXC_ARG_C_DIFFUSE_ALPHA        (5UL << 10)
+#define R200_TXC_OUTPUT_REG_R2              (3UL << 16)
+#define R200_TXC_OUTPUT_MASK_R              (3UL << 20)
+#define R200_TXC_OUTPUT_MASK_G              (5UL << 20)
+#define R200_TXFORMAT_ST_ROUTE_MASK         (7UL << 24)
+#define R200_PPX_TEX_1_ENABLE               (1UL << 1)
+#define R200_PPX_TEX_2_ENABLE               (1UL << 2)
+#define R200_PP_TXMULTI_CTL_2               0x2c5cUL
+#define R200_TXC_ARG_C_R2_COLOR             (14UL << 10)
+#define R200_PASS1_TXFORMAT_LOOKUP_DISABLE  (1UL << 0)
+#define R200_PASS1_TEXCOORD_PROJ            (3UL << 1)
+#define R200_PASS1_ST_ROUTE_STQ1            (1UL << 4)
+#define R200_TXC_ARG_C_R1_COLOR             (12UL << 10)
+#define R200_TXC_REPL_RED                   1UL
+#define R200_TXC_REPL_ARG_C_SHIFT           30
 
 #endif

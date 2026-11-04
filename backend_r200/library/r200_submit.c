@@ -869,8 +869,8 @@ ULONG GeneratedDrawDwords(ULONG vertexCount, BOOL depth,
 
     return 48UL + (depth ? 6UL : 0UL) +
            (perspective ? 12UL : 0UL) +
-           (textured ? 14UL : 0UL) +
-           (textured1 ? 22UL : 0UL) + (fog ? 2UL : 0UL) +
+           (textured ? 16UL : 0UL) +
+           (textured1 ? 24UL : 0UL) + (fog ? 2UL : 0UL) +
            vertexCount * vertexDwords;
 }
 
@@ -909,7 +909,7 @@ ULONG GeneratedHardwareDrawDwords(ULONG vertexCount, BOOL depth,
          * plus global-ambient/eye/material vector uploads (~100 fixed)
          * and roughly 40 dwords per enabled light block. */
     return 136UL + (depth ? 6UL : 0UL) +
-           (textured ? 14UL : 0UL) + (textured1 ? 22UL : 0UL) +
+           (textured ? 16UL : 0UL) + (textured1 ? 24UL : 0UL) +
             (fog ? 2UL : 0UL) + (texgen ? 42UL : 0UL) +
            (normals ? 100UL + enabledLights * 40UL : 0UL) +
            vertexCount * GeneratedHardwareVertexDwords(textured, textured1,

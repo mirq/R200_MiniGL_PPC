@@ -310,7 +310,11 @@ MGLPPCSwapTCL7:
         mr      r9,r3
         mr      r10,r4
         mtctr   r5
+        li      r19,64
+        li      r20,104
 .tcl7:
+        dcbtst  r19,r9
+        dcbt    r20,r10
         lwz     r11,0(r10)
         lwz     r12,4(r10)
         lwz     r3,8(r10)
@@ -359,4 +363,428 @@ MGLPPCSwapTCL7:
         bdnz    .tcl7
         lmw     r14,8(r1)
         addic   r1,r1,96
+        blr
+
+# RADEON3D_DRAW_NO_W / NO_Z records (MGLPPC_TCL6 / MGLPPC_TCL5): the
+# ScreenVertex dwords x,y,[z],colour,[s,t] in that order, register-swapped
+# and stored with plain stw (gathered; stwbrx is not: ~60 against ~42 ns a
+# dword to the aperture). The colour carries no mask: these records have no
+# disabled units to collapse.
+# void MGLPPCSwapTCLn(ULONG *dst, const ULONG *src, ULONG count)
+        .text
+        .balign 16
+        .global MGLPPCSwapTCL6
+MGLPPCSwapTCL6:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-32(r1)
+        stw     r14,8(r1)
+        stw     r15,12(r1)
+        stw     r16,16(r1)
+        stw     r17,20(r1)
+        mtctr   r5
+        li      r7,64
+        li      r8,104
+1:      dcbtst  r7,r3
+        dcbt    r8,r4
+        lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,8(r4)
+        lwz     r15,28(r4)
+        lwz     r16,32(r4)
+        lwz     r17,36(r4)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,12(r3)
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,16(r3)
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,20(r3)
+        addi    r3,r3,24
+        addi    r4,r4,52
+        bdnz    1b
+        lwz     r14,8(r1)
+        lwz     r15,12(r1)
+        lwz     r16,16(r1)
+        lwz     r17,20(r1)
+        addi    r1,r1,32
+        blr
+        .balign 16
+        .global MGLPPCSwapTCL5
+MGLPPCSwapTCL5:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-32(r1)
+        stw     r14,8(r1)
+        stw     r15,12(r1)
+        stw     r16,16(r1)
+        stw     r17,20(r1)
+        mtctr   r5
+        li      r7,64
+        li      r8,104
+1:      dcbtst  r7,r3
+        dcbt    r8,r4
+        lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,28(r4)
+        lwz     r15,32(r4)
+        lwz     r16,36(r4)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,12(r3)
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,16(r3)
+        addi    r3,r3,20
+        addi    r4,r4,52
+        bdnz    1b
+        lwz     r14,8(r1)
+        lwz     r15,12(r1)
+        lwz     r16,16(r1)
+        lwz     r17,20(r1)
+        addi    r1,r1,32
+        blr
+        .balign 16
+        .global MGLPPCSwapTCL4
+MGLPPCSwapTCL4:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-32(r1)
+        stw     r14,8(r1)
+        stw     r15,12(r1)
+        stw     r16,16(r1)
+        stw     r17,20(r1)
+        mtctr   r5
+        li      r7,64
+        li      r8,104
+1:      dcbtst  r7,r3
+        dcbt    r8,r4
+        lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,8(r4)
+        lwz     r15,28(r4)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,12(r3)
+        addi    r3,r3,16
+        addi    r4,r4,52
+        bdnz    1b
+        lwz     r14,8(r1)
+        lwz     r15,12(r1)
+        lwz     r16,16(r1)
+        lwz     r17,20(r1)
+        addi    r1,r1,32
+        blr
+        .balign 16
+        .global MGLPPCSwapTCL3
+MGLPPCSwapTCL3:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-32(r1)
+        stw     r14,8(r1)
+        stw     r15,12(r1)
+        stw     r16,16(r1)
+        stw     r17,20(r1)
+        mtctr   r5
+        li      r7,64
+        li      r8,104
+1:      dcbtst  r7,r3
+        dcbt    r8,r4
+        lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,28(r4)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        addi    r3,r3,12
+        addi    r4,r4,52
+        bdnz    1b
+        lwz     r14,8(r1)
+        lwz     r15,12(r1)
+        lwz     r16,16(r1)
+        lwz     r17,20(r1)
+        addi    r1,r1,32
+        blr
+
+# RADEON3D_DRAW_PALETTE records: x,y,[z],colour,s,t and the palette row
+# as unit 1's s1,t1 (ScreenVertex dwords 10, 11), register-swapped, plain stw.
+        .balign 16
+        .global MGLPPCSwapTCL7P
+MGLPPCSwapTCL7P:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-32(r1)
+        stw     r14,8(r1)
+        stw     r15,12(r1)
+        stw     r16,16(r1)
+        stw     r17,20(r1)
+        stw     r18,24(r1)
+        stw     r19,28(r1)
+        mtctr   r5
+        li      r7,64
+        li      r8,104
+1:      dcbtst  r7,r3
+        dcbt    r8,r4
+        lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,8(r4)
+        lwz     r15,28(r4)
+        lwz     r16,32(r4)
+        lwz     r17,36(r4)
+        lwz     r18,40(r4)
+        lwz     r19,44(r4)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,12(r3)
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,16(r3)
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,20(r3)
+        rlwinm  r0,r18,8,0,31
+        rlwimi  r0,r18,24,0,7
+        rlwimi  r0,r18,24,16,23
+        stw     r0,24(r3)
+        rlwinm  r0,r19,8,0,31
+        rlwimi  r0,r19,24,0,7
+        rlwimi  r0,r19,24,16,23
+        stw     r0,28(r3)
+        addi    r3,r3,32
+        addi    r4,r4,52
+        bdnz    1b
+        lwz     r14,8(r1)
+        lwz     r15,12(r1)
+        lwz     r16,16(r1)
+        lwz     r17,20(r1)
+        lwz     r18,24(r1)
+        lwz     r19,28(r1)
+        addi    r1,r1,32
+        blr
+        .balign 16
+        .global MGLPPCSwapTCL6P
+MGLPPCSwapTCL6P:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-32(r1)
+        stw     r14,8(r1)
+        stw     r15,12(r1)
+        stw     r16,16(r1)
+        stw     r17,20(r1)
+        stw     r18,24(r1)
+        stw     r19,28(r1)
+        mtctr   r5
+        li      r7,64
+        li      r8,104
+1:      dcbtst  r7,r3
+        dcbt    r8,r4
+        lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,28(r4)
+        lwz     r15,32(r4)
+        lwz     r16,36(r4)
+        lwz     r17,40(r4)
+        lwz     r18,44(r4)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        rlwinm  r0,r15,8,0,31
+        rlwimi  r0,r15,24,0,7
+        rlwimi  r0,r15,24,16,23
+        stw     r0,12(r3)
+        rlwinm  r0,r16,8,0,31
+        rlwimi  r0,r16,24,0,7
+        rlwimi  r0,r16,24,16,23
+        stw     r0,16(r3)
+        rlwinm  r0,r17,8,0,31
+        rlwimi  r0,r17,24,0,7
+        rlwimi  r0,r17,24,16,23
+        stw     r0,20(r3)
+        rlwinm  r0,r18,8,0,31
+        rlwimi  r0,r18,24,0,7
+        rlwimi  r0,r18,24,16,23
+        stw     r0,24(r3)
+        addi    r3,r3,28
+        addi    r4,r4,52
+        bdnz    1b
+        lwz     r14,8(r1)
+        lwz     r15,12(r1)
+        lwz     r16,16(r1)
+        lwz     r17,20(r1)
+        lwz     r18,24(r1)
+        lwz     r19,28(r1)
+        addi    r1,r1,32
+        blr
+
+# The same NO_W records straight from a client's interleaved arrays
+# (DrawTrianglesTclFast's direct source, MGLPPCDirectTcl): x,y,[z] floats at
+# 0, the RGBA colour bytes at colOff, s,t floats at texOff, one stride for
+# all three. The colour becomes the ScreenVertex ARGB dword's swapped form
+# (bytes B,G,R,A) in three instructions, like a swap; no staging copy.
+# void MGLPPCSwapTCLnX(ULONG *dst, const UBYTE *src, ULONG count,
+#                      ULONG stride, ULONG colOff, ULONG texOff)
+        .balign 16
+        .global MGLPPCSwapTCL5X
+MGLPPCSwapTCL5X:
+        cmpwi   r5,0
+        beqlr
+        mtctr   r5
+        add     r9,r4,r7
+        add     r10,r4,r8
+1:      lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r5,0(r9)
+        lwz     r7,0(r10)
+        lwz     r8,4(r10)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r5,16,0,31
+        rlwimi  r0,r5,0,8,15
+        rlwimi  r0,r5,0,24,31
+        stw     r0,8(r3)
+        rlwinm  r0,r7,8,0,31
+        rlwimi  r0,r7,24,0,7
+        rlwimi  r0,r7,24,16,23
+        stw     r0,12(r3)
+        rlwinm  r0,r8,8,0,31
+        rlwimi  r0,r8,24,0,7
+        rlwimi  r0,r8,24,16,23
+        stw     r0,16(r3)
+        addi    r3,r3,20
+        add     r4,r4,r6
+        add     r9,r9,r6
+        add     r10,r10,r6
+        bdnz    1b
+        blr
+
+        .balign 16
+        .global MGLPPCSwapTCL6X
+MGLPPCSwapTCL6X:
+        cmpwi   r5,0
+        beqlr
+        stwu    r1,-16(r1)
+        stw     r14,8(r1)
+        mtctr   r5
+        add     r9,r4,r7
+        add     r10,r4,r8
+1:      lwz     r11,0(r4)
+        lwz     r12,4(r4)
+        lwz     r14,8(r4)
+        lwz     r5,0(r9)
+        lwz     r7,0(r10)
+        lwz     r8,4(r10)
+        rlwinm  r0,r11,8,0,31
+        rlwimi  r0,r11,24,0,7
+        rlwimi  r0,r11,24,16,23
+        stw     r0,0(r3)
+        rlwinm  r0,r12,8,0,31
+        rlwimi  r0,r12,24,0,7
+        rlwimi  r0,r12,24,16,23
+        stw     r0,4(r3)
+        rlwinm  r0,r14,8,0,31
+        rlwimi  r0,r14,24,0,7
+        rlwimi  r0,r14,24,16,23
+        stw     r0,8(r3)
+        rlwinm  r0,r5,16,0,31
+        rlwimi  r0,r5,0,8,15
+        rlwimi  r0,r5,0,24,31
+        stw     r0,12(r3)
+        rlwinm  r0,r7,8,0,31
+        rlwimi  r0,r7,24,0,7
+        rlwimi  r0,r7,24,16,23
+        stw     r0,16(r3)
+        rlwinm  r0,r8,8,0,31
+        rlwimi  r0,r8,24,0,7
+        rlwimi  r0,r8,24,16,23
+        stw     r0,20(r3)
+        addi    r3,r3,24
+        add     r4,r4,r6
+        add     r9,r9,r6
+        add     r10,r10,r6
+        bdnz    1b
+        lwz     r14,8(r1)
+        addi    r1,r1,16
         blr

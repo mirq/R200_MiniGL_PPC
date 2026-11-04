@@ -145,6 +145,27 @@ struct Radeon3DEmitState {
 
 /* Resolve a raw handle dword from a record into *slot and return slot, or
  * NULL when the handle is not usable. Called at most once per record field. */
+/* Consumer extension (MiniGL): the register list a full state emission
+ * produced for one unlit state, kept so that a state seen again (an
+ * emulator alternates a few blend/texture states between most primitives)
+ * replays its (register, value) pairs through the register cache instead
+ * of deriving ~90 values again. Only the base zone of State is kept. */
+#define RADEON3D_STATE_MEMO_ENTRIES 4UL
+#define RADEON3D_STATE_MEMO_PAIRS 128UL
+struct Radeon3DStateMemo {
+    BOOL Valid;
+    ULONG Pairs;
+    ULONG Touches;
+    volatile const UBYTE *Touch[2];
+    struct Radeon3DEmitState State;
+    ULONG List[2UL * RADEON3D_STATE_MEMO_PAIRS];
+    /* the pairs of List whose register DeltaFrom's list lacks or gives
+     * another value: all a switch from DeltaFrom's state has to replay */
+    struct Radeon3DStateMemo *DeltaFrom;
+    ULONG DeltaPairs;
+    ULONG Delta[2UL * RADEON3D_STATE_MEMO_PAIRS];
+};
+
 typedef struct Radeon3DEmitSurface *(*Radeon3DEmitResolveFn)(
     void *user, ULONG handle, struct Radeon3DEmitSurface *slot);
 
@@ -206,6 +227,21 @@ struct Radeon3DEmitter {
      * the current draw's, or 0 for a plain DRAW_VBUF_2. */
     const ULONG *CommitIndexOffsets;
     ULONG CommitIndexOffset;
+    /* State memo (see struct Radeon3DStateMemo): MemoRec is set while a
+     * full emission records into one entry; MemoRecBad marks a recording
+     * that cannot be replayed (overflow, an uncached register). */
+    struct Radeon3DStateMemo *MemoRec;
+    BOOL MemoRecBad;
+    /* RegWrites counts register writes; MemoLast is the entry whose whole
+     * list the card holds, valid while RegWrites and RegCacheGen are still
+     * MemoLastWrites and MemoLastGen (nothing written since, same
+     * submission) */
+    ULONG RegWrites;
+    struct Radeon3DStateMemo *MemoLast;
+    ULONG MemoLastWrites;
+    ULONG MemoLastGen;
+    ULONG MemoNext;
+    struct Radeon3DStateMemo Memo[RADEON3D_STATE_MEMO_ENTRIES];
 };
 
 /* Point Live/Build at the emitter's two captures. Call once per submission,

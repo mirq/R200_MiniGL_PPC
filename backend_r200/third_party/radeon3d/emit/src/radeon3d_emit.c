@@ -14,6 +14,7 @@
  * service and is not carried over.
  */
 
+extern unsigned long MGLPPCPalVar;  /* MGLPPC_PALVAR: see minigl_r200_warpos_compile_probe.c */
 #include <stddef.h>
 
 #include "radeon_regs.h"
@@ -292,11 +293,25 @@ static BOOL ExecuteEmitRegister(struct Radeon3DEmitter *emitter,
                   reg != R200_SE_TCL_VECTOR_INDX_REG &&
                   reg != R200_SE_TCL_SCALAR_INDX_REG;
 
+    if (emitter->MemoRec) {
+        struct Radeon3DStateMemo *memo = emitter->MemoRec;
+
+        if (!cached) {
+            if (reg != RADEON_HOST_PATH_CNTL)
+                emitter->MemoRecBad = TRUE;
+        } else if (memo->Pairs < RADEON3D_STATE_MEMO_PAIRS) {
+            memo->List[2UL * memo->Pairs] = reg;
+            memo->List[2UL * memo->Pairs + 1UL] = value;
+            memo->Pairs++;
+        } else
+            emitter->MemoRecBad = TRUE;
+    }
     if (cached && emitter->RegCacheGen &&
         emitter->RegCacheTag[slot] == emitter->RegCacheGen &&
         emitter->RegCacheKey[slot] == reg &&
         emitter->RegCacheValue[slot] == value)
         return TRUE;
+    emitter->RegWrites++;
     if (!ExecuteEmitWord(emitter, RADEON_CP_PACKET0(reg, 0)) ||
         !ExecuteEmitWord(emitter, value))
         return FALSE;
@@ -629,7 +644,9 @@ static BOOL EmitExecuteTexture(struct Radeon3DEmitter *emitter,
             filter |= R200_MAG_FILTER_LINEAR;
         /* Mesa maps GL_REPEAT to the zero-valued CLAMP_*_WRAP field.
          * WRAPEN_* is the separate D3D/cylindrical interpolation facility. */
-        if (!(textureState & RADEON3D_TEX_REPEAT_S))
+        if (textureState & RADEON3D_TEX_BORDER_S)
+            filter |= R200_CLAMP_S_CLAMP_BORDER;
+        else if (!(textureState & RADEON3D_TEX_REPEAT_S))
             filter |= R200_CLAMP_S_CLAMP_LAST;
         if (!(textureState & RADEON3D_TEX_REPEAT_T))
             filter |= R200_CLAMP_T_CLAMP_LAST;
@@ -651,26 +668,42 @@ static BOOL EmitExecuteTexture(struct Radeon3DEmitter *emitter,
             texturePitch = 0;
         }
     }
-    if (unit)
+    /* RADEON3D_DRAW_PALETTE: unit 1 takes its coordinates from shader
+     * register R2 (the index and the palette row), not from a vertex pair */
+    if (unit && !(options & RADEON3D_DRAW_PALETTE))
         textureFormat |= R200_TXFORMAT_ST_ROUTE_STQ1;
     textureEnd = (volatile UBYTE *)texture->CpuAddress + textureOffset +
                  textureBytes - 1UL;
     /* Drain posted CPU texture writes before the CP reads this allocation. */
     (void)*textureEnd;
+    if (emitter->MemoRec) {
+        if (emitter->MemoRec->Touches < 2UL)
+            emitter->MemoRec->Touch[emitter->MemoRec->Touches++] = textureEnd;
+        else
+            emitter->MemoRecBad = TRUE;
+    }
     if (texture->Format == RADEON3D_FORMAT_R5G6B5PC)
         textureFormat |= R200_TXFORMAT_RGB565;
     else
         textureFormat |= R200_TXFORMAT_ARGB8888 | R200_TXFORMAT_ALPHA_IN_MAP;
-    if (options & RADEON3D_DRAW_BILINEAR)
+    if ((options & RADEON3D_DRAW_BILINEAR) && !(options & RADEON3D_DRAW_PALETTE))
         filter |= R200_MAG_FILTER_LINEAR | R200_MIN_FILTER_LINEAR;
+    if (options & RADEON3D_DRAW_PALETTE)    /* an index or a palette entry: never blended */
+        filter &= ~(R200_MAG_FILTER_LINEAR | R200_MIN_FILTER_LINEAR);
     return ExecuteEmitRegister(emitter, filterReg, filter) &&
            ExecuteEmitRegister(emitter, formatReg, textureFormat) &&
             ExecuteEmitRegister(emitter, formatXReg,
                                 projected ? R200_TEXCOORD_PROJ : 0) &&
            ExecuteEmitRegister(emitter, sizeReg, textureSize) &&
            ExecuteEmitRegister(emitter, pitchReg, texturePitch) &&
-           ExecuteEmitRegister(emitter, multiReg, 0) &&
-           ExecuteEmitRegister(emitter, offsetReg, textureAddress);
+           ExecuteEmitRegister(emitter, multiReg,
+                               (unit && (options & RADEON3D_DRAW_PALETTE))
+                                   ? R200_PASS2_COORDS_REG_2 : 0UL) &&
+           ExecuteEmitRegister(emitter, offsetReg, textureAddress) &&
+           /* white: what RADEON3D_TEX_BORDER_S samples outside the texture
+            * (the register cache drops it after the first time) */
+           ExecuteEmitRegister(emitter, unit ? R200_PP_BORDER_COLOR_1 : R200_PP_BORDER_COLOR_0,
+                               0xffffffffUL);
 }
 static BOOL ValidExecuteScissor(struct Radeon3DEmitSurface *target,
                                 ULONG left, ULONG top,
@@ -730,6 +763,9 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
     BOOL textured = (options & RADEON3D_DRAW_TEXTURED) != 0;
     BOOL textured1 = extendedVertex &&
                       (vertexState & RADEON3D_VERTEX_TEXTURE1) != 0;
+    /* unit 1 bound without vertex coordinates (RADEON3D_DRAW_PALETTE) */
+    BOOL palette = (options & RADEON3D_DRAW_PALETTE) && textured && texture1 &&
+                   !textured1 && fragmentStatePresent;
     BOOL texGen = state->TexGen;
     BOOL texGen0 = texGen && state->TexGenState[0] !=
                    RADEON3D_TEXGEN_MODE_OFF;
@@ -779,6 +815,14 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                               RADEON_HDP_READ_BUFFER_INVALIDATE) ||
          !ExecuteEmitRegister(emitter, RADEON_HOST_PATH_CNTL, 0UL)))
         return FALSE;
+    /* RADEON3D_DRAW_PALETTE: the palette row comes as unit 1's one texture
+     * coordinate (the vertex's last dword): the R200's first shader pass
+     * saw the previous primitive's vertex colour in shared tiles, so the
+     * row cannot ride in the alpha */
+    if (palette && MGLPPCPalVar < 2UL) {
+        format1 |= 2UL << R200_VTX_TEX1_COMP_CNT_SHIFT;    /* s1,t1: 1 hung the R200 */
+        outputFormat1 |= 2UL << R200_VTX_TEX1_COMP_CNT_SHIFT;
+    }
     if (normalVertex)
         format0 |= R200_VTX_N0;
     if (sphereMap0 || sphereMap1)
@@ -817,9 +861,10 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
         }
     }
 
-    if (useDepth || perspective)
+    if ((useDepth || perspective) &&
+        !(hardwareTcl && (options & RADEON3D_DRAW_NO_Z)))
         format0 |= R200_VTX_Z0;
-    if (perspective)
+    if (perspective && !(hardwareTcl && (options & RADEON3D_DRAW_NO_W)))
         format0 |= R200_VTX_W0;
     if (textured) {
         format0 &= ~(3UL << R200_VTX_COLOR_0_SHIFT);
@@ -1129,6 +1174,60 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                                    R200_TXA_OUTPUT_REG_R0))) ||
         !ExecuteEmitRegister(emitter, R200_PP_CNTL_X, 0))
         return FALSE;
+    /* RADEON3D_DRAW_PALETTE: the two-pass fragment shader (Mesa
+     * r200_fragshader.c). Pass 1 fetches unit 0 (the index, into R0) and
+     * has unit 2 pass coordinate set 1 through (the row, into R2; unit 1
+     * in both passes hung the R200), and builds R2 = (index, row); pass 2
+     * fetches unit 1 at R2 (into R1): colour R1 x diffuse (x2 with the
+     * unit's scale), alpha R1's. */
+    if (palette &&
+        (!ExecuteEmitRegister(emitter, R200_PP_CNTL,
+                              (ppControl & ~R200_TEX_0_ENABLE) |
+                                  R200_MULTI_PASS_ENABLE | R200_TEX_1_ENABLE) ||
+         (MGLPPCPalVar == 0UL
+          ? /* pass 1: unit 2 passes coordinate set 1 (the row) into R2;
+             * R2.g = R2.r (the row), then R2.r = R0.r (the index) */
+            (!ExecuteEmitRegister(emitter, R200_PP_TXMULTI_CTL_2,
+                                  R200_PASS1_TXFORMAT_LOOKUP_DISABLE |
+                                      R200_PASS1_ST_ROUTE_STQ1) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND_8,
+                                  R200_TXC_ARG_C_R2_COLOR |
+                                      (R200_TXC_REPL_RED << R200_TXC_REPL_ARG_C_SHIFT)) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND2_8,
+                                  R200_TXC_CLAMP_0_1 | R200_TXC_OUTPUT_REG_R2 |
+                                      R200_TXC_OUTPUT_MASK_G) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND_9, R200_TXC_ARG_C_R0_COLOR) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND2_9,
+                                  R200_TXC_CLAMP_0_1 | R200_TXC_OUTPUT_REG_R2 |
+                                      R200_TXC_OUTPUT_MASK_R))
+          : /* R2.r = R0.r (the index), R2.g = the vertex alpha (the row) */
+            (!ExecuteEmitRegister(emitter, R200_PP_TXCBLEND_8, R200_TXC_ARG_C_R0_COLOR) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND2_8,
+                                  R200_TXC_CLAMP_0_1 | R200_TXC_OUTPUT_REG_R2 |
+                                      R200_TXC_OUTPUT_MASK_R) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND_9, R200_TXC_ARG_C_DIFFUSE_ALPHA) ||
+             !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND2_9,
+                                  R200_TXC_CLAMP_0_1 | R200_TXC_OUTPUT_REG_R2 |
+                                      R200_TXC_OUTPUT_MASK_G))) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND_8, 0UL) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND2_8, 0UL) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND_9, 0UL) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND2_9, 0UL) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND_0,
+                              R200_TXC_ARG_A_R1_COLOR | R200_TXC_ARG_B_DIFFUSE_COLOR) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXCBLEND2_0,
+                              R200_TXC_CLAMP_0_1 | R200_TXC_OUTPUT_REG_R0 |
+                                  ((textureState & RADEON3D_TEX_SCALE_2X)
+                                       ? R200_TXC_SCALE_2X : 0UL)) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND_0, R200_TXA_ARG_C_R1_ALPHA) ||
+         !ExecuteEmitRegister(emitter, R200_PP_TXABLEND2_0,
+                              R200_TXA_CLAMP_0_1 | R200_TXA_OUTPUT_REG_R0) ||
+         !ExecuteEmitRegister(emitter, R200_PP_CNTL_X,
+                              R200_PPX_TEX_0_ENABLE |
+                                  (MGLPPCPalVar == 0UL ? R200_PPX_TEX_2_ENABLE : 0UL) |
+                                  R200_PPX_OUTPUT_REG_2 |
+                                  (3UL << R200_PPX_FPS_INST0_ENABLE_SHIFT))))
+        return FALSE;
 
     if (textured &&
         !EmitExecuteTexture(emitter, texture, 0, options,
@@ -1138,7 +1237,7 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
                               texGen0 && (state->TexGenState[0] &
                                           RADEON3D_TEXGEN_GEN_Q)))
         return FALSE;
-    if (textured1 &&
+    if ((textured1 || palette) &&
         !EmitExecuteTexture(emitter, texture1, 1, options, TRUE,
                              texture1Offset, texture1Width, texture1Height,
                               texture1State, texture1Bytes,
@@ -1186,6 +1285,159 @@ static BOOL EmitExecuteState(struct Radeon3DEmitter *emitter,
      * EmitExecuteStateCached(), which caches them across records. */
     return TRUE;
 }
+extern unsigned long MGLPPCStateMemo;  /* MGLPPC_NOSTATEMEMO=1: 0 */
+
+/* The bytes of a capture SameExecuteState reads for an unlit state. */
+#define STATE_MEMO_BASE_DWORDS \
+    (offsetof(struct Radeon3DEmitState, GlobalAmbient) / sizeof(ULONG))
+
+/* memo's pairs that differ from from's list (a register from's list
+ * lacks, or another value): from's values are on the card, so these are
+ * all a switch from from's state writes. A slot both lists' registers
+ * share only puts a pair in the delta needlessly. */
+static void BuildStateMemoDelta(struct Radeon3DStateMemo *memo,
+                                struct Radeon3DStateMemo *from)
+{
+    ULONG keys[128], values[128], index, n = 0;
+
+    for (index = 0; index < 128UL; ++index)
+        keys[index] = 0;
+    for (index = 0; index < from->Pairs; ++index) {
+        ULONG reg = from->List[2UL * index];
+        ULONG slot = (reg >> 2) & 127UL;
+
+        if (keys[slot] && keys[slot] != reg)
+            keys[slot] = 1UL;           /* two registers: matches neither */
+        else {
+            keys[slot] = reg;
+            values[slot] = from->List[2UL * index + 1UL];
+        }
+    }
+    for (index = 0; index < memo->Pairs; ++index) {
+        ULONG reg = memo->List[2UL * index];
+        ULONG value = memo->List[2UL * index + 1UL];
+        ULONG slot = (reg >> 2) & 127UL;
+
+        if (keys[slot] == reg && values[slot] == value)
+            continue;
+        memo->Delta[2UL * n] = reg;
+        memo->Delta[2UL * n + 1UL] = value;
+        n++;
+    }
+    memo->DeltaPairs = n;
+    memo->DeltaFrom = from;
+}
+
+static void StateMemoHeld(struct Radeon3DEmitter *emitter,
+                          struct Radeon3DStateMemo *memo)
+{
+    emitter->MemoLast = memo;
+    emitter->MemoLastWrites = emitter->RegWrites;
+    emitter->MemoLastGen = emitter->RegCacheGen;
+}
+
+/* A state emitted before, again: the same register list through the
+ * register cache. The host-path invalidate depends on the live capture,
+ * not on the state, so it is decided here as EmitExecuteState does. */
+static BOOL ReplayStateMemo(struct Radeon3DEmitter *emitter,
+                            const struct Radeon3DStateMemo *memo,
+                            const struct Radeon3DEmitState *state)
+{
+    const ULONG *list = memo->List;
+    ULONG pairs = memo->Pairs, index;
+    struct Radeon3DStateMemo *from = emitter->MemoLast;
+    ULONG gen = emitter->RegCacheGen;
+    ULONG *words = emitter->Words;
+    ULONG count = emitter->Count;
+
+    if (((state->TextureState ^ emitter->Live->TextureState) |
+         (state->Texture1State ^ emitter->Live->Texture1State)) &
+        RADEON3D_TEX_CONTENT_MASK &&
+        (!ExecuteEmitRegister(emitter, RADEON_HOST_PATH_CNTL,
+                              RADEON_HDP_READ_BUFFER_INVALIDATE) ||
+         !ExecuteEmitRegister(emitter, RADEON_HOST_PATH_CNTL, 0UL)))
+        return FALSE;
+    if (!gen || emitter->MemoLastWrites != emitter->RegWrites ||
+        emitter->MemoLastGen != gen)
+        from = NULL;
+    if (from == memo)
+        pairs = 0;          /* the card holds this list already */
+    else if (from) {
+        if (memo->DeltaFrom != from)
+            BuildStateMemoDelta(memo, from);
+        list = memo->Delta;
+        pairs = memo->DeltaPairs;
+    }
+    count = emitter->Count;
+    for (index = 0; index < memo->Touches; ++index)
+        (void)*memo->Touch[index];
+    for (index = 0; index < pairs; ++index, list += 2) {
+        ULONG reg = list[0], value = list[1];
+        ULONG slot = (reg >> 2) & 127UL;
+
+        if (gen && emitter->RegCacheTag[slot] == gen &&
+            emitter->RegCacheKey[slot] == reg &&
+            emitter->RegCacheValue[slot] == value)
+            continue;
+        if (count + 2UL > RADEON3D_MAX_BATCH_DWORDS) {
+            emitter->Count = count;
+            return FALSE;
+        }
+        words[count] = RADEON_CP_PACKET0(reg, 0);
+        words[count + 1UL] = value;
+        count += 2UL;
+        emitter->RegCacheTag[slot] = gen;
+        emitter->RegCacheKey[slot] = reg;
+        emitter->RegCacheValue[slot] = value;
+        emitter->RegWrites++;
+    }
+    emitter->Count = count;
+    StateMemoHeld(emitter, (struct Radeon3DStateMemo *)memo);
+    return TRUE;
+}
+
+/* EmitExecuteState through the memo: replay a matching entry, or emit
+ * in full while recording into the next entry. */
+static BOOL EmitExecuteStateMemo(struct Radeon3DEmitter *emitter,
+                                 const struct Radeon3DEmitState *state)
+{
+    struct Radeon3DStateMemo *memo;
+    ULONG index;
+
+    for (index = 0; index < RADEON3D_STATE_MEMO_ENTRIES; ++index) {
+        memo = &emitter->Memo[index];
+        if (memo->Valid && SameExecuteState(&memo->State, state))
+            return ReplayStateMemo(emitter, memo, state);
+    }
+    memo = &emitter->Memo[emitter->MemoNext++ & (RADEON3D_STATE_MEMO_ENTRIES - 1UL)];
+    memo->Valid = FALSE;
+    memo->Pairs = 0;
+    memo->Touches = 0;
+    memo->DeltaFrom = NULL;
+    for (index = 0; index < RADEON3D_STATE_MEMO_ENTRIES; ++index)
+        if (emitter->Memo[index].DeltaFrom == memo)
+            emitter->Memo[index].DeltaFrom = NULL;
+    if (emitter->MemoLast == memo)
+        emitter->MemoLast = NULL;
+    emitter->MemoRec = memo;
+    emitter->MemoRecBad = FALSE;
+    if (!EmitExecuteState(emitter, state)) {
+        emitter->MemoRec = NULL;
+        return FALSE;
+    }
+    emitter->MemoRec = NULL;
+    if (!emitter->MemoRecBad) {
+        const ULONG *from = (const ULONG *)state;
+        ULONG *to = (ULONG *)&memo->State;
+
+        for (index = 0; index < STATE_MEMO_BASE_DWORDS; ++index)
+            to[index] = from[index];
+        memo->Valid = TRUE;
+        StateMemoHeld(emitter, memo);
+    }
+    return TRUE;
+}
+
 static BOOL EmitExecuteStateCached(struct Radeon3DEmitter *emitter,
                                    const struct Radeon3DEmitState *state)
 {
@@ -1227,6 +1479,9 @@ static BOOL EmitExecuteStateCached(struct Radeon3DEmitter *emitter,
                                     texGen1 &&
                                     (state->TexGenState[1] &
                                      RADEON3D_TEXGEN_GEN_Q)))
+                return FALSE;
+        } else if (MGLPPCStateMemo && !state->Lighting) {
+            if (!EmitExecuteStateMemo(emitter, state))
                 return FALSE;
         } else if (!EmitExecuteState(emitter, state))
             return FALSE;
@@ -1369,14 +1624,22 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
 {
     BOOL perspective=hardwareTcl || (extendedVertex &&
                      (vertexState & RADEON3D_VERTEX_CLIP_COORDINATES));
+    BOOL noW = hardwareTcl && compactVertex && !normalVertex &&
+               !(vertexState & (RADEON3D_VERTEX_TEXTURE1 | RADEON3D_VERTEX_FOG)) &&
+               emitter->Live && (emitter->Live->Options & RADEON3D_DRAW_NO_W);
+    BOOL noZ = noW && (emitter->Live->Options & RADEON3D_DRAW_NO_Z);
+    /* RADEON3D_DRAW_PALETTE: one more dword, the palette row (unit 1's s) */
+    BOOL pal = noW && textured && (emitter->Live->Options & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL;
     ULONG tclStride = hardwareTcl ?
         (compactVertex ? (normalVertex ? 10UL :
-                          (vertexState & RADEON3D_VERTEX_TEXTURE1) ? 9UL : 7UL) :
+                          (vertexState & RADEON3D_VERTEX_TEXTURE1) ? 9UL :
+                          noW ? (noZ ? 3UL : 4UL) + (textured ? 2UL : 0UL) + (pal ? 2UL : 0UL) :
+                          7UL) :
          normalVertex ? RADEON3D_EXEC_HW_TCL_NORMAL_VERTEX_DWORDS :
                         RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS) : 0UL;
     ULONG dwordsPerVertex = hardwareTcl ?
-        5UL + (normalVertex ? 3UL : 0UL) +
-              (textured ? 2UL : 0UL) +
+        (noZ ? 3UL : noW ? 4UL : 5UL) + (normalVertex ? 3UL : 0UL) +
+              (textured ? 2UL : 0UL) + (pal ? 2UL : 0UL) +
               ((vertexState & RADEON3D_VERTEX_TEXTURE1) ? 2UL : 0UL) +
               ((vertexState & RADEON3D_VERTEX_FOG) ? 1UL : 0UL) :
         3UL + ((useDepth || perspective) ? 1UL : 0UL) +
@@ -1397,7 +1660,7 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
         ULONG arrays = 0;
         ULONG array;
         ULONG payload;
-        ULONG colorOffset = normalVertex ? 7UL : 4UL;
+        ULONG colorOffset = normalVertex ? 7UL : noZ ? 2UL : noW ? 3UL : 4UL;
 
         /* DEBUG (render investigation): publish the VAP descriptor decision
          * for this draw so the frontend's record logger can print it beside
@@ -1421,7 +1684,7 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
          * is mandatory: SE_VTX_FMT describes the vertex layout. */
         if (!hardwareTcl)
             return FALSE;
-        components[arrays] = 4;
+        components[arrays] = noZ ? 2 : noW ? 3 : 4;
         offsets[arrays++] = 0;
         if (normalVertex) {
             components[arrays] = 3;
@@ -1437,11 +1700,15 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
         }
         if (textured) {
             components[arrays] = 2;
-            offsets[arrays++] = (UBYTE)(normalVertex ? 8UL : 5UL);
+            offsets[arrays++] = (UBYTE)(normalVertex ? 8UL : noZ ? 3UL : noW ? 4UL : 5UL);
         }
         if (vertexState & RADEON3D_VERTEX_TEXTURE1) {
             components[arrays] = 2;
             offsets[arrays++] = (UBYTE)(normalVertex ? 10UL : 7UL);
+        }
+        if (pal) {
+            components[arrays] = 2;
+            offsets[arrays++] = (UBYTE)((noZ ? 3UL : 4UL) + 2UL);
         }
         payload = 1UL + (arrays >> 1) * 3UL + (arrays & 1UL) * 2UL;
         if (!ExecuteEmitWord(
@@ -1502,6 +1769,48 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
                                    primitiveType);
     }
 
+    if (noW) {
+        /* x,y,z,colour[,s,t]: the record's 6-dword vertices less the
+         * unused texture pair when untextured */
+        ULONG *output;
+
+        if (emitter->Count + 2UL + vertexDwords > RADEON3D_MAX_BATCH_DWORDS ||
+            !ExecuteEmitWord(emitter,
+                             RADEON_CP_PACKET3(R200_CP_CMD_3D_DRAW_IMMD_2,
+                                               vertexDwords)) ||
+            !ExecuteEmitWord(emitter,
+                              (vertexCount << 16) |
+                                  R200_CP_VC_CNTL_PRIM_WALK_RING |
+                                  R200_VF_TCL_OUTPUT_VTX_ENABLE |
+                                  primitiveType))
+            return FALSE;
+        output = emitter->Words + emitter->Count;
+        for (vertex = 0; vertex < vertexCount; ++vertex) {
+            const ULONG *input = vertices + vertex * tclStride;
+            ULONG c = noZ ? 2UL : 3UL;     /* the colour's dword */
+
+            if (!ValidFloat(input[0]) || !ValidFloat(input[1]) ||
+                (!noZ && !ValidFloat(input[2])) ||
+                (textured && (!ValidTextureCoordinate(input[c + 1UL]) ||
+                              !ValidTextureCoordinate(input[c + 2UL]))))
+                return FALSE;
+            *output++ = input[0];
+            *output++ = input[1];
+            if (!noZ)
+                *output++ = input[2];
+            *output++ = input[c];
+            if (textured) {
+                *output++ = input[c + 1UL];
+                *output++ = input[c + 2UL];
+            }
+            if (pal) {
+                *output++ = input[c + 3UL];
+                *output++ = input[c + 4UL];
+            }
+        }
+        emitter->Count = (ULONG)(output - emitter->Words);
+        return TRUE;
+    }
     if (hardwareTcl &&
         !(vertexState & (RADEON3D_VERTEX_TEXTURE1 |
                          RADEON3D_VERTEX_FOG))) {
@@ -1573,6 +1882,43 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
                               (hardwareTcl ? R200_VF_TCL_OUTPUT_VTX_ENABLE : 0) |
                               primitiveType))
         return FALSE;
+    if (!hardwareTcl && !extendedVertex && !perspective &&
+        emitter->Count + vertexDwords <= RADEON3D_MAX_BATCH_DWORDS) {
+        /* Screen-space vertices (MiniGL's flat and clipped 2D paths): the
+         * checks and words of the loop below for this shape, with the batch
+         * room tested once instead of per word. */
+        ULONG *output = emitter->Words + emitter->Count;
+        BOOL texCheck = fragmentStatePresent && textured;
+
+        for (vertex = 0; vertex < vertexCount; ++vertex) {
+            const ULONG *input = vertices + vertex * RADEON3D_EXEC_VERTEX_DWORDS;
+
+            if (color &&
+                (!ValidScreenCoordinate(input[0], color->Width) ||
+                 !ValidScreenCoordinate(input[1], color->Height) ||
+                 !ValidUnitFloat(input[2]) ||
+                 (texCheck ? (!ValidTextureCoordinate(input[3]) ||
+                              !ValidTextureCoordinate(input[4]))
+                           : (!ValidUnitFloat(input[3]) ||
+                              !ValidUnitFloat(input[4]))) ||
+                 (!textured && (input[3] || input[4]))))
+                return FALSE;
+            *output++ = input[0];
+            *output++ = input[1];
+            if (useDepth)
+                *output++ = input[2];
+            if (textured) {
+                if (fragmentStatePresent)
+                    *output++ = input[5];
+                *output++ = input[3];
+                *output++ = input[4];
+            } else {
+                *output++ = input[5];
+            }
+        }
+        emitter->Count = (ULONG)(output - emitter->Words);
+        return TRUE;
+    }
     for (vertex = 0; vertex < vertexCount; ++vertex) {
         const ULONG *input = vertices + vertex *
             (hardwareTcl ? tclStride :
@@ -1830,7 +2176,7 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
     ULONG commitOffset = 0;
     BOOL compactVertex;
     BOOL textured;
-    BOOL textured1;
+    BOOL textured1, unit1Bound;
     BOOL fog;
     BOOL perspective;
     BOOL useDepth;
@@ -1899,7 +2245,13 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
         headerDwords += RADEON3D_EXEC_LIGHT_STATE_DWORDS;
     }
     vertexStride = hardwareTcl ?
-        (compactVertex ? (normalVertex ? 10UL : 7UL) :
+        (compactVertex ? (normalVertex ? 10UL :
+                          (options & RADEON3D_DRAW_NO_W)
+                              ? ((options & RADEON3D_DRAW_NO_Z) ? 3UL : 4UL) +
+                                ((options & RADEON3D_DRAW_TEXTURED) ? 2UL : 0UL) +
+                                ((options & RADEON3D_DRAW_TEXTURED) &&
+                                 (options & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL ? 2UL : 0UL)
+                              : 7UL) :
          normalVertex ? RADEON3D_EXEC_HW_TCL_NORMAL_VERTEX_DWORDS :
                         RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS) :
         extendedVertex ? RADEON3D_EXEC_EXTENDED_VERTEX_DWORDS
@@ -1974,6 +2326,11 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
     }
     textured1 = extendedVertex &&
                 (vertexState & RADEON3D_VERTEX_TEXTURE1) != 0;
+    /* RADEON3D_DRAW_PALETTE: unit 1 bound (the palettes) with no vertex
+     * coordinates; validated as a unit-1 texture, strided as none */
+    unit1Bound = textured1 ||
+                 (hardwareTcl && textured && fragmentStatePresent &&
+                  (options & RADEON3D_DRAW_PALETTE) && texture1Handle);
     /* The vertex state is only known here: the unlit compact stride
      * keeps the unit-1 pair (9 dwords) when unit 1 is active. */
     if (hardwareTcl && compactVertex && !normalVertex && textured1)
@@ -2063,6 +2420,14 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
                      (fogColor & 0xff000000UL))) ||
          /* Compact strides drop the unused tail: never fog; unit 1 only
           * in the 9-dword unlit shape (x,y,z,w,colour,s0,t0,s1,t1). */
+         (options & RADEON3D_DRAW_NO_Z &&
+          (!(options & RADEON3D_DRAW_NO_W) ||
+           (options & (RADEON3D_DRAW_DEPTH_LESS | RADEON3D_DRAW_DEPTH_WRITE)))) ||
+         ((options & RADEON3D_DRAW_PALETTE) && !(options & RADEON3D_DRAW_NO_W)) ||
+         (options & RADEON3D_DRAW_NO_W &&
+          (!hardwareTcl || !(options & RADEON3D_DRAW_COMPACT_VERTEX) ||
+           normalVertex ||
+           (vertexState & (RADEON3D_VERTEX_FOG | RADEON3D_VERTEX_TEXTURE1)))) ||
          (options & RADEON3D_DRAW_COMPACT_VERTEX &&
           (!hardwareTcl ||
            (vertexState & RADEON3D_VERTEX_FOG) ||
@@ -2116,7 +2481,7 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
                          : !ValidTextureTarget(texture, color, depth))
                     : textureHandle != 0 || (fragmentStatePresent &&
                           (textureOffset || textureSize || textureState))) ||
-        (textured1
+        (unit1Bound
              ? !ValidTextureTargetWithState(texture1, color, depth,
                                      texture1Offset, texture1Width,
                                      texture1Height, levels1,
@@ -2234,7 +2599,7 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
             else if (textured1 && texture1 != texture &&
                      ExecuteSurfacesOverlap(texture1, texture))
                 detail = 100UL;
-            else if (!textured1 && extendedVertex &&
+            else if (!unit1Bound && extendedVertex &&
                      (texture1Handle || texture1Offset || texture1Size ||
                       texture1State))
                 detail = 101UL;
@@ -2427,7 +2792,13 @@ BOOL Radeon3DEmitVbufDraw(                                struct Radeon3DEmitter
     options = state->Options;
     vertexStride = (options & RADEON3D_DRAW_COMPACT_VERTEX)
         ? (state->NormalVertex ? 10UL :
-           (state->VertexState & RADEON3D_VERTEX_TEXTURE1) ? 9UL : 7UL)
+           (state->VertexState & RADEON3D_VERTEX_TEXTURE1) ? 9UL :
+           (options & RADEON3D_DRAW_NO_W)
+               ? ((options & RADEON3D_DRAW_NO_Z) ? 3UL : 4UL) +
+                 ((options & RADEON3D_DRAW_TEXTURED) ? 2UL : 0UL) +
+                 ((options & RADEON3D_DRAW_TEXTURED) &&
+                  (options & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL ? 2UL : 0UL)
+               : 7UL)
         : (state->NormalVertex ? RADEON3D_EXEC_HW_TCL_NORMAL_VERTEX_DWORDS
                                : RADEON3D_EXEC_HW_TCL_VERTEX_DWORDS);
     if ((primitiveType == R200_CP_VC_CNTL_PRIM_TYPE_POINT_LIST

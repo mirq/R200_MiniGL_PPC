@@ -436,6 +436,15 @@ typedef unsigned int    GLenum;
  * list (every three vertices one triangle), so one glDrawArrays carries a
  * whole run of separate primitives. */
 #define MGL_FLATTRIANGLES                    0x701E
+/* GL_MGL_unsync_subimage: glGetIntegerv(MGL_SYNC_POINT) names the
+ * submission that will carry every draw issued so far. With
+ * glPixelStorei(MGL_UNPACK_UNSYNC_AFTER, point) the client promises that no
+ * draw issued after that point samples the texels the following
+ * glTexSubImage2D calls replace; a texture update then need not wait for the
+ * GPU to finish with older draws once the point has retired. 0 (the
+ * default) waits as before. */
+#define MGL_SYNC_POINT                       0x701F
+#define MGL_UNPACK_UNSYNC_AFTER              0x7020
 /* Lighting queries/capabilities the R200 frontend implements (OpenGL values). */
 #define GL_MAX_LIGHTS                        0x0D31
 #define GL_RESCALE_NORMAL                    0x803A

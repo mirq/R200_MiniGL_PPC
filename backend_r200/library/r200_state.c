@@ -1,4 +1,7 @@
 #include "minigl_r200_internal.h"
+#if R200_PPC_FRONTEND
+extern ULONG MGLPPCNoTcl7;     /* MGLPPC_NOTCL7=1 */
+#endif
 #include <math.h>
 #include "debug_output.h"
 
@@ -375,7 +378,13 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
         state->header[17] = (texture1->width - 1UL) |
                             ((texture1->height - 1UL) << 16);
         state->header[18] = TextureState(context, texture1, 1);
-        vertexState |= RADEON3D_VERTEX_TEXTURE1;
+        if (context->paletteLookup && state->textured[0] && state->hardwareTransform &&
+            MGLPPCTcl6 && MGLPPCIndexedDraws && !MGLPPCNoTcl7) {
+            /* the palettes: bound, but no coordinates in the vertex */
+            state->textured[1] = FALSE;
+            options |= RADEON3D_DRAW_PALETTE;
+        } else
+            vertexState |= RADEON3D_VERTEX_TEXTURE1;
     }
     if (fragmentStatePresent) {
         options |= RADEON3D_DRAW_FRAGMENT_STATE;
@@ -423,6 +432,34 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
             options |= RADEON3D_DRAW_COMPACT_VERTEX;
             state->vertexDwords = R200_TCL_VERTEX_TEX1_COMPACT_DWORDS;
         }
+#if R200_PPC_FRONTEND
+        /* Unlit one-unit TCL without fog (WiiStation's transformed path,
+         * ~4.7k vertices a frame): the 7-dword x,y,z,w,colour,s0,t0 stride
+         * the PPC CP emitter takes (radeon3d_emit.c) instead of 10 -- 30%
+         * less vertex data written to the segment over the bus. Every
+         * written dword stays in place; MGLPPC_NOTCL7=1: 10 dwords. */
+        if (!state->normalVertex && MGLPPCIndexedDraws && !MGLPPCNoTcl7 &&
+            !state->textured[1] && !state->fog) {
+            options |= RADEON3D_DRAW_COMPACT_VERTEX;
+            state->vertexDwords = R200_TCL_VERTEX_COMPACT_DWORDS;
+            /* The client promises W = 1 for every vertex (MGLPPC_TCL6=1,
+             * WiiStation): 6 dwords, the VAP supplies W. */
+            if (MGLPPCTcl6) {
+                /* x,y,z,colour,s,t; no Z without the depth test, no s,t
+                 * untextured (radeon3d_emit.c takes the same stride) */
+                options |= RADEON3D_DRAW_NO_W;
+                /* not with the palette row as unit 1's s1,t1: x,y,colour,
+                 * s,t,s1,t1 (no Z) hung the R200 */
+                if (MGLPPCTcl5 && !state->depth &&
+                    !((options & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL))
+                    options |= RADEON3D_DRAW_NO_Z;
+                state->vertexDwords =
+                    ((options & RADEON3D_DRAW_NO_Z) ? 3UL : 4UL) +
+                    (state->textured[0] ? 2UL : 0UL) +
+                    ((options & RADEON3D_DRAW_PALETTE) && MGLPPCPalVar < 2UL ? 2UL : 0UL);
+            }
+        }
+#endif
         if (!context->combinedMatrixValid) {
             MultiplyMatrix(context->combinedMatrix,
                            context->projection[context->projectionDepth],
@@ -1091,6 +1128,10 @@ void Lib_glEnable(GLenum capability)
         if (context->zOffsetEnabled) goto noop;
         context->zOffsetEnabled = TRUE;
         semanticChange = TRUE;
+    } else if (capability == MGL_PALETTE_LOOKUP) {
+        if (context->paletteLookup) goto noop;
+        context->paletteLookup = TRUE;
+        semanticChange = TRUE;
     } else if (capability == MGL_PERSPECTIVE_MAPPING ||
                (capability >= 200 && capability <= 400)) {
         /* Quake toggles MGL_PERSPECTIVE_MAPPING per-frame (R_SetupGL vs
@@ -1202,6 +1243,10 @@ void Lib_glDisable(GLenum capability)
         if (!context->zOffsetEnabled) goto noop;
         context->zOffsetEnabled = FALSE;
         semanticChange = TRUE;
+    } else if (capability == MGL_PALETTE_LOOKUP) {
+        if (!context->paletteLookup) goto noop;
+        context->paletteLookup = FALSE;
+        semanticChange = TRUE;
     } else if (capability == MGL_PERSPECTIVE_MAPPING ||
                (capability >= 200 && capability <= 400)) {
         goto noop;
@@ -1265,6 +1310,8 @@ GLboolean Lib_glIsEnabled(GLenum capability)
         return context->polygonOffsetFillEnabled;
     if (capability == MGL_Z_OFFSET)
         return context->zOffsetEnabled;
+    if (capability == MGL_PALETTE_LOOKUP)
+        return context->paletteLookup;
     if (capability == GL_LIGHTING) return context->lightingEnabled;
     if (capability >= GL_LIGHT0 &&
         capability < GL_LIGHT0 + (GLenum)R200_MAX_LIGHTS)
@@ -1496,6 +1543,11 @@ void Lib_glGetIntegerv(GLenum name, GLint *value)
         return;
     }
     switch (name) {
+#if R200_PPC_FRONTEND
+    case MGL_SYNC_POINT:
+        *value = (GLint)R200PPCSyncPoint();
+        return;
+#endif
     case GL_MAX_LIGHTS:
         *value = (GLint)R200_MAX_LIGHTS;
         break;
@@ -1764,7 +1816,7 @@ static GLboolean IsEnableCapability(GLenum capability)
            capability == GL_CULL_FACE || capability == GL_TEXTURE_GEN_S ||
            capability == GL_TEXTURE_GEN_T ||
            capability == GL_POLYGON_OFFSET_FILL ||
-           capability == MGL_Z_OFFSET;
+           capability == MGL_Z_OFFSET || capability == MGL_PALETTE_LOOKUP;
 }
 
 void Lib_glGetBooleanv(GLenum name, GLboolean *value)

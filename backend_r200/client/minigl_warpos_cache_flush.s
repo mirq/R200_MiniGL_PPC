@@ -94,6 +94,22 @@ MGLPPCBlit565Swap:
 	lmw	14,-32(1)
 	blr
 
+	.globl MGLPPCFlushDataRangeNoSync
+	.type MGLPPCFlushDataRangeNoSync,@function
+# dcbf over the range without the closing sync: a caller flushing many
+# rows issues one MGLPPCStoreBarrier at the end instead of a sync a row.
+MGLPPCFlushDataRangeNoSync:
+	cmpwi	4,0
+	beqlr
+	rlwinm	5,3,0,0,26
+	add	6,3,4
+.flushns_loop:
+	dcbf	0,5
+	addi	5,5,32
+	cmplw	5,6
+	blt	.flushns_loop
+	blr
+
 	.globl MGLPPCInvalidateLine32
 	.type	MGLPPCInvalidateLine32,@function
 MGLPPCInvalidateLine32:

@@ -174,10 +174,24 @@ typedef char Radeon3DStateBatchV1SizeCheck[
  * 7 without). Requires RADEON3D_CAP_COMPACT_TCL_VERTEX and is rejected
  * when RADEON3D_VERTEX_TEXTURE1 or RADEON3D_VERTEX_FOG is set. */
 #define RADEON3D_DRAW_COMPACT_VERTEX (1UL << 14)
+/* With RADEON3D_DRAW_COMPACT_VERTEX, unlit, one unit, no fog: the position
+ * has no W (x,y,z,colour,s,t; the VAP supplies W = 1). Streaming commits of
+ * the PPC CP emitter only. */
+#define RADEON3D_DRAW_NO_W           (1UL << 15)
+/* With RADEON3D_DRAW_NO_W and no depth test: no Z either (x,y,colour,s,t;
+ * the VAP supplies Z = 0). */
+#define RADEON3D_DRAW_NO_Z           (1UL << 16)
+/* Palette lookup (hardware TCL only): unit 0 holds palette indices (red
+ * channel), unit 1 the palettes, one a row; the R200's two-pass fragment
+ * shader reads the index and the row (the vertex alpha) and looks the
+ * colour up in unit 1 -- a dependent read, no unit-1 coordinates in the
+ * vertex. Colour = palette x vertex colour, alpha = the palette's. Both
+ * units sample nearest. */
+#define RADEON3D_DRAW_PALETTE        (1UL << 17)
 #define RADEON3D_DRAW_OPTIONS_BASIC  0x000000ffUL
 #define RADEON3D_DRAW_OPTIONS_FRAGMENT 0x000001ffUL
 #define RADEON3D_DRAW_OPTIONS_PRE_TCL 0x000003ffUL
-#define RADEON3D_DRAW_OPTIONS        0x00007fffUL
+#define RADEON3D_DRAW_OPTIONS        0x0003ffffUL
 
 #define RADEON3D_TEX_MODULATE        (1UL << 0)
 #define RADEON3D_TEX_REPEAT_S        (1UL << 1)
@@ -194,7 +208,10 @@ typedef char Radeon3DStateBatchV1SizeCheck[
 /* GL_MGL_texture_env_alpha_scale: the modulated alpha x 2 (PP_TXABLEND2
  * SCALE_2X), clamped to 1. Same rule as RADEON3D_TEX_SCALE_2X. */
 #define RADEON3D_TEX_ALPHA_SCALE_2X  (1UL << 12)
-#define RADEON3D_TEX_STATE_MASK      0x00001fffUL
+/* GL_CLAMP_TO_BORDER on s: a coordinate outside the texture samples the
+ * border colour, white (PP_BORDER_COLOR). Frontend-emitted streams only. */
+#define RADEON3D_TEX_BORDER_S        (1UL << 13)
+#define RADEON3D_TEX_STATE_MASK      0x00003fffUL
 /* Bits 16-31 carry the client's texture content serial. It changes whenever
  * an in-place texel update reaches the surface, forcing the service to
  * re-emit the texture unit state (including PP_TXOFFSET) so the GPU's

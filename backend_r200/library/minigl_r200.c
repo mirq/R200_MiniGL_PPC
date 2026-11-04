@@ -525,7 +525,7 @@ const GLubyte *Lib_glGetString(GLenum name)
      * unit 0. */
     static const GLubyte extensionsEmitting[] = R200_BASE_EXTENSIONS
         " GL_EXT_blend_subtract GL_MGL_texture_env_rgb_scale"
-        " GL_MGL_texture_env_alpha_scale";
+        " GL_MGL_texture_env_alpha_scale GL_MGL_unsync_subimage GL_MGL_palette_lookup";
 #undef R200_BASE_EXTENSIONS
     switch (name) {
     case GL_VENDOR: return vendor;

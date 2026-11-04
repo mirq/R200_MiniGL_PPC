@@ -196,6 +196,8 @@ ULONG DepthStorageWidth(ULONG width);
 #define R200_LIT_VERTEX_COMPACT_DWORDS 10UL
 #define R200_TCL_VERTEX_COMPACT_DWORDS 7UL
 #define R200_TCL_VERTEX_TEX1_COMPACT_DWORDS 9UL
+#define R200_TCL_VERTEX_NOW_DWORDS 6UL     /* x,y,z,colour,s,t (RADEON3D_DRAW_NO_W) */
+#define R200_TCL_VERTEX_NOZ_DWORDS 5UL     /* x,y,colour,s,t (RADEON3D_DRAW_NO_Z) */
 
 /* Light-block dword offsets (24 vector dwords then 7 scalars), matching
  * Mesa classic r200's LIT_* scalar order. */
@@ -638,6 +640,14 @@ struct MiniGLR200Context {
     struct ScreenVertex screenVertices[SCREEN_VERTEX_CAPACITY];
     ULONG vertexCount;
     ULONG screenVertexCount;
+    /* Direct source (DrawTrianglesTclFast, MGLPPCDirectTcl): when set,
+     * screenVertexCount vertices are still in the client's interleaved
+     * arrays (floats x,y,z at 0, RGBA bytes at screenExtCol, s,t at
+     * screenExtTex, one stride) and FlushScreenVertices serializes them
+     * from there, or copies them into screenVertices first for the shapes
+     * its direct kernels do not cover. Only set inside that call. */
+    const UBYTE *screenExt;
+    ULONG screenExtStride, screenExtCol, screenExtTex;
     /* Indexed staging (glDrawElements chunks): screenVertices holds the
      * chunk's unique vertices and screenIndices the triangle list into them.
      * screenIndexCount == 0 means a plain expanded vertex list. */
@@ -794,6 +804,9 @@ struct MiniGLR200Context {
     ULONG polygonOffsetFillEnabled;
     UBYTE colorTable[256][4];
     ULONG textureEnabled[2];
+    /* glEnable(MGL_PALETTE_LOOKUP): unit 1 holds palettes read through
+     * unit 0's indices (RADEON3D_DRAW_PALETTE), no unit-1 coordinates */
+    ULONG paletteLookup;
     ULONG textureGenS[2], textureGenT[2];
     ULONG normalMatrixValid;
     ULONG combinedMatrixValid;
@@ -1095,6 +1108,11 @@ ULONG R200PPCPlatformStallTicks(void);
  * Lib_glHint(MGL_PERF_COUNTERS_HINT, GL_NICEST) so timedemo reports cover
  * only the demo interval. The descriptor cache itself is untouched. */
 void R200PPCResetCpAttribution(void);
+/* GL_MGL_unsync_subimage (MGL_SYNC_POINT / MGL_UNPACK_UNSYNC_AFTER): the
+ * ring entry that will carry the draws issued so far (0 without a ring),
+ * and the client's point after which subimages need no retirement wait. */
+ULONG R200PPCSyncPoint(void);
+void R200PPCSetUnsyncAfter(ULONG point);
 /* PPC serialization kernels (client/minigl_ppc_serial.s): byte-reversing
  * block copies from the ScreenVertex array into a streaming vertex
  * segment, mirroring the m68k movem serializers in r200_geometry.c.
@@ -1107,6 +1125,18 @@ void MGLPPCSwapLit10(ULONG *destination, const ULONG *source, ULONG count,
                      ULONG unit0Mask);
 void MGLPPCSwapTCL10(ULONG *destination, const ULONG *source, ULONG count,
                      ULONG unit0Mask, ULONG unit1Mask, ULONG fogMask);
+/* RADEON3D_DRAW_NO_W/NO_Z records: x,y,[z],colour,[s,t] */
+void MGLPPCSwapTCL6(ULONG *destination, const ULONG *source, ULONG count);
+void MGLPPCSwapTCL5X(ULONG *destination, const UBYTE *source, ULONG count,
+                     ULONG stride, ULONG colOff, ULONG texOff);
+void MGLPPCSwapTCL6X(ULONG *destination, const UBYTE *source, ULONG count,
+                     ULONG stride, ULONG colOff, ULONG texOff);
+void MGLPPCSwapTCL5(ULONG *destination, const ULONG *source, ULONG count);
+void MGLPPCSwapTCL4(ULONG *destination, const ULONG *source, ULONG count);
+void MGLPPCSwapTCL3(ULONG *destination, const ULONG *source, ULONG count);
+/* RADEON3D_DRAW_PALETTE: x,y,[z],colour,s,t,s1 */
+void MGLPPCSwapTCL7P(ULONG *destination, const ULONG *source, ULONG count);
+void MGLPPCSwapTCL6P(ULONG *destination, const ULONG *source, ULONG count);
 void MGLPPCSwapTCL7(ULONG *destination, const ULONG *source, ULONG count,
                     ULONG unit0Mask);
 /* AltiVec staging variants (client/minigl_ppc_serial_altivec.c): the same
@@ -1117,6 +1147,9 @@ extern BOOL MGLPPCAltiVecVertexEnabled;
 /* Set by the platform while the PPC CP emitter is live (MGLPPC_INDEXED=0 opts out):
  * glDrawElements triangles go out as indexed commit draws (DRAW_INDX_2). */
 extern BOOL MGLPPCIndexedDraws;
+extern ULONG MGLPPCPalVar;          /* MGLPPC_PALVAR */
+extern ULONG MGLPPCTcl6;            /* MGLPPC_TCL6=1: unlit TCL vertices without W */
+extern ULONG MGLPPCTcl5;            /* MGLPPC_TCL5=1: and without Z when the depth test is off */
 void MGLPPCAltiVecVertexProbe(void);
 void MGLPPCSwapLit13Vector(ULONG *destination, const ULONG *source,
                            ULONG count, ULONG unit0Mask, ULONG unit1Mask,
