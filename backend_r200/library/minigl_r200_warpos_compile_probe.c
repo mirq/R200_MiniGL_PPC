@@ -6415,6 +6415,36 @@ static void FrontendShadowPatch(struct TextureObject *texture,
                                 GLint xoffset, GLint yoffset)
 {
     ULONG py;
+    /* 565 (console video, streaming lightmaps): the expansion tables, the
+     * exact dwords FrontendSourceToBGRA32 computes without its two
+     * divisions a texel (a PAL movie's every frame went through them).
+     * BGRA: the canonical layout already, a row copy. */
+    if (type == MGL_UNSIGNED_SHORT_5_6_5 && sourceBytes == 2UL) {
+        Frontend565TableInit();
+        for (py = 0; py < (ULONG)height; ++py) {
+            const UBYTE *srcRow = source + (ULONG)py * sourceStride;
+            ULONG *dstRow = (ULONG *)(texture->shadow +
+                (ULONG)(yoffset + py) * texture->shadowWidth * 4UL +
+                (ULONG)xoffset * 4UL);
+            ULONG column;
+            for (column = 0; column < (ULONG)width; ++column) {
+                ULONG value = ((ULONG)srcRow[column * 2UL] << 8) |
+                              srcRow[column * 2UL + 1UL];
+                dstRow[column] = Frontend565R[(value >> 11) & 31UL] |
+                                 Frontend565G[(value >> 5) & 63UL] |
+                                 Frontend565B[value & 31UL] | 0xffUL;
+            }
+        }
+        return;
+    }
+    if (format == MGL_UBYTE_BGRA && type == GL_UNSIGNED_BYTE && sourceBytes == 4UL) {
+        for (py = 0; py < (ULONG)height; ++py)
+            memcpy(texture->shadow +
+                         (ULONG)(yoffset + py) * texture->shadowWidth * 4UL +
+                         (ULONG)xoffset * 4UL,
+                         source + (ULONG)py * sourceStride, (ULONG)width * 4UL);
+        return;
+    }
     for (py = 0; py < (ULONG)height; ++py) {
         const UBYTE *srcRow = source + (ULONG)py * sourceStride;
         UBYTE *dstRow = texture->shadow +
