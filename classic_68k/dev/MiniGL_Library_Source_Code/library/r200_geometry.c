@@ -1610,6 +1610,45 @@ static BOOL EmitHardwareBatch(struct MiniGLR200Context *context,
     return FlushScreenVertices(context);
 }
 
+/* A fan as a triangle list appended straight from the source vertices
+ * (same capture/flush rules as EmitHardwareBatch with a list command). */
+static BOOL EmitHardwareFanList(struct MiniGLR200Context *context,
+                                const struct Vertex *vertices, ULONG count)
+{
+    ULONG hardwareSphereMap = HardwareSphereMapMask(context);
+    ULONG softwareSphereMap = SoftwareSphereMapMask(context,
+                                                     hardwareSphereMap);
+    ULONG total = 3UL * (count - 2UL), index;
+    struct ScreenVertex *out;
+
+    if (context->screenVertexCount + total > MAX_SCREEN_VERTICES &&
+        !FlushScreenVertices(context))
+        return FALSE;
+    context->screenHardwareTransform = TRUE;
+    context->screenProjective = FALSE;
+    if (!PrepareScreenAppend(context, RADEON3D_EXEC_DRAW_TRIANGLES)) {
+        context->screenHardwareTransform = FALSE;
+        return FALSE;
+    }
+    out = &context->screenVertices[context->screenVertexCount];
+    CopyHardwareVertex(context, &vertices[0], &out[0],
+                       hardwareSphereMap, softwareSphereMap);
+    CopyHardwareVertex(context, &vertices[1], &out[1],
+                       hardwareSphereMap, softwareSphereMap);
+    CopyHardwareVertex(context, &vertices[2], &out[2],
+                       hardwareSphereMap, softwareSphereMap);
+    for (index = 3; index < count; ++index) {
+        out += 3;
+        out[0] = out[-3];
+        out[1] = out[-1];
+        CopyHardwareVertex(context, &vertices[index], &out[2],
+                           hardwareSphereMap, softwareSphereMap);
+    }
+    context->screenVertexCount += total;
+    context->screenHardwareTransform = FALSE;
+    return TRUE;
+}
+
 static BOOL EmitHardwareTriangle(struct MiniGLR200Context *context,
                                  const struct Vertex *a,
                                  const struct Vertex *b,
@@ -1817,6 +1856,18 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
     case GL_POLYGON:
         if (count < 3UL)
             return TRUE;
+        /* Every vertex the same colour (Quake's world: one glColor per
+         * polygon): flat and smooth shading are identical, so the fan goes
+         * out as ONE mergeable triangle list instead of a batch per
+         * triangle (flat) or an unmergeable fan record (smooth). */
+        if (count <= 64UL && 3UL * (count - 2UL) <= MAX_SCREEN_VERTICES) {
+            ULONG c0 = vertices[0].color;
+            for (index = 1; index < count; ++index)
+                if (vertices[index].color != c0)
+                    break;
+            if (index == count)
+                return EmitHardwareFanList(context, vertices, count);
+        }
         if (primitive == GL_POLYGON && context->shadeModel == GL_FLAT) {
             /* Flat shading on GL_POLYGON takes the first vertex's colour;
              * the hardware picks the last vertex of each fan triangle. */
@@ -2353,6 +2404,19 @@ static ULONG TypeSize(GLenum type)
 }
 static GLfloat ReadNumber(const UBYTE *pointer, GLenum type)
 {
+#if defined(__m68k__) || defined(__mc68000__)
+    /* The 68060 loads misaligned words and longwords in hardware: read the
+     * component directly instead of through a CopyBytes call per value. */
+    switch (type) {
+    case GL_FLOAT: return *(const GLfloat *)pointer;
+    case GL_INT: return (GLfloat)*(const LONG *)pointer;
+    case GL_SHORT: return (GLfloat)*(const WORD *)pointer;
+    case GL_UNSIGNED_SHORT: return (GLfloat)*(const UWORD *)pointer;
+    case GL_UNSIGNED_BYTE: return (GLfloat)*pointer;
+    case GL_BYTE: return (GLfloat)*(const BYTE *)pointer;
+    default: break;
+    }
+#endif
     switch (type) {
     case GL_BYTE: { signed char v; CopyBytes(&v,pointer,1); return v; }
     case GL_UNSIGNED_BYTE: { UBYTE v; CopyBytes(&v,pointer,1); return v; }
@@ -2602,6 +2666,50 @@ static BOOL FetchArrayVertex(struct MiniGLR200Context *context, ULONG index,
     GLfloat values[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ULONG component;
     if (!array->enabled || !array->pointer) return FALSE;
+    /* Fast path for the common client layouts (Quake's alias arrays):
+     * 3 float/int positions, float texcoords, packed ARGB colour, no
+     * normal array, fog off. Direct loads, no per-component calls. */
+    if (array->size == 3 &&
+        (array->type == GL_FLOAT || array->type == GL_INT) &&
+        !context->fogEnabled &&
+        !(context->normalArray.enabled && context->normalArray.pointer) &&
+        (!(context->colorArray.enabled && context->colorArray.pointer) ||
+         context->colorArray.type == MGL_UBYTE_ARGB) &&
+        (!(context->texcoordArray.enabled && context->texcoordArray.pointer) ||
+         (context->texcoordArray.type == GL_FLOAT &&
+          context->texcoordArray.size >= 2))) {
+        input = array->pointer + index * array->stride;
+        if (array->type == GL_FLOAT) {
+            const GLfloat *p = (const GLfloat *)input;
+            vertex->x = p[0]; vertex->y = p[1]; vertex->z = p[2];
+        } else {
+            const LONG *p = (const LONG *)input;
+            vertex->x = (GLfloat)p[0]; vertex->y = (GLfloat)p[1];
+            vertex->z = (GLfloat)p[2];
+        }
+        vertex->w = 1.0f;
+        if (context->colorArray.enabled && context->colorArray.pointer) {
+            const UBYTE *c = context->colorArray.pointer +
+                             index * context->colorArray.stride;
+            color = ((ULONG)c[0] << 24) | ((ULONG)c[1] << 16) |
+                    ((ULONG)c[2] << 8) | (ULONG)c[3];
+        }
+        vertex->color = color;
+        vertex->nx = context->currentNormalX;
+        vertex->ny = context->currentNormalY;
+        vertex->nz = context->currentNormalZ;
+        vertex->s1 = context->currentS[1]; vertex->t1 = context->currentT[1];
+        vertex->fog = 0.0f;
+        if (context->texcoordArray.enabled && context->texcoordArray.pointer) {
+            const GLfloat *t = (const GLfloat *)
+                (context->texcoordArray.pointer +
+                 index * context->texcoordArray.stride);
+            vertex->s = t[0]; vertex->t = t[1];
+        } else {
+            vertex->s = context->currentS[0]; vertex->t = context->currentT[0];
+        }
+        return TRUE;
+    }
     bytes = TypeSize(array->type);
     input = array->pointer + index * array->stride;
     for (component = 0; component < (ULONG)array->size; ++component)

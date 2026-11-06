@@ -25,6 +25,10 @@ struct MGLPPCEmitVertices {
     /* Optional, one per draw: segment byte offset of the draw's 16-bit index
      * list (fired with DRAW_INDX_2 + INDX_BUFFER), 0 for a plain list. */
     const ULONG *indexOffsets;
+    /* Optional (minigl68k), 6 dwords a draw: see Radeon3DEmitter
+     * CommitStreams. NULL: every draw interleaved. */
+    const ULONG *streams;
+    ULONG resident;   /* minigl68k resident draws only */
 };
 
 /* words MUST hold MGLPPC_CP_DWORDS dwords, disjoint from the inputs. Records

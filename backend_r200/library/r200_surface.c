@@ -1494,6 +1494,145 @@ void Lib_mglSwitchDisplay(void)
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+#if R200_CPEMIT_68K
+    {
+        extern ULONG R3DStatDraws, R3DStatRegCalls, R3DStatRegWrites;
+        extern ULONG R68KStatCaptures, R68KStatFlushes;
+        extern ULONG R68KStatWaits[4];
+        static ULONG frames;
+        if (!(++frames & 127UL)) {
+            dbg_puts("[minigl68k] per frame: emitted draws=");
+            dbg_u32(R3DStatDraws >> 7);
+            dbg_puts(" reg calls=");
+            dbg_u32(R3DStatRegCalls >> 7);
+            dbg_puts(" reg writes=");
+            dbg_u32(R3DStatRegWrites >> 7);
+            dbg_puts(" captures=");
+            dbg_u32(R68KStatCaptures >> 7);
+            dbg_puts(" inline flushes=");
+            dbg_u32(R68KStatFlushes >> 7);
+            {
+                extern ULONG R3DStatFast, R3DStatFastOther[48];
+                ULONG k;
+                dbg_puts(" fast=");
+                dbg_u32(R3DStatFast >> 7);
+                dbg_puts(" other:");
+                for (k = 0; k < 48UL; ++k)
+                    if (R3DStatFastOther[k]) {
+                        dbg_puts(" ");
+                        dbg_u32(k);
+                        dbg_puts("=");
+                        dbg_u32(R3DStatFastOther[k]);
+                        R3DStatFastOther[k] = 0;
+                    }
+                R3DStatFast = 0;
+            }
+            {
+                extern ULONG CpEmitTicks, CpCopyTicks, CpDispatchTicks,
+                             R68KFrontTicks;
+                ULONG rate = PerfClockRate();
+                if (rate) {
+                    ULONG div = rate / 1000UL * 128UL / 100UL; /* 0.01 ms a frame */
+                    if (!div) div = 1;
+                    dbg_puts(" [x0.01ms/frame] emit=");
+                    dbg_u32(CpEmitTicks / div);
+                    dbg_puts(" copy=");
+                    dbg_u32(CpCopyTicks / div);
+                    dbg_puts(" dispatch=");
+                    dbg_u32(CpDispatchTicks / div);
+                    dbg_puts(" wait=");
+                    dbg_u32(context->perf.waitTicks / div);
+                    dbg_puts(" front=");
+                    dbg_u32(R68KFrontTicks / div);
+                    CpEmitTicks = CpCopyTicks = CpDispatchTicks = 0;
+                    R68KFrontTicks = 0;
+                    context->perf.waitTicks = 0;
+                }
+            }
+            dbg_puts(" waits(x128) b/t/d=");
+            dbg_u32(R68KStatWaits[SUBMIT_WAIT_BUFFER]);
+            dbg_puts("/");
+            dbg_u32(R68KStatWaits[SUBMIT_WAIT_TEXTURE]);
+            dbg_puts("/");
+            dbg_u32(R68KStatWaits[SUBMIT_WAIT_DRAIN]);
+            R68KStatWaits[0] = R68KStatWaits[1] = R68KStatWaits[2] =
+                R68KStatWaits[3] = 0;
+            dbg_newline();
+            R3DStatDraws = R3DStatRegCalls = R3DStatRegWrites = 0;
+            R68KStatCaptures = R68KStatFlushes = 0;
+        }
+    }
+    /* Blit present one frame late: submit this frame without draining the
+     * GPU, wait only for the previous frame (normally long done) and show
+     * that one, then draw the next frame into another buffer. The CPU no
+     * longer idles while the GPU finishes each frame. */
+    if (context->fullscreen && !context->singleBuffer &&
+        !context->presentFlip &&
+        (context->presentBlit || !context->syncEnabled) &&
+        context->screenBufferCount >= 3UL && context->drawBuffer != GL_FRONT &&
+        context->displayedBuffer != context->drawingBuffer) {
+        ULONG drawn = context->drawingBuffer, index;
+        if (!Submit(context)) {
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        if (context->r68kPrevValid) {
+            if (context->r68kPrevEpoch == context->deviceEpoch)
+                for (index = 0; index < SUBMIT_SLOT_COUNT; ++index) {
+                    struct SubmitSlot *slot = &context->submitSlots[index];
+                    if (slot->inFlight &&
+                        slot->fence == context->r68kPrevFence &&
+                        slot->deviceEpoch == context->r68kPrevEpoch) {
+                        if (!WaitSubmitSlot(context, slot,
+                                            SUBMIT_WAIT_DRAIN)) {
+                            SetError(context, GL_INVALID_OPERATION);
+                            return;
+                        }
+                        break;
+                    }
+                }
+            {
+                struct RastPort src;
+                InitRastPort(&src);
+                src.BitMap = context->screenBuffers[
+                    context->r68kPrevBuffer]->sb_BitMap;
+                ClipBlit(&src, 0, 0, &context->screen->RastPort, 0, 0,
+                         context->width, context->height, 0xc0);
+                /* no WaitBlit: the buffer is drawn into again only after
+                 * the next present's blit, and the card orders them */
+            }
+        }
+        context->r68kPrevValid = TRUE;
+        context->r68kPrevBuffer = drawn;
+        context->r68kPrevFence = context->r68kLastFence;
+        context->r68kPrevEpoch = context->r68kLastEpoch;
+        /* the other buffer that is not on screen */
+        for (index = 0; index < context->screenBufferCount; ++index)
+            if (index != drawn && index != context->displayedBuffer) {
+                context->drawingBuffer = index;
+                break;
+            }
+        {
+            ULONG handle = (ULONG)
+                context->surfaces[context->drawingBuffer].Handle;
+            if (context->captureCacheValid)
+                context->captureCache.header[2] = handle;
+            if (context->pendingDrawValid)
+                context->pendingDraw.header[2] = handle;
+        }
+        ReapDeferredSurfaces(context);
+        ReapDeferredSegments(context);
+        if (context->perfEnabled) {
+            ULONG elapsed = PerfClock() - perfStart;
+            ULONG nested = (context->perf.executeTicks - executeBefore) +
+                           (context->perf.waitTicks - waitBefore);
+            context->perf.presentTicks +=
+                elapsed >= nested ? elapsed - nested : 0;
+            RecordPerfFrame(context);
+        }
+        return;
+    }
+#endif
     /* The frame about to be submitted targets the drawing buffer; it must
      * have left the display. Steady state always satisfies this -- the bit
      * was pumped when the buffer retired -- so this only waits in the rare

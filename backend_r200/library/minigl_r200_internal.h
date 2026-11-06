@@ -106,7 +106,16 @@ ULONG DepthStorageWidth(ULONG width);
 #define SCREEN_VERTEX_CAPACITY MAX_SCREEN_VERTICES
 #define MAX_RECORD_DWORDS RADEON3D_MAX_BATCH_DWORDS
 #define MAX_GENERATED_DWORDS RADEON3D_MAX_BATCH_DWORDS
+#if defined(R200_CPEMIT_68K) && R200_CPEMIT_68K
+/* minigl68k: a third batch in flight, so a GPU-heavy batch (the static
+ * world) does not stall the CPU at the next slot */
+#define SUBMIT_SLOT_COUNT 3UL
+#else
 #define SUBMIT_SLOT_COUNT 2UL
+#endif
+#define R200_CP_RESOLVE_CACHE 256UL
+#define R68K_MAX_RESIDENT 10UL
+#define R200_CP_SLOT_DWORDS RADEON3D_MAX_BATCH_DWORDS
 /* Maximum header-only draw records one slot can hold: the batch budget
  * divided by the smallest TCL header (44 dwords). */
 #define MAX_SLOT_DRAWS 192UL
@@ -444,6 +453,16 @@ struct TextureObject {
      * first rebuild on the shared path. */
     BOOL minFilterSet;
     BOOL directSingleLevel;
+#if R200_CPEMIT_68K
+    /* 68k: the surface a level-0 TexSubImage swapped out, kept for the
+     * next update. It is one update behind (spareBehind rows), so that
+     * update copies those rows and its own instead of the whole image
+     * (every byte crosses the Zorro bus). */
+    struct Radeon3DSurface spare;
+    struct BitMap *spareBitmap;
+    ULONG spareFence, spareEpoch;
+    struct TextureDirtyRect spareBehind;
+#endif
 };
 
 /* Radeon3DExecute consumes semantic records asynchronously.  A slot remains
@@ -477,10 +496,17 @@ struct SubmitSlot {
     BOOL expanded;
     ULONG drawCount;
     ULONG vertexOffsets[MAX_SLOT_DRAWS];
+#if R200_CPEMIT_68K
+    ULONG streams[MAX_SLOT_DRAWS * 6];
+    BOOL hasStreams;
+#endif
     struct Radeon3DStateBatchDraw stateBatchDraws[MAX_SLOT_DRAWS];
     /* Indexed commit draws: segment byte offset of the draw's 16-bit
      * index list (DRAW_INDX_2), or 0 for a plain vertex-list draw. */
     ULONG indexOffsets[MAX_SLOT_DRAWS];
+    /* minigl68k: offsets are relative to the Radeon3D segment pool (resident
+     * buffers + index ring), not to the stream segment. */
+    ULONG residentDraws;
     ULONG segmentCursor;
 };
 
@@ -625,6 +651,35 @@ struct MiniGLR200Context {
     GLfloat currentNormalX, currentNormalY, currentNormalZ;
     struct SubmitSlot submitSlots[SUBMIT_SLOT_COUNT];
     struct StreamSegment segment;
+    /* 68k CP-emit platform (!R200_PPC_FRONTEND): records -> CP via the
+     * shared emitter, byte-swapped into one region per submit slot of
+     * cpSegment, run with Radeon3DDispatchIndirect (r200_submit.c). */
+    struct Radeon3DSegment cpSegment;
+    ULONG cpSegmentEpoch;
+    ULONG *cpStaging;
+    ULONG cpResolveHandle[R200_CP_RESOLVE_CACHE];
+    struct Radeon3DSurface *cpResolveSurface[R200_CP_RESOLVE_CACHE];
+    /* minigl68k resident vertex buffers (mgl68kext): VRAM segments the
+     * client fills once; per-frame index lists go to an index ring with
+     * one half per submit slot. */
+    struct Radeon3DSegment resident[R68K_MAX_RESIDENT];
+    ULONG residentEpoch[R68K_MAX_RESIDENT];
+    struct Radeon3DSegment indexRing;
+    ULONG indexRingEpoch;
+    ULONG indexCursor[SUBMIT_SLOT_COUNT];
+    /* 68k blit present one frame late: the last submitted fence, and the
+     * finished-but-not-shown frame (buffer, fence). */
+    ULONG r68kLastFence, r68kLastEpoch;
+    /* semantic serial reached only by unit-0 binds since the capture cache */
+    ULONG r68kTexOnlySerial;
+    /* the next resident draw's streams (6 dwords) or NULL */
+    const ULONG *r68kPendingStream;
+    ULONG r68kNextCommand;   /* resident draw primitive, 0 = triangles */
+    /* vertex stores in aux VRAM surfaces (handles 0x100 + n) */
+    struct Radeon3DSurface r68kStore[2];
+    ULONG r68kStoreEpoch[2];
+    BOOL r68kPrevValid;
+    ULONG r68kPrevBuffer, r68kPrevFence, r68kPrevEpoch;
     /* Segments parked between submit and fence retirement (async
      * rotation). Entries are epoch-stamped; a device recovery drops them
      * without freeing because the segments died with the device. */
@@ -973,12 +1028,16 @@ BOOL TextureQueued(const struct MiniGLR200Context *context,
                    const struct TextureObject *texture);
 void MarkTextureQueued(struct MiniGLR200Context *context, GLuint name);
 BOOL RecoverDevice(struct MiniGLR200Context *context);
+void ReleaseCpSegment(struct MiniGLR200Context *context);
+void R68KReleaseResident(struct MiniGLR200Context *context);
 BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
                     struct SubmitSlot *slot,
                     enum SubmitWaitReason reason);
 BOOL WaitAllSubmissions(struct MiniGLR200Context *context);
 BOOL Submit(struct MiniGLR200Context *context);
 BOOL SubmitAndWait(struct MiniGLR200Context *context);
+void CpResolveRemember(struct MiniGLR200Context *context,
+                       struct Radeon3DSurface *surface);
 BOOL WaitTextureUse(struct MiniGLR200Context *context,
                     struct TextureObject *texture);
 BOOL EnsureStreamSegment(struct MiniGLR200Context *context);
@@ -1087,6 +1146,13 @@ ULONG PerfClockDeltaMs(ULONG start);
 struct MiniGLR200Context *CurrentContext(void);
 /* context must be zero-initialized before frontend defaults are applied. */
 void InitializeFrontendContext(struct MiniGLR200Context *context);
+/* Frontend switches shared by the PPC platform and the 68k CP-emit
+ * platform (each defines them; see r200_m68k_cpemit.c). */
+extern BOOL MGLPPCIndexedDraws;
+extern ULONG MGLPPCPalVar;          /* MGLPPC_PALVAR */
+extern ULONG MGLPPCTcl6;            /* MGLPPC_TCL6=1: unlit TCL vertices without W */
+extern ULONG MGLPPCTcl5;            /* MGLPPC_TCL5=1: and without Z when the depth test is off */
+extern ULONG MGLPPCNoTcl7;
 #if R200_PPC_FRONTEND
 extern struct MiniGLR200Context *R200PPCContext;
 BOOL R200PPCPlatformPublishSlot(struct MiniGLR200Context *context,
@@ -1146,10 +1212,6 @@ void MGLPPCSwapTCL7(ULONG *destination, const ULONG *source, ULONG count,
 extern BOOL MGLPPCAltiVecVertexEnabled;
 /* Set by the platform while the PPC CP emitter is live (MGLPPC_INDEXED=0 opts out):
  * glDrawElements triangles go out as indexed commit draws (DRAW_INDX_2). */
-extern BOOL MGLPPCIndexedDraws;
-extern ULONG MGLPPCPalVar;          /* MGLPPC_PALVAR */
-extern ULONG MGLPPCTcl6;            /* MGLPPC_TCL6=1: unlit TCL vertices without W */
-extern ULONG MGLPPCTcl5;            /* MGLPPC_TCL5=1: and without Z when the depth test is off */
 void MGLPPCAltiVecVertexProbe(void);
 void MGLPPCSwapLit13Vector(ULONG *destination, const ULONG *source,
                            ULONG count, ULONG unit0Mask, ULONG unit1Mask,
@@ -1169,6 +1231,10 @@ void R200PPCErrorAt(const char *file, ULONG line, GLenum error);
     (R200PPCErrorAt(__FILE__, __LINE__, (error)), (SetError)((context), (error)))
 #endif
 void BumpSemanticStateSerial(struct MiniGLR200Context *context);
+#if R200_CPEMIT_68K
+BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
+                             struct PendingDrawState *state);
+#endif
 /* GL_EXT_blend_subtract and GL_MGL_texture_env_rgb_scale need state bits the
  * Radeon3D service of an older Radeon9200.chip rejects: they exist only
  * while this frontend emits its own command stream (MGLPPC_CPEMIT=1). */

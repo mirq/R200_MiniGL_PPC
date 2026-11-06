@@ -399,6 +399,11 @@ static void DestroyContext(struct MiniGLR200Context *context)
         DeleteMsgPort(context->displayPort);
     if (context->device) {
         ReleaseStreamSegment(context);
+#if !R200_PPC_FRONTEND
+        (void)WaitAllSubmissions(context);
+        R68KReleaseResident(context);
+        ReleaseCpSegment(context);
+#endif
         Radeon3DClose(context->device);
     }
     FreeMem(context, sizeof(*context));

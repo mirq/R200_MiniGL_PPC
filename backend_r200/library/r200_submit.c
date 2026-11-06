@@ -54,8 +54,370 @@ void StreamDiagEvent(struct MiniGLR200Context *context, ULONG event,
 #endif
 }
 
+#if !R200_PPC_FRONTEND
+/*
+ * CP-emit submission for the native 68k library. Radeon9200.chip 0.41
+ * removed Radeon3DExecute/CommitBatch/CommitStateBatch; the same semantic
+ * records now go through the shared emitter (radeon3d_emit.c, wrapped by
+ * MGLPPCEmitBatch in r200_cp_emit.c) and run as an indirect buffer.
+ */
+#include <libraries/minigl_ppc_cp_emit.h>
+
+#define R200_CP_SEGMENT_BYTES \
+    (SUBMIT_SLOT_COUNT * R200_CP_SLOT_DWORDS * sizeof(ULONG))
+#define R200_CP_SURFACE_TILED 0x80000000UL
+
+ULONG MGLPPCClearBlend;
+/* CP-path profile (perf counters on): printed when the context closes. */
+ULONG CpEmitTicks, CpCopyTicks, CpDispatchTicks, CpCopyDwords, CpBatches;
+ULONG R68KFrontTicks;
+/* CP dword count last dispatched from each slot's region (stall dumps). */
+ULONG CpSlotDwords[SUBMIT_SLOT_COUNT];
+
+/* A fence that never retires: write the stalled slot's records and the CP
+ * stream it produced (host order) to T:cphang<n>.bin for offline decoding. */
+void CpDumpStalledSlot(struct MiniGLR200Context *context, ULONG slotIndex)
+{
+    extern struct DosLibrary *DOSBase;
+    static ULONG dumps;
+    struct SubmitSlot *slot = &context->submitSlots[slotIndex];
+    char path[] = "T:cphang0.bin";
+    ULONG header[4], index, count = CpSlotDwords[slotIndex];
+    const volatile ULONG *cp;
+    BPTR file;
+
+    if (!DOSBase || dumps >= 3UL || !context->cpSegment.CpuAddress)
+        return;
+    path[8] = (char)('0' + dumps++);
+    file = Open((STRPTR)path, MODE_NEWFILE);
+    if (!file)
+        return;
+    header[0] = 0x43504847UL; /* 'CPHG' */
+    header[1] = slot->recordCount;
+    header[2] = count;
+    header[3] = slot->commitMode;
+    Write(file, header, sizeof(header));
+    Write(file, slot->records, slot->recordCount * sizeof(ULONG));
+    cp = (const volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
+                                  slotIndex * R200_CP_SLOT_DWORDS * sizeof(ULONG));
+    for (index = 0; index < count; ++index) {
+        ULONG v = cp[index];
+        v = (v >> 24) | ((v >> 8) & 0xff00UL) | ((v << 8) & 0xff0000UL) | (v << 24);
+        Write(file, &v, sizeof(v));
+    }
+    Close(file);
+}
+/* Emitter switches the PPC frontend reads from ENV: (defaults). */
+ULONG MGLPPCStateMemo = 1;
+ULONG MGLPPCPalVar;
+/* 68k build switches (Makefile_dispatch_r68k.gcc): the PPC frontend's
+ * bus-saving vertex paths. Indexed draws and TCL6 need segment streaming. */
+#ifndef R68K_INDEXED
+#define R68K_INDEXED 0
+#endif
+#ifndef R68K_TCL6
+#define R68K_TCL6 0
+#endif
+#ifndef R68K_TCL5
+#define R68K_TCL5 0
+#endif
+ULONG MGLPPCTcl6 = R68K_TCL6;
+ULONG MGLPPCTcl5 = R68K_TCL5;
+ULONG MGLPPCNoTcl7;
+BOOL MGLPPCIndexedDraws = R68K_INDEXED;
+void R200PPCTraceStr(const char *s) { (void)s; }
+
+static void CpResolveFill(struct MGLPPCEmitSurface *out,
+                          const struct Radeon3DSurface *surface, BOOL tiled)
+{
+    out->cpuAddress = (ULONG)surface->CpuAddress;
+    out->gpuAddress = surface->GpuAddress;
+    out->pitch = surface->Pitch;
+    out->width = surface->Width;
+    out->height = surface->Height;
+    out->format = surface->Format | (tiled ? R200_CP_SURFACE_TILED : 0UL);
+}
+
+/* Enters a texture surface into the resolve cache (a new import or a
+ * swapped-in spare would otherwise cost a scan of every texture). */
+void CpResolveRemember(struct MiniGLR200Context *context,
+                       struct Radeon3DSurface *surface)
+{
+    ULONG handle = (ULONG)surface->Handle, slot;
+    if (!handle)
+        return;
+    slot = (handle ^ (handle >> 8) ^ (handle >> 16)) &
+           (R200_CP_RESOLVE_CACHE - 1UL);
+    context->cpResolveHandle[slot] = handle;
+    context->cpResolveSurface[slot] = surface;
+}
+
+static BOOL CpResolveSurface(void *user, ULONG handle,
+                             struct MGLPPCEmitSurface *out)
+{
+    struct MiniGLR200Context *context = user;
+    struct Radeon3DSurface *surface;
+    ULONG index, slot;
+
+    if (!handle)
+        return FALSE;
+    surface = TargetSurface(context);
+    if ((ULONG)surface->Handle == handle) {
+        CpResolveFill(out, surface, FALSE);
+        return TRUE;
+    }
+    if ((ULONG)context->depthSurface.Handle == handle) {
+        CpResolveFill(out, &context->depthSurface, FALSE);
+        return TRUE;
+    }
+    for (index = 0; index < R200_SCREEN_BUFFERS; ++index)
+        if ((ULONG)context->surfaces[index].Handle == handle) {
+            CpResolveFill(out, &context->surfaces[index], FALSE);
+            return TRUE;
+        }
+    slot = (handle ^ (handle >> 8) ^ (handle >> 16)) &
+           (R200_CP_RESOLVE_CACHE - 1UL);
+    surface = context->cpResolveSurface[slot];
+    if (context->cpResolveHandle[slot] == handle && surface &&
+        (ULONG)surface->Handle == handle) {
+        CpResolveFill(out, surface, FALSE);
+        return TRUE;
+    }
+    for (index = 0; index < MAX_TEXTURES; ++index) {
+        surface = &context->textures[index].surface;
+        if ((ULONG)surface->Handle == handle) {
+            context->cpResolveHandle[slot] = handle;
+            context->cpResolveSurface[slot] = surface;
+            CpResolveFill(out, surface, FALSE);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL EnsureCpSegment(struct MiniGLR200Context *context)
+{
+    ULONG index;
+
+    if (context->cpSegmentEpoch == context->deviceEpoch &&
+        context->cpSegment.CpuAddress)
+        return TRUE;
+    if (!context->cpStaging) {
+        context->cpStaging = AllocMem(R200_CP_SLOT_DWORDS * sizeof(ULONG),
+                                      MEMF_PUBLIC);
+        if (!context->cpStaging)
+            return FALSE;
+    }
+    for (index = 0; index < R200_CP_RESOLVE_CACHE; ++index) {
+        context->cpResolveHandle[index] = 0;
+        context->cpResolveSurface[index] = NULL;
+    }
+    ZeroMemory(&context->cpSegment, sizeof(context->cpSegment));
+    context->cpSegment.Size = sizeof(context->cpSegment);
+    if (!Radeon3DAllocSegment(context->device, R200_CP_SEGMENT_BYTES,
+                              &context->cpSegment) ||
+        context->cpSegment.Version != RADEON3D_SEGMENT_VERSION ||
+        !context->cpSegment.CpuAddress ||
+        context->cpSegment.Bytes < R200_CP_SEGMENT_BYTES) {
+        dbg_puts("[minigl] cp segment alloc failed\n");
+        ZeroMemory(&context->cpSegment, sizeof(context->cpSegment));
+        return FALSE;
+    }
+    context->cpSegmentEpoch = context->deviceEpoch;
+    dbg_puts("[minigl] cp segment cpu=");
+    dbg_hex32((ULONG)context->cpSegment.CpuAddress);
+    dbg_puts(" gpu=");
+    dbg_hex32(context->cpSegment.GpuAddress);
+    dbg_puts(" target cpu=");
+    dbg_hex32((ULONG)TargetSurface(context)->CpuAddress);
+    dbg_newline();
+    return TRUE;
+}
+
+void ReleaseCpSegment(struct MiniGLR200Context *context)
+{
+    {
+        dbg_puts("[minigl] cp batches=");
+        dbg_u32(CpBatches);
+        dbg_puts(" dwords=");
+        dbg_u32(CpCopyDwords);
+        dbg_puts(" emit_ticks=");
+        dbg_u32(CpEmitTicks);
+        dbg_puts(" copy_ticks=");
+        dbg_u32(CpCopyTicks);
+        dbg_puts(" dispatch_ticks=");
+        dbg_u32(CpDispatchTicks);
+        dbg_newline();
+    }
+    if (context->device && context->cpSegment.CpuAddress &&
+        context->cpSegmentEpoch == context->deviceEpoch)
+        (void)Radeon3DFreeSegment(context->device, context->cpSegment.Id);
+    ZeroMemory(&context->cpSegment, sizeof(context->cpSegment));
+    context->cpSegmentEpoch = 0;
+    if (context->cpStaging)
+        FreeMem(context->cpStaging, R200_CP_SLOT_DWORDS * sizeof(ULONG));
+    context->cpStaging = NULL;
+}
+
+/* Emit one submit slot and dispatch it. The slot's CP region is free: the
+ * caller retired this slot's previous fence (WaitSubmitSlot) before
+ * building into it. */
+static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
+                         struct SubmitSlot *slot, ULONG *fenceOut)
+{
+    struct MGLPPCEmitVertices vertices, *vertexDesc = NULL;
+    struct Radeon3DIndirect indirect;
+    ULONG *staging, count, index, byteOffset, t0, t1;
+    volatile ULONG *destination;
+    static ULONG failReports;
+
+    *fenceOut = 0;
+    if (!(context->radeonCaps & RADEON3D_CAP_INDIRECT_DISPATCH) ||
+        !EnsureCpSegment(context))
+        return FALSE;
+    staging = context->cpStaging;
+    if (slot->commitMode && slot->drawCount && slot->residentDraws) {
+        /* Resident draws: one base for every Radeon3D segment, so draws
+         * from several resident buffers share one batch. */
+        ZeroMemory(&vertices, sizeof(vertices));
+        vertices.gpuAddress = context->cpSegment.GpuAddress -
+                              context->cpSegment.Id * RADEON3D_MAX_SEGMENT_BYTES;
+        vertices.bytes = RADEON3D_MAX_SEGMENTS * RADEON3D_MAX_SEGMENT_BYTES;
+        vertices.drawCount = slot->drawCount;
+        vertices.stateBatch = FALSE;
+        vertices.offsets = slot->vertexOffsets;
+        vertices.indexOffsets = slot->indexOffsets;
+#if R200_CPEMIT_68K
+        vertices.streams = slot->hasStreams ? slot->streams : NULL;
+        vertices.resident = 1;
+#endif
+        vertexDesc = &vertices;
+    } else if (slot->commitMode && slot->drawCount && context->segment.valid) {
+        ZeroMemory(&vertices, sizeof(vertices));
+        vertices.gpuAddress = context->segment.info.GpuAddress;
+        vertices.bytes = context->segment.info.Bytes;
+        vertices.drawCount = slot->drawCount;
+        vertices.stateBatch = slot->stateBatch;
+        vertices.offsets = slot->stateBatch
+                               ? (const ULONG *)slot->stateBatchDraws
+                               : slot->vertexOffsets;
+        vertices.indexOffsets = MGLPPCIndexedDraws ? slot->indexOffsets : NULL;
+        vertexDesc = &vertices;
+    }
+    t0 = context->perfEnabled ? PerfClock() : 0;
+    count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
+                            vertexDesc, CpResolveSurface, context);
+    if (t0) {
+        t1 = PerfClock();
+        CpEmitTicks += t1 - t0;
+        t0 = t1;
+    }
+    if (!count && !MGLPPCEmitFailStage) {
+        /* Built fine but produced nothing (an empty or fully culled
+         * batch): nothing to run; the caller drops the slot (fence 0). */
+        return TRUE;
+    }
+    if (!count || count > R200_CP_SLOT_DWORDS - 1UL) {
+        if (failReports < 16UL) {
+            ++failReports;
+            dbg_puts("[minigl] cp emit fail stage=");
+            dbg_hex32(MGLPPCEmitFailStage);
+            dbg_puts(" rec=");
+            dbg_u32(slot->recordCount);
+            dbg_puts(" op=");
+            dbg_u32(slot->records[0]);
+            dbg_puts(" draws=");
+            dbg_u32(slot->drawCount);
+            dbg_puts(" resident=");
+            dbg_u32(slot->residentDraws);
+            {
+                ULONG w = 0;
+                dbg_puts(" ops:");
+                while (w + 1UL < slot->recordCount && slot->records[w + 1UL] >= 2UL) {
+                    dbg_puts(" ");
+                    dbg_u32(slot->records[w]);
+                    dbg_puts("/");
+                    dbg_u32(slot->records[w + 1UL]);
+                    w += slot->records[w + 1UL];
+                }
+            }
+            dbg_newline();
+        }
+        return FALSE;
+    }
+    /* Classic CP indirect dispatch needs an even dword count. */
+    if (count & 1UL)
+        staging[count++] = 0x80000000UL;
+    byteOffset = context->buildSlot * R200_CP_SLOT_DWORDS * sizeof(ULONG);
+    destination = (volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
+                                     byteOffset);
+    /* The CP reads little-endian dwords. */
+    for (index = 0; index < count; ++index) {
+        ULONG value = staging[index];
+        destination[index] = (value >> 24) | ((value >> 8) & 0xff00UL) |
+                             ((value << 8) & 0xff0000UL) | (value << 24);
+    }
+    (void)destination[count - 1UL];
+    CpSlotDwords[context->buildSlot] = count;
+    {
+        static ULONG batches, dwords, records, inlineSlots;
+        ++batches;
+        dwords += count;
+        records += slot->recordCount;
+        if (!(slot->commitMode && slot->residentDraws))
+            ++inlineSlots;
+        if (!(batches & 511UL)) {
+            dbg_puts("[minigl68k] 512 batches: cp dwords=");
+            dbg_u32(dwords);
+            dbg_puts(" record dwords=");
+            dbg_u32(records);
+            dbg_puts(" inline batches=");
+            dbg_u32(inlineSlots);
+            dbg_newline();
+            dwords = records = inlineSlots = 0;
+        }
+    }
+    /* The next build slot was retired by the caller (WaitSubmitSlot):
+     * its half of the index ring is free again. */
+    context->indexCursor[(context->buildSlot + 1UL) % SUBMIT_SLOT_COUNT] = 0;
+    if (t0) {
+        t1 = PerfClock();
+        CpCopyTicks += t1 - t0;
+        t0 = t1;
+        CpCopyDwords += count;
+        CpBatches++;
+    }
+    ZeroMemory(&indirect, sizeof(indirect));
+    indirect.Size = sizeof(indirect);
+    indirect.Version = RADEON3D_INDIRECT_VERSION;
+    indirect.SegmentId = context->cpSegment.Id;
+    indirect.ByteOffset = byteOffset;
+    indirect.DwordCount = count;
+    if (!Radeon3DDispatchIndirect(context->device, &indirect, fenceOut) ||
+        !*fenceOut) {
+        if (failReports < 16UL) {
+            ++failReports;
+            dbg_puts("[minigl] cp dispatch fail fence=");
+            dbg_hex32(*fenceOut);
+            dbg_puts(" count=");
+            dbg_u32(count);
+            dbg_newline();
+        }
+        *fenceOut = 0;
+        return FALSE;
+    }
+    if (t0)
+        CpDispatchTicks += PerfClock() - t0;
+    return TRUE;
+}
+#endif
+
 void ResetSubmitSlot(struct SubmitSlot *slot)
 {
+#if R200_CPEMIT_68K
+    slot->hasStreams = FALSE;
+#endif
+    slot->residentDraws = 0;
     slot->recordCount = 0;
     slot->generatedDwordCount = 0;
     slot->queuedTextureCount = 0;
@@ -324,7 +686,12 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
 {
     struct Radeon3DInfo info;
     struct Radeon3DDevice *device;
-    ULONG index, targetCount=context->fullscreen?2UL:1UL;
+    ULONG index, targetCount=context->fullscreen
+        ? (context->screenBufferCount ? context->screenBufferCount : 2UL) : 1UL;
+
+    dbg_puts("[minigl] RecoverDevice epoch=");
+    dbg_u32(context->deviceEpoch);
+    dbg_newline();
 
     Radeon3DClose(context->device);
     context->device=NULL;
@@ -337,13 +704,20 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
     context->screenCommand = RADEON3D_EXEC_DRAW_TRIANGLES;
     context->pendingDrawValid = FALSE;
     context->pendingSemanticStateSerial = 0;
-    for (index=0;index<2;++index)
+    for (index=0;index<R200_SCREEN_BUFFERS;++index)
         ZeroMemory(&context->surfaces[index],sizeof(context->surfaces[index]));
     ZeroMemory(&context->depthSurface,sizeof(context->depthSurface));
     for (index=0;index<MAX_TEXTURES;++index) {
         struct TextureObject *texture=&context->textures[index];
         if (texture->bitmap)
             p96FreeBitMap(texture->bitmap);
+#if R200_CPEMIT_68K
+        if (texture->spareBitmap)
+            p96FreeBitMap(texture->spareBitmap);
+        texture->spareBitmap=NULL;
+        ZeroMemory(&texture->spare,sizeof(texture->spare));
+        texture->spareFence=texture->spareEpoch=0;
+#endif
         texture->bitmap=NULL; texture->resident=FALSE;
         texture->residentGeneration=0;
         texture->residentDeviceEpoch=0;
@@ -354,6 +728,10 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
     }
     info.Size=sizeof(info);
     device=Radeon3DOpen(RADEON3D_IFACE_VERSION,&info);
+    /* Same capability view as context creation (record caps describe the
+     * consumer emitter since Radeon9200.chip 0.41); without it the reopen
+     * always failed and left the context without a device. */
+    info.Caps = Radeon3DRecordCaps(info.Caps);
     if (!device || (info.Caps&REQUIRED_CAPS)!=REQUIRED_CAPS ||
         (context->pixelDepth != 16UL &&
          !(info.Caps & RADEON3D_CAP_COLOR_TARGET_FORMATS))) {
@@ -454,6 +832,12 @@ BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
         ResetSubmitSlot(slot);
         return TRUE;
     }
+#if R200_CPEMIT_68K
+    {
+        extern ULONG R68KStatWaits[4];
+        R68KStatWaits[reason & 3UL]++;
+    }
+#endif
     if (context->perfEnabled) {
         context->perf.fenceWaits++;
         if (reason == SUBMIT_WAIT_BUFFER)
@@ -477,6 +861,10 @@ BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
     }
     StreamDiagEvent(context, 0x31UL,
                     (ULONG)(slot - context->submitSlots), slot->fence);
+    dbg_puts("[minigl] fence wait timeout fence=");
+    dbg_hex32(slot->fence);
+    dbg_newline();
+    CpDumpStalledSlot(context, (ULONG)(slot - context->submitSlots));
     (void)RecoverDevice(context);
     return FALSE;
 #endif
@@ -674,132 +1062,37 @@ BOOL Submit(struct MiniGLR200Context *context)
         context->perf.generatedDwords += slot->generatedDwordCount;
         start = PerfClock();
     }
-    if (slot->commitMode && context->streamSegments &&
-        context->segment.valid) {
-        /* Streaming path: headers only in the record chain, vertices
-         * already resident in this slot's segment half. One ring submit
-         * carries every draw; the service re-emits only state that
-         * changed between them. */
-        struct Radeon3DCommitBatch batch;
-
-        if (slot->stateBatch) {
-            struct Radeon3DStateBatch stateBatch;
-
-            stateBatch.Size = sizeof(stateBatch);
-            stateBatch.Version = RADEON3D_STATE_BATCH_VERSION;
-            stateBatch.Generation = context->radeonGeneration;
-            stateBatch.SegmentId = context->segment.info.Id;
-            stateBatch.Primitive = slot->records[0];
-            stateBatch.Header = slot->records;
-            stateBatch.HeaderDwords = slot->recordCount;
-            stateBatch.Draws = slot->stateBatchDraws;
-            stateBatch.DrawCount = slot->drawCount;
-            stateBatch.Flags = RADEON3D_SUBMIT_FENCE;
-            if (Radeon3DCommitStateBatch(context->device, &stateBatch,
-                                         &fence))
-                goto submitted;
-            {
-                struct Radeon3DInfo info;
-
-                dbg_puts("[minigl] state batch fail fence=");
-                dbg_hex32(fence);
-                dbg_puts(" rec=");
-                dbg_u32(slot->recordCount);
-                dbg_puts(" draws=");
-                dbg_u32(slot->drawCount);
-                dbg_puts(" op=");
-                dbg_u32(slot->records[0]);
-                dbg_puts(" len=");
-                dbg_u32(slot->records[1]);
-                dbg_puts(" generation=");
-                dbg_u32(context->radeonGeneration);
-                dbg_newline();
-                ZeroMemory(&info, sizeof(info));
-                info.Size = sizeof(info);
-                if (Radeon3DGetInfo(context->device, &info)) {
-                    dbg_puts("[minigl] state batch stage=");
-                    dbg_u32(info.CommitFailStage);
-                    dbg_puts(" service_generation=");
-                    dbg_u32(info.Generation);
-                    dbg_newline();
-                }
-            }
-            if (context->perfEnabled) {
-                context->perf.executeTicks += PerfClock() - start;
-                context->perf.executeFailures++;
-            }
-            ResetSubmitSlot(slot);
-            (void)RecoverDevice(context);
-            return FALSE;
-        }
-
-        batch.Size = sizeof(batch);
-        batch.Version = RADEON3D_COMMIT_BATCH_VERSION;
-        batch.SegmentId = context->segment.info.Id;
-        batch.Records = slot->records;
-        batch.RecordDwords = slot->recordCount;
-        batch.VertexOffsets = slot->vertexOffsets;
-        batch.RecordCount = slot->drawCount;
-        batch.Flags = RADEON3D_SUBMIT_FENCE;
-        if (!Radeon3DCommitBatch(context->device, &batch, &fence)) {
-            struct Radeon3DInfo info;
-
-            if (context->perfEnabled) {
-                context->perf.executeTicks += PerfClock() - start;
-                context->perf.executeFailures++;
-            }
-            /* The service encodes its reject stage in the fence slot as
-             * well, for the case where the info block is too old to carry
-             * one. Label the two sources apart. */
-            dbg_puts("[minigl] commit fail fencestage=");
-            dbg_hex32(fence);
-            dbg_puts(" rec=");
-            dbg_u32(slot->recordCount);
-            dbg_puts(" draws=");
+    if (!slot->commitMode && slot->drawCount) {
+        static ULONG reports;
+        if (reports < 4UL) {
+            ++reports;
+            dbg_puts("[minigl68k] inline slot with draws=");
             dbg_u32(slot->drawCount);
-            dbg_puts(" slot=");
-            dbg_u32(context->buildSlot);
-            dbg_puts(" cursor=");
-            dbg_u32(slot->segmentCursor);
-            dbg_puts(" segId=");
-            dbg_u32(batch.SegmentId);
-            dbg_puts(" segBytes=");
-            dbg_u32(context->segment.info.Bytes);
-            dbg_puts(" off0=");
-            dbg_u32(slot->drawCount ? slot->vertexOffsets[0] : 0);
+            dbg_puts(" records=");
+            dbg_u32(slot->recordCount);
+            dbg_puts(" streamSeg=");
+            dbg_u32(context->streamSegments);
+            dbg_puts(" segValid=");
+            dbg_u32(context->segment.valid);
             dbg_newline();
-            ZeroMemory(&info, sizeof(info));
-            info.Size = sizeof(info);
-            /* Stage zero means "nothing failed", so it must not be read
-             * from a service whose info block predates the field. */
-            if (Radeon3DGetInfo(context->device, &info) &&
-                info.Size >= RADEON3D_INFO_V3_SIZE) {
-                dbg_puts("[minigl] service stage=");
-                dbg_u32(info.CommitFailStage);
-                dbg_newline();
-            } else {
-                dbg_puts("[minigl] service stage unavailable, info size=");
-                dbg_u32(info.Size);
-                dbg_newline();
-            }
-            DumpFailBatch(context, slot);
-            StreamDiagEvent(context, 0x30UL, fence, slot->recordCount);
-            ResetSubmitSlot(slot);
-            (void)RecoverDevice(context);
-            return FALSE;
         }
-    } else if (!Radeon3DExecute(context->device, slot->records,
-                                slot->recordCount, RADEON3D_SUBMIT_FENCE,
-                                &fence)) {
+    }
+    if (!CpSubmitSlot(context, slot, &fence)) {
         if (context->perfEnabled) {
             context->perf.executeTicks += PerfClock() - start;
             context->perf.executeFailures++;
         }
+        /* The batch is dropped; nothing reached the ring, so the device
+         * is fine and must not be recovered (that drops every texture). */
         ResetSubmitSlot(slot);
-        (void)RecoverDevice(context);
         return FALSE;
     }
-submitted:
+    if (!fence) {
+        /* Empty batch: nothing reached the GPU. */
+        ResetSubmitSlot(slot);
+        return TRUE;
+    }
+    /* submitted */
     if (context->perfEnabled) {
         context->perf.executeTicks += PerfClock() - start;
     }
@@ -815,6 +1108,10 @@ submitted:
     slot->deviceEpoch = context->deviceEpoch;
     slot->inFlight = TRUE;
     slot->lastDrawValid = FALSE;
+#if R200_CPEMIT_68K
+    context->r68kLastFence = fence;
+    context->r68kLastEpoch = context->deviceEpoch;
+#endif
     for (index = 0; index < slot->queuedTextureCount; ++index) {
         struct TextureObject *texture =
             &context->textures[slot->queuedTextureNames[index]];
@@ -920,3 +1217,479 @@ ULONG GeneratedClearDwords(BOOL depth)
 {
     return 66UL + (depth ? 12UL : 0UL);
 }
+
+#if !R200_PPC_FRONTEND
+/*
+ * minigl68k.library resident vertex buffers (include/libraries/
+ * minigl68k_ext.h, LVO -36). Static geometry lives in Radeon3D segments the
+ * client fills once; DrawResident appends a commit-mode indexed draw whose
+ * vertex pointer is the resident buffer and whose 16-bit index list goes to
+ * an index ring (one half per submit slot). Offsets are relative to the
+ * segment pool, so draws over several buffers share one CP batch.
+ */
+#include <libraries/minigl68k_ext.h>
+
+#define R68K_INDEX_HALF ((RADEON3D_MAX_SEGMENT_BYTES / SUBMIT_SLOT_COUNT) & ~3UL)
+
+static ULONG R68KPoolGpu(struct MiniGLR200Context *context)
+{
+    return context->cpSegment.GpuAddress -
+           context->cpSegment.Id * RADEON3D_MAX_SEGMENT_BYTES;
+}
+
+static BOOL R68KEnsureIndexRing(struct MiniGLR200Context *context)
+{
+    ULONG index;
+
+    if (context->indexRingEpoch == context->deviceEpoch &&
+        context->indexRing.CpuAddress)
+        return TRUE;
+    ZeroMemory(&context->indexRing, sizeof(context->indexRing));
+    context->indexRing.Size = sizeof(context->indexRing);
+    if (!Radeon3DAllocSegment(context->device, RADEON3D_MAX_SEGMENT_BYTES,
+                              &context->indexRing) ||
+        !context->indexRing.CpuAddress) {
+        ZeroMemory(&context->indexRing, sizeof(context->indexRing));
+        return FALSE;
+    }
+    context->indexRingEpoch = context->deviceEpoch;
+    for (index = 0; index < SUBMIT_SLOT_COUNT; ++index)
+        context->indexCursor[index] = 0;
+    return TRUE;
+}
+
+static ULONG R68KResidentAlloc(ULONG bytes, APTR *cpuAddress)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG index;
+
+    if (cpuAddress)
+        *cpuAddress = NULL;
+    if (!context || !context->device || !bytes ||
+        bytes > RADEON3D_MAX_SEGMENT_BYTES || !EnsureCpSegment(context))
+        return 0;
+    for (index = 0; index < R68K_MAX_RESIDENT; ++index)
+        if (!context->resident[index].CpuAddress)
+            break;
+    if (index >= R68K_MAX_RESIDENT)
+        return 0;
+    ZeroMemory(&context->resident[index], sizeof(context->resident[index]));
+    context->resident[index].Size = sizeof(context->resident[index]);
+    if (!Radeon3DAllocSegment(context->device, bytes,
+                              &context->resident[index]) ||
+        !context->resident[index].CpuAddress) {
+        ZeroMemory(&context->resident[index], sizeof(context->resident[index]));
+        return 0;
+    }
+    context->residentEpoch[index] = context->deviceEpoch;
+    if (cpuAddress)
+        *cpuAddress = context->resident[index].CpuAddress;
+    return index + 1UL;
+}
+
+static void R68KResidentFree(ULONG handle)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    struct Radeon3DSegment *segment;
+
+    if (!context || !handle || handle > R68K_MAX_RESIDENT)
+        return;
+    segment = &context->resident[handle - 1UL];
+    if (!segment->CpuAddress)
+        return;
+    /* The GPU may still read it: retire everything first. */
+    (void)Submit(context);
+    (void)WaitAllSubmissions(context);
+    if (context->device &&
+        context->residentEpoch[handle - 1UL] == context->deviceEpoch)
+        (void)Radeon3DFreeSegment(context->device, segment->Id);
+    ZeroMemory(segment, sizeof(*segment));
+}
+
+static BOOL R68KDrawResidentCommon(ULONG handle, ULONG byteOffset,
+                                   const UWORD *indices, ULONG count,
+                                   ULONG indexHandle, ULONG indexOffset);
+
+static ULONG R68KPrepareTextures(void)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG index, done = 0;
+    if (!context || !context->device || context->insideBegin)
+        return 0;
+    for (index = 1; index < MAX_TEXTURES; ++index) {
+        struct TextureObject *texture = &context->textures[index];
+        if (!texture->image || texture->resident || !texture->definedLevels)
+            continue;
+        if (!EnsureTextureResident(context, texture))
+            break;
+        ++done;
+    }
+    return done;
+}
+
+static BOOL R68KDrawResident(ULONG handle, ULONG byteOffset,
+                             const UWORD *indices, ULONG count)
+{
+    return R68KDrawResidentCommon(handle, byteOffset, indices, count, 0, 0);
+}
+
+static BOOL R68KDrawResidentIndexed(ULONG handle, ULONG byteOffset,
+                                    ULONG indexHandle, ULONG indexOffset,
+                                    ULONG count)
+{
+    if (!indexHandle)
+        return FALSE;
+    return R68KDrawResidentCommon(handle, byteOffset, NULL, count,
+                                  indexHandle, indexOffset);
+}
+
+static BOOL R68KDrawResidentCommon2(ULONG handle, ULONG byteOffset,
+                                   const UWORD *indices, ULONG count,
+                                   ULONG indexHandle, ULONG indexOffset);
+
+static BOOL R68KDrawResidentCommon(ULONG handle, ULONG byteOffset,
+                                   const UWORD *indices, ULONG count,
+                                   ULONG indexHandle, ULONG indexOffset)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG t0 = context && context->perfEnabled ? PerfClock() : 0;
+    ULONG e0 = CpEmitTicks + CpCopyTicks + CpDispatchTicks;
+    ULONG w0 = context ? context->perf.waitTicks : 0;
+    BOOL ok = R68KDrawResidentCommon2(handle, byteOffset, indices, count,
+                                      indexHandle, indexOffset);
+    if (t0) {
+        /* front half only: submits and waits inside are counted apart */
+        ULONG inner = (CpEmitTicks + CpCopyTicks + CpDispatchTicks - e0) +
+                      (context->perf.waitTicks - w0);
+        ULONG all = PerfClock() - t0;
+        R68KFrontTicks += all > inner ? all - inner : 0;
+    }
+    return ok;
+}
+
+static BOOL R68KDrawResidentCommon2(ULONG handle, ULONG byteOffset,
+                                   const UWORD *indices, ULONG count,
+                                   ULONG indexHandle, ULONG indexOffset)
+{
+    struct Radeon3DSegment *indexBuffer = NULL;
+    struct MiniGLR200Context *context = CurrentContext();
+    struct Radeon3DSegment *buffer;
+    struct PendingDrawState *state;
+    struct SubmitSlot *slot;
+    ULONG headerDwords, generated, indexBytes, index, cursor;
+    volatile ULONG *destination;
+    ULONG *record;
+
+    if (!context || !context->device || context->insideBegin ||
+        !handle || handle > R68K_MAX_RESIDENT ||
+        count < (context->r68kNextCommand ? 1UL : 3UL) ||
+        count > 65535UL || (byteOffset & 3UL) ||
+        (!indices && !indexHandle))
+        return FALSE;
+    if (indexHandle) {
+        if (indexHandle > R68K_MAX_RESIDENT || (indexOffset & 3UL))
+            return FALSE;
+        indexBuffer = &context->resident[indexHandle - 1UL];
+        if (!indexBuffer->CpuAddress ||
+            context->residentEpoch[indexHandle - 1UL] != context->deviceEpoch ||
+            indexOffset + count * 2UL > indexBuffer->Bytes)
+            return FALSE;
+    }
+    buffer = &context->resident[handle - 1UL];
+    if (!buffer->CpuAddress ||
+        context->residentEpoch[handle - 1UL] != context->deviceEpoch ||
+        byteOffset >= buffer->Bytes)
+        return FALSE;
+    if (!context->r68kNextCommand)
+        count -= count % 3UL;
+    indexBytes = indexBuffer ? 0UL : (count * 2UL + 3UL) & ~3UL;
+    if (indexBytes > R68K_INDEX_HALF || !EnsureCpSegment(context) ||
+        (!indexBuffer && !R68KEnsureIndexRing(context)))
+        return FALSE;
+
+    /* Keep the GL order: everything queued before this draw goes first. */
+    if (context->screenVertexCount && !FlushScreenVertices(context))
+        return FALSE;
+    context->screenHardwareTransform = TRUE;
+    context->screenProjective = FALSE;
+    if (!PrepareScreenAppend(context, context->r68kNextCommand
+                                          ? context->r68kNextCommand
+                                          : RADEON3D_EXEC_DRAW_TRIANGLES)) {
+        context->screenHardwareTransform = FALSE;
+        return FALSE;
+    }
+    context->screenHardwareTransform = FALSE;
+    state = &context->pendingDraw;
+    context->pendingDrawValid = FALSE;
+    headerDwords = state->headerDwords;
+    /* Only the compact TCL layout of minigl68k_ext.h. */
+    if (!state->drawEnabled || !state->drawRectangleValid ||
+        !state->hardwareTransform || state->normalVertex ||
+        state->vertexDwords !=
+            ((state->header[5] & RADEON3D_DRAW_NO_W)
+                 ? (state->textured[0] ? 6UL : 4UL) : 7UL) ||
+        !(state->header[5] & RADEON3D_DRAW_NO_W) != !R68K_TCL6 ||
+        state->textured[1] || state->fog ||
+        !(state->header[5] & RADEON3D_DRAW_COMPACT_VERTEX) ||
+        (state->header[5] & (RADEON3D_DRAW_NO_Z | RADEON3D_DRAW_TEXGEN))) {
+        static ULONG reports;
+        if (reports < 6UL) {
+            ++reports;
+            dbg_puts("[minigl68k] resident refused: draw=");
+            dbg_u32(state->drawEnabled);
+            dbg_puts(" rect=");
+            dbg_u32(state->drawRectangleValid);
+            dbg_puts(" tcl=");
+            dbg_u32(state->hardwareTransform);
+            dbg_puts(" dwords=");
+            dbg_u32(state->vertexDwords);
+            dbg_puts(" tex1=");
+            dbg_u32(state->textured[1]);
+            dbg_puts(" fog=");
+            dbg_u32(state->fog);
+            dbg_puts(" opts=");
+            dbg_hex32(state->header[5]);
+            dbg_newline();
+        }
+        return FALSE;
+    }
+    generated = GeneratedHardwareDrawDwords(0UL, state->depth,
+                                            state->textured[0], FALSE, FALSE,
+                                            FALSE, FALSE, 0UL) +
+                COMMIT_FETCH_DWORDS + COMMIT_INDEXED_EXTRA_DWORDS;
+
+    slot = BuildSubmitSlot(context);
+    if (slot->drawCount &&
+        (!slot->commitMode || !slot->residentDraws || slot->stateBatch)) {
+        if (!Submit(context))
+            return FALSE;
+        slot = BuildSubmitSlot(context);
+    } else if (slot->recordCount && !slot->commitMode) {
+        if (!Submit(context))
+            return FALSE;
+        slot = BuildSubmitSlot(context);
+    }
+    if (slot->drawCount >= MAX_SLOT_DRAWS ||
+        slot->recordCount + headerDwords > context->batchDwords ||
+        slot->generatedDwordCount + generated > context->batchDwords ||
+        context->indexCursor[context->buildSlot] + indexBytes >
+            R68K_INDEX_HALF) {
+        if (!Submit(context))
+            return FALSE;
+        slot = BuildSubmitSlot(context);
+        if (context->indexCursor[context->buildSlot] + indexBytes >
+            R68K_INDEX_HALF)
+            return FALSE;
+    }
+
+    /* A resident batch starts from an empty slot: inline batches can leave
+     * a stale drawCount behind (the emitter ignores it for them). */
+    if (!slot->residentDraws && !slot->recordCount)
+        slot->drawCount = 0;
+    if (indexBuffer)
+        goto indices_resident;
+    /* Indices: little-endian 16-bit pairs in this slot's half. */
+    cursor = context->buildSlot * R68K_INDEX_HALF +
+             context->indexCursor[context->buildSlot];
+    destination = (volatile ULONG *)((UBYTE *)context->indexRing.CpuAddress +
+                                     cursor);
+    for (index = 0; index + 1UL < count; index += 2UL) {
+        ULONG a = indices[index], b = indices[index + 1UL];
+        destination[index >> 1] = ((a & 0xffUL) << 24) | ((a & 0xff00UL) << 8) |
+                                  ((b & 0xffUL) << 8) | (b >> 8);
+    }
+    if (count & 1UL) {
+        ULONG a = indices[count - 1UL];
+        destination[count >> 1] = ((a & 0xffUL) << 24) | ((a & 0xff00UL) << 8);
+    }
+    (void)destination[(indexBytes >> 2) - 1UL];
+    context->indexCursor[context->buildSlot] += indexBytes;
+indices_resident:
+
+    if (slot->drawCount != slot->residentDraws) {
+        static ULONG reports;
+        if (reports < 6UL) {
+            ++reports;
+            dbg_puts("[minigl68k] slot mismatch draws=");
+            dbg_u32(slot->drawCount);
+            dbg_puts(" resident=");
+            dbg_u32(slot->residentDraws);
+            dbg_puts(" records=");
+            dbg_u32(slot->recordCount);
+            dbg_puts(" commit=");
+            dbg_u32(slot->commitMode);
+            dbg_puts(" decided=");
+            dbg_u32(slot->modeDecided);
+            dbg_puts(" slot=");
+            dbg_u32(context->buildSlot);
+            dbg_newline();
+        }
+    }
+    record = slot->records + slot->recordCount;
+    for (index = 0; index < headerDwords; ++index)
+        record[index] = state->header[index];
+    record[1] = headerDwords;
+    record[10] = count;
+    slot->vertexOffsets[slot->drawCount] =
+        buffer->GpuAddress - R68KPoolGpu(context) + byteOffset;
+    slot->indexOffsets[slot->drawCount] = indexBuffer
+        ? indexBuffer->GpuAddress - R68KPoolGpu(context) + indexOffset
+        : context->indexRing.GpuAddress - R68KPoolGpu(context) + cursor;
+    {
+        ULONG *entry = slot->streams + slot->drawCount * 6UL;
+        if (context->r68kPendingStream) {
+            for (index = 0; index < 6UL; ++index)
+                entry[index] = context->r68kPendingStream[index];
+            slot->hasStreams = TRUE;
+        } else
+            entry[0] = 0;
+    }
+    slot->drawCount++;
+    slot->recordCount += headerDwords;
+    slot->generatedDwordCount += generated;
+    slot->commitMode = TRUE;
+    slot->modeDecided = TRUE;
+    slot->stateBatch = FALSE;
+    slot->residentDraws++;
+    if (state->textured[0])
+        MarkTextureQueued(context, state->textureName[0]);
+    if (context->perfEnabled) {
+        context->perf.primitives++;
+        context->perf.drawRecords++;
+        context->perf.submittedVertices += count;
+    }
+    return TRUE;
+}
+
+/* A vertex store in aux VRAM (the 12-segment pool is full): handle
+ * 0x100 + n, at most 4 MB minus what depth uses. */
+static ULONG R68KStoreAlloc(ULONG bytes, APTR *cpuAddress)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG index, rows;
+
+    if (cpuAddress)
+        *cpuAddress = NULL;
+    if (!context || !context->device || !bytes ||
+        !(context->radeonCaps & RADEON3D_CAP_AUX_SURFACES))
+        return 0;
+    for (index = 0; index < 2UL; ++index)
+        if (!context->r68kStore[index].Handle)
+            break;
+    if (index >= 2UL)
+        return 0;
+    rows = (bytes + 4095UL) / 4096UL;
+    ZeroMemory(&context->r68kStore[index], sizeof(context->r68kStore[index]));
+    context->r68kStore[index].Size = sizeof(context->r68kStore[index]);
+    if (!Radeon3DAllocSurface(context->device, 1024UL, rows,
+                              RADEON3D_FORMAT_B8G8R8A8,
+                              &context->r68kStore[index]) ||
+        !context->r68kStore[index].CpuAddress ||
+        !context->r68kStore[index].GpuAddress) {
+        ZeroMemory(&context->r68kStore[index],
+                   sizeof(context->r68kStore[index]));
+        return 0;
+    }
+    context->r68kStoreEpoch[index] = context->deviceEpoch;
+    if (cpuAddress)
+        *cpuAddress = context->r68kStore[index].CpuAddress;
+    return 0x100UL + index;
+}
+
+/* GPU address of byte offset in a resident buffer or a store; 0: bad */
+static ULONG R68KStreamAddress(struct MiniGLR200Context *context,
+                               ULONG handle, ULONG offset)
+{
+    if (handle >= 0x100UL && handle < 0x102UL) {
+        struct Radeon3DSurface *store = &context->r68kStore[handle - 0x100UL];
+        if (!store->Handle ||
+            context->r68kStoreEpoch[handle - 0x100UL] != context->deviceEpoch ||
+            offset >= store->Pitch * store->Height || (offset & 3UL))
+            return 0;
+        return store->GpuAddress + offset;
+    }
+    if (!handle || handle > R68K_MAX_RESIDENT ||
+        !context->resident[handle - 1UL].CpuAddress ||
+        context->residentEpoch[handle - 1UL] != context->deviceEpoch ||
+        offset >= context->resident[handle - 1UL].Bytes || (offset & 3UL))
+        return 0;
+    return context->resident[handle - 1UL].GpuAddress + offset;
+}
+
+static BOOL R68KDrawStreams(const MGL68KStreamDraw *draw)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    ULONG stream[6];
+    BOOL ok;
+
+    if (!context || !draw || !draw->indexHandle)
+        return FALSE;
+    stream[0] = R68KStreamAddress(context, draw->posHandle, draw->posOffset);
+    stream[1] = draw->posStride;
+    stream[2] = R68KStreamAddress(context, draw->colHandle, draw->colOffset);
+    stream[3] = draw->colStride;
+    stream[4] = R68KStreamAddress(context, draw->texHandle, draw->texOffset);
+    stream[5] = draw->texStride;
+    if (!stream[0] || !stream[2] || !stream[4] || !stream[1] ||
+        !stream[3] || !stream[5] || stream[1] > 64UL || stream[3] > 64UL ||
+        stream[5] > 64UL)
+        return FALSE;
+    /* the interleaved base only has to pass the bounds checks */
+    context->r68kPendingStream = stream;
+    ok = R68KDrawResidentCommon(draw->indexHandle, 0, NULL, draw->count,
+                                draw->indexHandle, draw->indexOffset);
+    context->r68kPendingStream = NULL;
+    return ok;
+}
+
+/* Points (GL_POINTS, current point size; sized points are hardware
+ * point sprites) from a resident buffer, indices resident too. */
+static BOOL R68KDrawResidentPoints(ULONG handle, ULONG byteOffset,
+                                   ULONG indexHandle, ULONG indexOffset,
+                                   ULONG count)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    BOOL ok;
+
+    if (!context || !indexHandle)
+        return FALSE;
+    context->r68kNextCommand = RADEON3D_EXEC_DRAW_POINTS;
+    ok = R68KDrawResidentCommon(handle, byteOffset, NULL, count,
+                                indexHandle, indexOffset);
+    context->r68kNextCommand = 0;
+    return ok;
+}
+
+const MGL68KExt R68KExtTable = {
+    MGL68K_EXT_VERSION,
+    sizeof(MGL68KExt),
+    R68KResidentAlloc,
+    R68KResidentFree,
+    R68KDrawResident,
+    R68KDrawResidentIndexed,
+    R68KPrepareTextures,
+    R68K_TCL6 ? MGL68K_LAYOUT_NO_W : 0UL,
+    R68KStoreAlloc,
+    R68KDrawStreams,
+    R68KDrawResidentPoints
+};
+
+/* Context teardown: resident buffers and the index ring. */
+void R68KReleaseResident(struct MiniGLR200Context *context)
+{
+    ULONG index;
+
+    for (index = 0; index < R68K_MAX_RESIDENT; ++index) {
+        if (context->resident[index].CpuAddress && context->device &&
+            context->residentEpoch[index] == context->deviceEpoch)
+            (void)Radeon3DFreeSegment(context->device,
+                                      context->resident[index].Id);
+        ZeroMemory(&context->resident[index],
+                   sizeof(context->resident[index]));
+    }
+    if (context->indexRing.CpuAddress && context->device &&
+        context->indexRingEpoch == context->deviceEpoch)
+        (void)Radeon3DFreeSegment(context->device, context->indexRing.Id);
+    ZeroMemory(&context->indexRing, sizeof(context->indexRing));
+}
+#endif

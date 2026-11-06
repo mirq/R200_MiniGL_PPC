@@ -210,6 +210,35 @@ void CopyPendingDrawState(struct PendingDrawState *destination,
         d[index] = s[index];
 }
 
+#if R200_CPEMIT_68K
+/* The capture cache with only unit 0's texture replaced (the state since
+ * the capture changed by binds alone). FALSE: capture in full. */
+BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
+                             struct PendingDrawState *state)
+{
+    struct TextureObject *texture;
+    ULONG serial = context->semanticStateSerial;
+
+    if (!context->textureEnabled[0] || !state->textured[0] ||
+        context->boundTexture[0] >= MAX_TEXTURES)
+        return FALSE;
+    texture = &context->textures[context->boundTexture[0]];
+    if (!EnsureTextureResident(context, texture) ||
+        (IsMipFilter(texture->minFilter) &&
+         texture->definedLevels != ((1UL << texture->levelCount) - 1UL)) ||
+        !SyncTextureDirty(context, texture) ||
+        !texture->surface.Handle ||
+        context->semanticStateSerial != serial)
+        return FALSE;
+    state->textureName[0] = context->boundTexture[0];
+    state->header[4] = (ULONG)texture->surface.Handle;
+    state->header[12] = (texture->width - 1UL) |
+                        ((texture->height - 1UL) << 16);
+    state->header[13] = TextureState(context, texture, 0);
+    return TRUE;
+}
+#endif
+
 BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
                              ULONG command,
                              struct PendingDrawState *state)
@@ -432,13 +461,18 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
             options |= RADEON3D_DRAW_COMPACT_VERTEX;
             state->vertexDwords = R200_TCL_VERTEX_TEX1_COMPACT_DWORDS;
         }
-#if R200_PPC_FRONTEND
+#ifndef R200_CPEMIT_68K
+#define R200_CPEMIT_68K 0
+#endif
+#if R200_PPC_FRONTEND || R200_CPEMIT_68K
         /* Unlit one-unit TCL without fog (WiiStation's transformed path,
          * ~4.7k vertices a frame): the 7-dword x,y,z,w,colour,s0,t0 stride
          * the PPC CP emitter takes (radeon3d_emit.c) instead of 10 -- 30%
          * less vertex data written to the segment over the bus. Every
-         * written dword stays in place; MGLPPC_NOTCL7=1: 10 dwords. */
-        if (!state->normalVertex && MGLPPCIndexedDraws && !MGLPPCNoTcl7 &&
+         * written dword stays in place; MGLPPC_NOTCL7=1: 10 dwords.
+         * minigl68k (R200_CPEMIT_68K) emits through the same emitter. */
+        if (!state->normalVertex &&
+            (MGLPPCIndexedDraws || R200_CPEMIT_68K) && !MGLPPCNoTcl7 &&
             !state->textured[1] && !state->fog) {
             options |= RADEON3D_DRAW_COMPACT_VERTEX;
             state->vertexDwords = R200_TCL_VERTEX_COMPACT_DWORDS;

@@ -50,7 +50,9 @@ void StreamDiagEvent(struct MiniGLR200Context *context, ULONG event,
                      ULONG argument0, ULONG argument1);
 #endif
 
+#ifndef LIBNAME
 #define LIBNAME "minigl.library"
+#endif
 #define VERSION 12
 #define REVISION 0
 
@@ -68,7 +70,7 @@ static const char LibName[] = LIBNAME;
 #endif
 
 static const char LibId[] =
-    "$VER: minigl.library 12.0 (2.9.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID "\r\n";
+    "$VER: " LIBNAME " 12.0 (5.11.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID "\r\n";
 
 /* Library bases used by the AmigaOS NDK proto headers. */
 struct ExecBase *SysBase = 0;
@@ -89,6 +91,14 @@ static BOOL MiniGLInitialized = FALSE;
 
 extern const APTR LibVectors[];
 extern const MGLDispatchTable MiniGLDispatchTable;
+#ifdef MINIGL68K_EXT
+#include <libraries/minigl68k_ext.h>
+extern const MGL68KExt R68KExtTable;
+static const MGL68KExt *LibGetExtTable(void)
+{
+    return &R68KExtTable;
+}
+#endif
 
 static const MGLDispatchTable *LibGetDispatchTable(void)
 {
@@ -273,6 +283,10 @@ const APTR LibVectors[] = {
 
     /* -30: the only public API vector. All GL/MGL calls use this table. */
     (APTR)LibGetDispatchTable,
+#ifdef MINIGL68K_EXT
+    /* -36 (minigl68k.library): the resident-buffer extension table. */
+    (APTR)LibGetExtTable,
+#endif
 
     (APTR)-1
 };

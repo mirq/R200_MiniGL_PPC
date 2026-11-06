@@ -96,6 +96,8 @@ ULONG DepthStorageWidth(ULONG width);
 #define MAX_RECORD_DWORDS RADEON3D_MAX_BATCH_DWORDS
 #define MAX_GENERATED_DWORDS RADEON3D_MAX_BATCH_DWORDS
 #define SUBMIT_SLOT_COUNT 2UL
+#define R200_CP_RESOLVE_CACHE 256UL
+#define R200_CP_SLOT_DWORDS RADEON3D_MAX_BATCH_DWORDS
 /* Maximum header-only draw records one slot can hold: the batch budget
  * divided by the smallest TCL header (44 dwords). */
 #define MAX_SLOT_DRAWS 192UL
@@ -603,6 +605,15 @@ struct MiniGLR200Context {
     GLfloat currentNormalX, currentNormalY, currentNormalZ;
     struct SubmitSlot submitSlots[SUBMIT_SLOT_COUNT];
     struct StreamSegment segment;
+    /* CP-emit submission (Radeon9200.chip 0.41+ has no record path): the
+     * records are turned into CP dwords by the shared emitter, copied
+     * byte-swapped into one region per submit slot of cpSegment and run
+     * with Radeon3DDispatchIndirect. */
+    struct Radeon3DSegment cpSegment;
+    ULONG cpSegmentEpoch;
+    ULONG *cpStaging;
+    ULONG cpResolveHandle[R200_CP_RESOLVE_CACHE];
+    struct Radeon3DSurface *cpResolveSurface[R200_CP_RESOLVE_CACHE];
     /* Segments parked between submit and fence retirement (async
      * rotation). Entries are epoch-stamped; a device recovery drops them
      * without freeing because the segments died with the device. */
@@ -904,6 +915,7 @@ BOOL TextureQueued(const struct MiniGLR200Context *context,
                    const struct TextureObject *texture);
 void MarkTextureQueued(struct MiniGLR200Context *context, GLuint name);
 BOOL RecoverDevice(struct MiniGLR200Context *context);
+void ReleaseCpSegment(struct MiniGLR200Context *context);
 BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
                     struct SubmitSlot *slot,
                     enum SubmitWaitReason reason);

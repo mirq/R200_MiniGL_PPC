@@ -1,3 +1,4 @@
+#include "debug_output.h"
 #include "minigl_r200_internal.h"
 
 BOOL IsMipFilter(ULONG filter)
@@ -43,6 +44,7 @@ BOOL EvictTextureDefer(struct MiniGLR200Context *context,
 
     if (!texture->resident)
         return TRUE;
+    ++R200Evictions;
     if (TextureQueued(context, texture) && !Submit(context))
         return FALSE;
     if (!texture->resident)
@@ -138,9 +140,25 @@ void ReapDeferredSurfaces(struct MiniGLR200Context *context)
     }
 }
 
+ULONG R200EvictSearches, R200Evictions, R200Uploads;
+
 struct TextureObject *FindEvictionCandidate(
     struct MiniGLR200Context *context, struct TextureObject *exclude)
 {
+    ++R200EvictSearches;
+    if (R200EvictSearches <= 12UL || !(R200EvictSearches & 4095UL)) {
+        dbg_puts("[minigl] evict search #");
+        dbg_u32(R200EvictSearches);
+        dbg_puts(" for name=");
+        dbg_u32(exclude ? (ULONG)(exclude - context->textures) : 0);
+        dbg_puts(" ");
+        dbg_u32(exclude ? exclude->width : 0);
+        dbg_puts("x");
+        dbg_u32(exclude ? exclude->height : 0);
+        dbg_puts(" direct=");
+        dbg_u32(exclude ? exclude->direct : 0);
+        dbg_newline();
+    }
     struct TextureObject *best = NULL, *bestQueued = NULL;
     ULONG bestUse = ~0UL, bestQueuedUse = ~0UL, index;
     for (index = 1; index < MAX_TEXTURES; ++index) {
@@ -207,6 +225,7 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
         ULONG t0 = PerfClock();
 #endif
     texture->bitmap = AllocateArgbBitMap(texture->width, storageHeight);
+    ++R200Uploads;
 #if R200_RESIDENCY_DIAG
         R200DiagU("resdiag alloc", PerfClock() - t0);
     }
@@ -214,6 +233,25 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
     while (!texture->bitmap) {
         struct TextureObject *candidate =
             FindEvictionCandidate(context, texture);
+        {
+            static ULONG reports;
+            if (reports < 12UL) {
+                ++reports;
+                dbg_puts("[minigl] texture alloc failed name=");
+                dbg_u32((ULONG)(texture - context->textures));
+                dbg_puts(" w=");
+                dbg_u32(texture->width);
+                dbg_puts(" h=");
+                dbg_u32(texture->height);
+                dbg_puts(" rows=");
+                dbg_u32(storageHeight);
+                dbg_puts(" bytes=");
+                dbg_u32(texture->imageBytes);
+                dbg_puts(" candidate=");
+                dbg_u32(candidate ? (ULONG)(candidate - context->textures) : 0);
+                dbg_newline();
+            }
+        }
         if (!candidate || !EvictTexture(context, candidate))
             return FALSE;
         if (context->perfEnabled)
@@ -234,6 +272,78 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
 #if R200_RESIDENCY_DIAG
         R200DiagU("resdiag importfail", PerfClock() - t0);
 #endif
+        {
+            static ULONG reports;
+            if (reports < 8UL) {
+                ++reports;
+                dbg_puts("[minigl] texture import failed name=");
+                dbg_u32((ULONG)(texture - context->textures));
+                dbg_puts(" ");
+                dbg_u32(texture->width);
+                dbg_puts("x");
+                dbg_u32(texture->height);
+                dbg_puts(" rows=");
+                dbg_u32(storageHeight);
+                dbg_puts(" bytes=");
+                dbg_u32(texture->imageBytes);
+                dbg_puts(" handle=");
+                dbg_hex32((ULONG)texture->surface.Handle);
+                dbg_puts(" fmt=");
+                dbg_u32(texture->surface.Format);
+                dbg_puts(" pitch=");
+                dbg_u32(texture->surface.Pitch);
+                dbg_puts(" h=");
+                dbg_u32(texture->surface.Height);
+                {
+                    ULONG i, n = 0, img = 0, vram = 0;
+                    for (i = 0; i < MAX_TEXTURES; ++i) {
+                        const struct TextureObject *t = &context->textures[i];
+                        if (t->resident) {
+                            ++n;
+                            img += t->imageBytes;
+                            vram += t->surface.Pitch * t->surface.Height;
+                        }
+                        if (t->direct)
+                            vram += t->directSurface.Pitch *
+                                    t->directSurface.Height;
+                    }
+                    dbg_puts(" resident=");
+                    dbg_u32(n);
+                    dbg_puts(" image_bytes=");
+                    dbg_u32(img);
+                    dbg_puts(" vram_bytes=");
+                    dbg_u32(vram);
+                    dbg_puts(" bm_mem=");
+                    dbg_hex32(p96GetBitMapAttr(texture->bitmap, P96_BITMAP_MEMORY));
+                    dbg_puts(" rgbfmt=");
+                    dbg_u32(p96GetBitMapAttr(texture->bitmap, P96_BITMAP_RGB_FORMAT));
+                    dbg_puts(" bpr=");
+                    dbg_u32(p96GetBitMapAttr(texture->bitmap, P96_BITMAP_BYTES_PER_ROW));
+                    dbg_puts(" bmw=");
+                    dbg_u32(p96GetBitMapAttr(texture->bitmap, P96_BITMAP_WIDTH));
+                    dbg_puts(" bmh=");
+                    dbg_u32(p96GetBitMapAttr(texture->bitmap, P96_BITMAP_HEIGHT));
+                    {
+                        struct Radeon3DInfo info;
+                        ZeroMemory(&info, sizeof(info));
+                        info.Size = sizeof(info);
+                        dbg_puts(" getinfo=");
+                        dbg_u32(Radeon3DGetInfo(context->device, &info));
+                        dbg_puts(" cpready=");
+                        dbg_u32((info.Caps & RADEON3D_CAP_CP_READY) != 0);
+                        dbg_puts(" gen=");
+                        dbg_u32(info.Generation);
+                        dbg_puts("/");
+                        dbg_u32(context->radeonGeneration);
+                        dbg_puts(" dev=");
+                        dbg_hex32((ULONG)context->device);
+                    }
+                    dbg_puts(" onboard=");
+                    dbg_u32(p96GetBitMapAttr(texture->bitmap, P96_BITMAP_IS_ON_BOARD));
+                }
+                dbg_newline();
+            }
+        }
         if (texture->surface.Handle)
             Radeon3DReleaseSurface(context->device, &texture->surface);
         p96FreeBitMap(texture->bitmap);

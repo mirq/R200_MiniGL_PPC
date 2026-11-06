@@ -20,9 +20,114 @@ BOOL EvictTexture(struct MiniGLR200Context *context,
     return EvictTextureDefer(context, texture, FALSE);
 }
 
+#if R200_CPEMIT_68K
+void TextureLevelLayout(const struct TextureObject *texture, ULONG level,
+                        ULONG *offset, ULONG *stride, ULONG *width,
+                        ULONG *height);
+
+static void R68KDropSpare(struct MiniGLR200Context *context,
+                          struct TextureObject *texture)
+{
+    if (!texture->spare.Handle && !texture->spareBitmap)
+        return;
+    if (context->device && texture->spareEpoch == context->deviceEpoch) {
+        struct DeferredSurface *node = texture->spareFence ?
+            AllocMem(sizeof(*node), MEMF_PUBLIC) : NULL;
+        if (node) {
+            node->surface = texture->spare;
+            node->bitmap = texture->spareBitmap;
+            node->fence = texture->spareFence;
+            node->deviceEpoch = texture->spareEpoch;
+            node->next = context->deferredSurfaces;
+            context->deferredSurfaces = node;
+        } else {
+            if (texture->spare.Handle)
+                Radeon3DReleaseSurface(context->device, &texture->spare);
+            if (texture->spareBitmap)
+                p96FreeBitMap(texture->spareBitmap);
+        }
+    } else if (texture->spareBitmap) {
+        p96FreeBitMap(texture->spareBitmap);
+    }
+    ZeroMemory(&texture->spare, sizeof(texture->spare));
+    texture->spareBitmap = NULL;
+    texture->spareFence = 0;
+    texture->spareEpoch = 0;
+}
+
+static void R68KCopyRows(struct TextureObject *texture,
+                         const struct TextureDirtyRect *rect, UBYTE *output)
+{
+    ULONG levelOffset, levelStride, levelWidth, levelHeight, row, rowBytes;
+    if (rect->right <= rect->left || rect->bottom <= rect->top)
+        return;
+    TextureLevelLayout(texture, 0, &levelOffset, &levelStride,
+                       &levelWidth, &levelHeight);
+    rowBytes = ((ULONG)rect->right - (ULONG)rect->left) * 4UL;
+    for (row = rect->top; row < rect->bottom; ++row) {
+        ULONG offset = levelOffset + row * levelStride +
+                       (ULONG)rect->left * 4UL;
+        CopyMem(texture->image + offset, output + offset, rowBytes);
+    }
+}
+
+/* Swaps the spare in: it gets the rows it is behind plus this update's. */
+static BOOL R68KSpareSwap(struct MiniGLR200Context *context,
+                          struct TextureObject *texture)
+{
+    struct Radeon3DSurface surface;
+    struct BitMap *bitmap;
+    ULONG index;
+    UBYTE *output;
+
+    if (texture->dirtyLevelMask != 1UL || !texture->spare.Handle ||
+        !texture->spare.CpuAddress || !context->device ||
+        texture->spareEpoch != context->deviceEpoch ||
+        texture->residentDeviceEpoch != context->deviceEpoch)
+        return FALSE;
+    if (texture->spareFence)
+        for (index = 0; index < SUBMIT_SLOT_COUNT; ++index) {
+            struct SubmitSlot *slot = &context->submitSlots[index];
+            if (slot->inFlight && slot->fence == texture->spareFence &&
+                slot->deviceEpoch == texture->spareEpoch) {
+                if (!WaitSubmitSlot(context, slot, SUBMIT_WAIT_TEXTURE))
+                    return FALSE;
+                break;
+            }
+        }
+    output = (UBYTE *)texture->spare.CpuAddress;
+    R68KCopyRows(texture, &texture->spareBehind, output);
+    R68KCopyRows(texture, &texture->dirtyRects[0], output);
+    (void)output[0];
+    surface = texture->surface;
+    bitmap = texture->bitmap;
+    texture->surface = texture->spare;
+    texture->bitmap = texture->spareBitmap;
+    texture->spare = surface;
+    texture->spareBitmap = bitmap;
+    texture->spareFence = texture->lastUseDeviceEpoch == context->deviceEpoch ?
+                          texture->lastUseFence : 0;
+    texture->spareEpoch = context->deviceEpoch;
+    texture->spareBehind = texture->dirtyRects[0];
+    texture->lastUseFence = 0;
+    texture->lastUseDeviceEpoch = 0;
+    texture->surfaceGeneration = texture->surface.Generation;
+    texture->residentGeneration = texture->imageGeneration;
+    texture->dirtyLevelMask = 0;
+    if (++texture->contentSerial == 0)
+        texture->contentSerial = 1;
+    BumpSemanticStateSerial(context);
+    CpResolveRemember(context, &texture->surface);
+    return TRUE;
+}
+#endif
+
 static void DetachResidency(struct MiniGLR200Context *context,
                             struct TextureObject *texture)
 {
+#if R200_CPEMIT_68K
+    R68KDropSpare(context, texture);
+#endif
     texture->bitmap = NULL;
     texture->resident = FALSE;
     texture->residentGeneration = 0;
@@ -189,7 +294,7 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
             FindEvictionCandidate(context, texture);
         if (!candidate || !EvictTexture(context, candidate))
             return FALSE;
-        if (context->perfEnabled)
+        if (context->perfEnabled || R200_CPEMIT_68K)
             context->perf.textureEvictions++;
         texture->bitmap = AllocateArgbBitMap(texture->width, storageHeight);
     }
@@ -216,9 +321,36 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
         return FALSE;
     }
     output = texture->surface.CpuAddress;
+#if R200_CPEMIT_68K
+    {
+        static ULONG uploads, bytes;
+        ++uploads;
+        bytes += texture->imageBytes;
+        if (!(uploads & 255UL)) {
+            dbg_puts("[tex] full upload #");
+            dbg_u32(uploads);
+            dbg_puts(" name=");
+            dbg_u32((ULONG)(texture - context->textures));
+            dbg_puts(" ");
+            dbg_u32(texture->width);
+            dbg_puts("x");
+            dbg_u32(texture->height);
+            dbg_puts(" bytes=");
+            dbg_u32(texture->imageBytes);
+            dbg_puts(" total=");
+            dbg_u32(bytes);
+            dbg_puts(" evict=");
+            dbg_u32(context->perf.textureEvictions);
+            dbg_newline();
+        }
+    }
+#endif
     CopyMem(texture->image, output, texture->imageBytes);
     (void)output[texture->imageBytes - 1UL];
     texture->resident = TRUE;
+#if R200_CPEMIT_68K
+    CpResolveRemember(context, &texture->surface);
+#endif
     texture->residentGeneration = texture->imageGeneration;
     texture->residentDeviceEpoch = context->deviceEpoch;
     texture->surfaceGeneration = texture->surface.Generation;
@@ -444,6 +576,9 @@ BOOL ReleaseTextureStorage(struct MiniGLR200Context *context,
                                   struct TextureObject *texture,
                                   BOOL allowDefer)
 {
+#if R200_CPEMIT_68K
+    R68KDropSpare(context, texture);
+#endif
     if (!EvictTextureDefer(context, texture, allowDefer))
         return FALSE;
     if (texture->image) {
@@ -597,7 +732,17 @@ void Lib_glBindTexture(GLenum target, GLuint name)
     }
     context->textures[name].generated=TRUE;
     context->boundTexture[context->activeTexture]=name;
+#if R200_CPEMIT_68K
+    {
+        BOOL clean = context->activeTexture == 0 && context->captureCacheValid &&
+            (context->captureCacheSerial == context->semanticStateSerial ||
+             context->r68kTexOnlySerial == context->semanticStateSerial);
+        BumpSemanticStateSerial(context);
+        context->r68kTexOnlySerial = clean ? context->semanticStateSerial : 0;
+    }
+#else
     BumpSemanticStateSerial(context);
+#endif
 }
 
 void Lib_glDeleteTextures(GLsizei count, const GLuint *names)
@@ -812,11 +957,21 @@ void Lib_glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+#if R200_CPEMIT_68K
+    if (texture->resident && R68KSpareSwap(context, texture))
+        return;
+#endif
     if (texture->resident) {
         struct BitMap *staleBitmap = texture->bitmap;
         struct Radeon3DSurface staleSurface = texture->surface;
         ULONG staleFence = texture->lastUseFence;
         ULONG staleEpoch = texture->lastUseDeviceEpoch;
+#if R200_CPEMIT_68K
+        BOOL keepSpare = texture->dirtyLevelMask == 1UL &&
+                         texture->residentDeviceEpoch == context->deviceEpoch;
+        if (keepSpare)
+            R68KDropSpare(context, texture);
+#endif
 
         if (context->perfEnabled)
             context->perf.textureUploadBarriers++;
@@ -836,7 +991,20 @@ void Lib_glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         texture->lastUseFence = 0;
         texture->lastUseDeviceEpoch = 0;
         ZeroMemory(&texture->surface, sizeof(texture->surface));
-        if (staleFence && staleEpoch == context->deviceEpoch) {
+#if R200_CPEMIT_68K
+        if (keepSpare && staleSurface.Handle && staleSurface.CpuAddress) {
+            texture->spare = staleSurface;
+            texture->spareBitmap = staleBitmap;
+            texture->spareFence = staleEpoch == context->deviceEpoch ?
+                                  staleFence : 0;
+            texture->spareEpoch = context->deviceEpoch;
+            texture->spareBehind = texture->dirtyRects[0];
+            staleSurface.Handle = NULL;
+            staleBitmap = NULL;
+        }
+#endif
+        if (staleSurface.Handle && staleFence &&
+            staleEpoch == context->deviceEpoch) {
             struct DeferredSurface *node =
                 AllocMem(sizeof(*node), MEMF_PUBLIC);
             if (node) {

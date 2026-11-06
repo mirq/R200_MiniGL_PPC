@@ -1,0 +1,91 @@
+# minigl68k.library: the PPC-validated R200 frontend (backend_r200/library)
+# built natively for the 68060, drawing through the CP emitter
+# (Radeon9200.chip 0.41+ indirect buffers). OpenGL token values and the
+# ABI-5 dispatch table of the top-level include/ (same as the PPC DLL);
+# the classic minigl.library (old tokens, used by the PPC host) is untouched.
+#
+#   PATH=/opt/amiga/bin:$PATH make -f Makefile_dispatch_r68k.gcc
+#
+CC := m68k-amigaos-gcc
+NM := m68k-amigaos-nm
+PYTHON ?= python3
+CPU ?= 68060
+TOP := $(abspath ../../..)
+BK := $(TOP)/backend_r200
+R3D := $(BK)/third_party/radeon3d/include
+EMIT := $(BK)/third_party/radeon3d/emit
+OBJDIR ?= obj_r68k
+OUTDIR ?= bin/r68k
+STREAM_COMMITS ?= 0
+R68K_FLAGS ?= -DR68K_TCL6=1 -DR68K_SPRITES=1
+OPT ?= -O2
+PERF_TIMING ?= 0
+DEBUG_OUTPUT ?= 1
+LIBNAME ?= minigl68k.library
+
+BASE_CFLAGS = -std=gnu99 $(OPT) -mcpu=$(CPU) -m68881 -noixemul -ffreestanding \
+	-fno-builtin -fno-baserel -D__M68K__ -DMINIGL_BACKEND_R200 \
+	-DMINIGL_LIBRARY_BUILD -DR200_PERF_TIMING=$(PERF_TIMING) -DMGL_DEBUG_OUTPUT=$(DEBUG_OUTPUT) \
+	-DR200_STREAM_COMMITS=$(STREAM_COMMITS) -DR200_ASYNC_ROTATION=1 -DR200_CPEMIT_68K=1 $(R68K_FLAGS)
+# Frontend: backend headers first.
+FE_CFLAGS = $(BASE_CFLAGS) -I$(R3D) -Ithird_party/warp3d/include \
+	-I$(BK)/library -I$(BK)/include -I$(TOP)/include -Iinclude
+# Table / ppc_common / wrapper: the ABI-5 SDK headers of the top level.
+SDK_CFLAGS = $(BASE_CFLAGS) -I$(TOP)/include -I$(R3D) \
+	-Ithird_party/warp3d/include -Ilibrary -I$(TOP)/ppc_common \
+	-DMINIGL_DISPATCH_DECLARATIONS -DMINIGL68K_EXT -DLIBNAME='"$(LIBNAME)"'
+EMIT_CFLAGS = $(BASE_CFLAGS) -I$(EMIT)/include -I$(R3D) -I$(BK)/include
+
+OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_r68k.o \
+	$(OBJDIR)/r200_unity.o $(OBJDIR)/r200_cp_emit.o $(OBJDIR)/radeon3d_emit.o \
+	$(OBJDIR)/r200_m68k_glue.o $(OBJDIR)/minigl_ppc_generic.o \
+	$(OBJDIR)/minigl_ppc_lists.o $(OBJDIR)/minigl_ppc_glu.o \
+	$(OBJDIR)/context_state_r68k.o $(OBJDIR)/debug_output.o \
+	$(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o
+
+.PHONY: all clean
+all: $(OUTDIR)/$(LIBNAME)
+
+$(OBJDIR) $(OUTDIR):
+	mkdir -p $@
+
+$(OBJDIR)/r200_unity.o: $(wildcard $(BK)/library/*.c $(BK)/library/*.h) | $(OBJDIR)
+	$(CC) $(FE_CFLAGS) -c $(BK)/library/r200_unity.c -o $@
+
+$(OBJDIR)/r200_symbols.txt: $(OBJDIR)/r200_unity.o
+	$(NM) --defined-only --format=posix $< | \
+		awk '$$2 == "T" && $$1 ~ /^_Lib_/ { sub(/^_/, "", $$1); print $$1 }' | sort -u > $@
+
+$(OBJDIR)/dispatch_table_r68k.c: $(TOP)/include/libraries/minigl_dispatch.h \
+		$(OBJDIR)/r200_symbols.txt $(TOP)/tools/generate_dispatch_r200.py
+	$(PYTHON) $(TOP)/tools/generate_dispatch_r200.py \
+		$(TOP)/include/libraries/minigl_dispatch.h $(OBJDIR)/r200_symbols.txt $@
+
+$(OBJDIR)/dispatch_table_r68k.o: $(OBJDIR)/dispatch_table_r68k.c
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_%.o: $(TOP)/ppc_common/minigl_ppc_%.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/r200_m68k_glue.o: library/r200_m68k_glue.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_library.o: library/minigl_library.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/context_state_r68k.o $(OBJDIR)/debug_output.o \
+$(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o: $(OBJDIR)/%.o: library/%.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/r200_cp_emit.o: $(BK)/library/r200_cp_emit.c | $(OBJDIR)
+	$(CC) $(EMIT_CFLAGS) -c $< -o $@
+$(OBJDIR)/radeon3d_emit.o: $(EMIT)/src/radeon3d_emit.c | $(OBJDIR)
+	$(CC) $(EMIT_CFLAGS) -c $< -o $@
+
+$(OUTDIR)/$(LIBNAME): $(OBJS) | $(OUTDIR)
+	$(CC) -nostdlib -nostartfiles -nodefaultlibs -noixemul -mcpu=$(CPU) \
+		-m68881 -o $@ -Wl,--start-group $(OBJS) -lm -lgcc -Wl,--end-group
+	@test -z "$$($(NM) -u $@)" || { $(NM) -u $@; exit 1; }
+
+clean:
+	rm -rf $(OBJDIR) $(OUTDIR)

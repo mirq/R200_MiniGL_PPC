@@ -281,9 +281,17 @@ static BOOL ExecuteEmitWord(struct Radeon3DEmitter *emitter,
     return TRUE;
 }
 
+ULONG R3DStatDraws, R3DStatRegCalls, R3DStatRegWrites, R3DStatWords;
+ULONG R3DStatFast, R3DStatFastOther[48];
+#ifndef R3D_FAST_ENABLE
+#define R3D_FAST_ENABLE 0   /* broke HUD draws (texture switches); no measurable gain */
+#endif
+ULONG R3DFastEnable = R3D_FAST_ENABLE;
+
 static BOOL ExecuteEmitRegister(struct Radeon3DEmitter *emitter,
                                 ULONG reg, ULONG value)
 {
+    R3DStatRegCalls++;
     ULONG slot = (reg >> 2) & 127UL;
     /* Registers that act when written are always written: the host-path
      * read-cache invalidate pair, the TCL state flush, and the vector and
@@ -312,6 +320,7 @@ static BOOL ExecuteEmitRegister(struct Radeon3DEmitter *emitter,
         emitter->RegCacheValue[slot] == value)
         return TRUE;
     emitter->RegWrites++;
+    R3DStatRegWrites++;
     if (!ExecuteEmitWord(emitter, RADEON_CP_PACKET0(reg, 0)) ||
         !ExecuteEmitWord(emitter, value))
         return FALSE;
@@ -1657,6 +1666,9 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
     if (emitter->CommitVbuf) {
         UBYTE components[6];
         UBYTE offsets[6];
+        UBYTE kinds[6];
+        ULONG addr[6], strides[6];
+        const ULONG *stream = emitter->CommitStream;
         ULONG arrays = 0;
         ULONG array;
         ULONG payload;
@@ -1685,30 +1697,49 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
         if (!hardwareTcl)
             return FALSE;
         components[arrays] = noZ ? 2 : noW ? 3 : 4;
+        kinds[arrays] = 0;
         offsets[arrays++] = 0;
         if (normalVertex) {
             components[arrays] = 3;
+            kinds[arrays] = 1;
             offsets[arrays++] = 4;
         }
         if (vertexState & RADEON3D_VERTEX_FOG) {
             components[arrays] = 1;
+            kinds[arrays] = 1;
             offsets[arrays++] = normalVertex ? 12 : 9;
         }
         if (!textured || fragmentStatePresent) {
             components[arrays] = 1;
+            kinds[arrays] = 3;
             offsets[arrays++] = (UBYTE)colorOffset;
         }
         if (textured) {
             components[arrays] = 2;
+            kinds[arrays] = 4;
             offsets[arrays++] = (UBYTE)(normalVertex ? 8UL : noZ ? 3UL : noW ? 4UL : 5UL);
         }
         if (vertexState & RADEON3D_VERTEX_TEXTURE1) {
             components[arrays] = 2;
+            kinds[arrays] = 1;
             offsets[arrays++] = (UBYTE)(normalVertex ? 10UL : 7UL);
         }
         if (pal) {
             components[arrays] = 2;
+            kinds[arrays] = 1;
             offsets[arrays++] = (UBYTE)((noZ ? 3UL : 4UL) + 2UL);
+        }
+        for (array = 0; array < arrays; ++array) {
+            ULONG k = kinds[array];
+            if (stream && (k == 0 || k == 3 || k == 4)) {
+                ULONG e = k == 0 ? 0UL : k == 3 ? 2UL : 4UL;
+                addr[array] = stream[e];
+                strides[array] = stream[e + 1UL];
+            } else {
+                addr[array] = emitter->CommitVbufAddress +
+                              (ULONG)offsets[array] * 4UL;
+                strides[array] = tclStride;
+            }
         }
         payload = 1UL + (arrays >> 1) * 3UL + (arrays & 1UL) * 2UL;
         if (!ExecuteEmitWord(
@@ -1720,23 +1751,17 @@ static BOOL EmitExecuteVertices(struct Radeon3DEmitter *emitter,
         for (array = 0; array + 1UL < arrays; array += 2UL) {
             if (!ExecuteEmitWord(
                     emitter,
-                    components[array] | (tclStride << 8) |
+                    components[array] | (strides[array] << 8) |
                         ((ULONG)components[array + 1UL] << 16) |
-                        (tclStride << 24)) ||
-                !ExecuteEmitWord(emitter,
-                                 emitter->CommitVbufAddress +
-                                     (ULONG)offsets[array] * 4UL) ||
-                !ExecuteEmitWord(emitter,
-                                 emitter->CommitVbufAddress +
-                                     (ULONG)offsets[array + 1UL] * 4UL))
+                        (strides[array + 1UL] << 24)) ||
+                !ExecuteEmitWord(emitter, addr[array]) ||
+                !ExecuteEmitWord(emitter, addr[array + 1UL]))
                 return FALSE;
         }
         if (array < arrays &&
             (!ExecuteEmitWord(emitter,
-                              components[array] | (tclStride << 8)) ||
-             !ExecuteEmitWord(emitter,
-                              emitter->CommitVbufAddress +
-                                  (ULONG)offsets[array] * 4UL)))
+                              components[array] | (strides[array] << 8)) ||
+             !ExecuteEmitWord(emitter, addr[array])))
             return FALSE;
         if (emitter->CommitIndexOffset)
             /* Indexed draw (Mesa r200FireEB): vertexCount is the index
@@ -2153,6 +2178,7 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
                                  const ULONG *record, ULONG length,
                                  ULONG primitiveType)
 {
+    R3DStatDraws++;
 #if MGLPPC_PROFILE
     ULONG phaseStart = EmitTb();
 #endif
@@ -2205,6 +2231,116 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
     ULONG texGenState0 = 0, texGenState1 = 0;
     ULONG lightControl = 0;
 
+#if defined(__m68k__) || defined(__mc68000__)
+    if ((R3DFastEnable || emitter->FastAllowed) && emitter->FastValid &&
+        emitter->CommitVbuf &&
+        length == emitter->FastLength && primitiveType == emitter->FastPrim) {
+        const ULONG *prev = emitter->FastRec;
+        ULONG i;
+        BOOL texDiff = FALSE, mtxDiff = FALSE, other = FALSE;
+
+        for (i = 0; i < length; ++i)
+            if (record[i] != prev[i]) {
+                if (i == 10UL)
+                    continue;
+                if (i == 4UL || i == 11UL)
+                    texDiff = TRUE;
+                else if (i >= 21UL && i < 37UL)
+                    mtxDiff = TRUE;
+                else {
+                    if (i < 48UL)
+                        R3DStatFastOther[i]++;
+                    other = TRUE;
+                    break;
+                }
+            }
+        if (!other) {
+            struct Radeon3DEmitState *b = emitter->Build;
+            const ULONG *from = (const ULONG *)emitter->Live;
+            ULONG *to = (ULONG *)b;
+            BOOL ok = emitter->StateValid;
+
+            for (i = 0; ok && i < EMIT_STATE_BASE_DWORDS; ++i)
+                to[i] = from[i];
+            if (ok && texDiff) {
+                struct Radeon3DEmitSurface *tex, *col, *dep = NULL;
+                ULONG tSize = record[12], tState = record[13];
+                ULONG tW = (tSize & 0xffffUL) + 1UL, tH = (tSize >> 16) + 1UL;
+                ULONG tLevels = ((tState & RADEON3D_TEX_LEVELS_MASK) >>
+                                 RADEON3D_TEX_LEVELS_SHIFT) + 1UL;
+                ULONG tMin = (tState & RADEON3D_TEX_MIN_MASK) >>
+                             RADEON3D_TEX_MIN_SHIFT;
+                ULONG tBytes = 0;
+
+                col = ExecuteSurface(emitter, record[2]);
+                if (emitter->FastUseDepth)
+                    dep = ExecuteSurface(emitter, record[3]);
+                tex = ExecuteSurface(emitter, record[4]);
+                if (!emitter->FastTextured || !tex || !col ||
+                    (emitter->FastUseDepth && !dep) ||
+                    (tState & ~(RADEON3D_TEX_STATE_MASK |
+                                RADEON3D_TEX_CONTENT_MASK)) ||
+                    tMin > RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR ||
+                    !ValidTextureTargetWithState(tex, col, dep, record[11],
+                                                 tW, tH, tLevels, &tBytes) ||
+                    (tMin >= RADEON3D_TEX_MIN_NEAREST_MIPMAP_NEAREST &&
+                     tLevels == 1UL))
+                    ok = FALSE;
+                else {
+                    b->Texture = *tex;
+                    b->TextureValid = TRUE;
+                    b->TextureOffset = record[11];
+                    b->TextureWidth = tW;
+                    b->TextureHeight = tH;
+                    b->TextureState = tState;
+                    b->TextureBytes = tBytes;
+                }
+            }
+            if (ok && mtxDiff)
+                for (i = 0; i < 16UL; ++i) {
+                    if (!ValidFloat(record[21UL + i])) {
+                        ok = FALSE;
+                        break;
+                    }
+                    b->ModelProjection[i] = record[21UL + i];
+                }
+            if (ok) {
+                const struct Radeon3DEmitSurface *col =
+                    ExecuteSurface(emitter, record[2]);
+                if (!col)
+                    return FALSE;
+                emitter->CommitIndexOffset = emitter->CommitIndexOffsets
+                    ? emitter->CommitIndexOffsets[emitter->CommitDrawIndex]
+                    : 0UL;
+                emitter->CommitStream =
+                    (emitter->CommitStreams &&
+                     emitter->CommitStreams[emitter->CommitDrawIndex * 6UL])
+                        ? emitter->CommitStreams +
+                              emitter->CommitDrawIndex * 6UL
+                        : NULL;
+                emitter->CommitVbufAddress = emitter->CommitSegmentGpuBase +
+                    emitter->CommitVertexOffsets[emitter->CommitDrawIndex++];
+                if (!EmitExecuteStateCached(emitter, b) ||
+                    !EmitExecuteVertices(emitter, record + length,
+                                         record[10], emitter->FastUseDepth,
+                                         emitter->FastTextured,
+                                         emitter->FastFragment,
+                                         emitter->FastExtended, TRUE,
+                                         FALSE, emitter->FastCompact,
+                                         emitter->FastVertexState,
+                                         primitiveType, col)) {
+                    emitter->FastValid = FALSE;
+                    return FALSE;
+                }
+                for (i = 0; i < length; ++i)
+                    emitter->FastRec[i] = record[i];
+                R3DStatFast++;
+                return TRUE;
+            }
+        }
+    }
+    emitter->FastValid = FALSE;
+#endif
     ClearExecuteState(state, EMIT_STATE_BASE_DWORDS);
     if (length < RADEON3D_EXEC_DRAW_HEADER_DWORDS)
         return FALSE;
@@ -2259,6 +2395,11 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
     if (emitter->CommitVbuf) {
         emitter->CommitIndexOffset = emitter->CommitIndexOffsets
             ? emitter->CommitIndexOffsets[emitter->CommitDrawIndex] : 0UL;
+        emitter->CommitStream =
+            (emitter->CommitStreams &&
+             emitter->CommitStreams[emitter->CommitDrawIndex * 6UL])
+                ? emitter->CommitStreams + emitter->CommitDrawIndex * 6UL
+                : NULL;
         commitOffset =
             emitter->CommitVertexOffsets[emitter->CommitDrawIndex++];
         emitter->CommitVbufAddress = emitter->CommitSegmentGpuBase +
@@ -2755,6 +2896,37 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
             emitter->FailStage = 23UL;
         return FALSE;
     }
+#if defined(R68K_SPRITES) && R68K_SPRITES
+    /* Points wider than a pixel under TCL: the R200 sizes only the
+     * point-sprite primitive (Mesa r200_tcl.c HW_POINTS); plain point
+     * lists always rasterise one pixel. Size from state, constant
+     * (Mesa's default R200_PS_SE_SEL_STATE | R200_PS_MULT_CONST). */
+    if (hardwareTcl && primitiveType == R200_CP_VC_CNTL_PRIM_TYPE_POINT_LIST) {
+        ULONG size = (state->TransformFlags &
+                      RADEON3D_TRANSFORM_POINT_SIZE_MASK) >>
+                     RADEON3D_TRANSFORM_POINT_SIZE_SHIFT;
+        if (size > 16UL) {
+            if (emitter->SpriteSize != size) {
+                union { float f; ULONG u; } px;
+                ULONG vport[4], att[12];
+                px.f = (float)size * (1.0f / 16.0f);
+                vport[0] = 0x3f800000UL; vport[1] = 0x3f800000UL;
+                vport[2] = px.u;         vport[3] = 0x3f800000UL;
+                att[0] = 0; att[1] = 0; att[2] = 0x3f800000UL; att[3] = 0;
+                att[4] = 0; att[5] = 0; att[6] = 0xbf800000UL; att[7] = 0;
+                att[8] = 0x3f800000UL; att[9] = 0x44ffe000UL;
+                att[10] = 0; att[11] = 0;
+                if (!ExecuteEmitRegister(emitter, 0x22c4UL,
+                                         (1UL << 16) | 4UL) ||
+                    !ExecuteEmitVectorBlock(emitter, 0x68UL, 1UL, vport, 4UL) ||
+                    !ExecuteEmitVectorBlock(emitter, 0xbcUL, 1UL, att, 12UL))
+                    return FALSE;
+                emitter->SpriteSize = size;
+            }
+            primitiveType = 0x0bUL;   /* R200_VF_PRIM_POINT_SPRITES */
+        }
+    }
+#endif
 #if MGLPPC_PROFILE
     EMIT_PHASE(1, phaseStart);
     phaseStart = EmitTb();
@@ -2769,12 +2941,38 @@ static BOOL Radeon3DEmitDrawBody(struct Radeon3DEmitter *emitter,
         return ok;
     }
 #else
+#if defined(__m68k__) || defined(__mc68000__)
+    if (!EmitExecuteVertices(emitter, vertices, vertexCount, useDepth,
+                             textured, fragmentStatePresent,
+                             extendedVertex, hardwareTcl,
+                             normalVertex, compactVertex,
+                             vertexState,
+                             primitiveType, color))
+        return FALSE;
+    if (emitter->CommitVbuf && hardwareTcl && !normalVertex && !lighting &&
+        !texGen && length == headerDwords && length <= 48UL) {
+        ULONG i;
+        for (i = 0; i < length; ++i)
+            emitter->FastRec[i] = record[i];
+        emitter->FastLength = length;
+        emitter->FastPrim = primitiveType;
+        emitter->FastVertexState = vertexState;
+        emitter->FastUseDepth = useDepth;
+        emitter->FastTextured = textured;
+        emitter->FastFragment = fragmentStatePresent;
+        emitter->FastExtended = extendedVertex;
+        emitter->FastCompact = compactVertex;
+        emitter->FastValid = TRUE;
+    }
+    return TRUE;
+#else
     return EmitExecuteVertices(emitter, vertices, vertexCount, useDepth,
                                textured, fragmentStatePresent,
                                extendedVertex, hardwareTcl,
                                normalVertex, compactVertex,
                                vertexState,
                                primitiveType, color);
+#endif
 #endif
 }
 BOOL Radeon3DEmitVbufDraw(                                struct Radeon3DEmitter *emitter,
@@ -2842,6 +3040,7 @@ BOOL Radeon3DEmitReuseDraw(                                 struct Radeon3DEmitt
     if (length != RADEON3D_EXEC_REUSE_DWORDS)
         return FALSE;
     emitter->CommitIndexOffset = 0;
+    emitter->CommitStream = NULL;
     commitOffset =
         emitter->CommitVertexOffsets[emitter->CommitDrawIndex++];
     return Radeon3DEmitVbufDraw(emitter, commitOffset, record[2],
@@ -2888,6 +3087,7 @@ BOOL Radeon3DEmitStream(struct Radeon3DEmitter *emitter,
             return FALSE;
         if (opcode == RADEON3D_EXEC_CLEAR) {
             BOOL commitVbuf = emitter->CommitVbuf;
+            emitter->FastValid = FALSE;
             BOOL emitted;
 
             /* Clear builds its own projected rectangle; only draw records

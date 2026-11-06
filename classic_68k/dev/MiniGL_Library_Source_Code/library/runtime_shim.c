@@ -82,6 +82,20 @@ void *memcpy(void *dst, const void *src, size_t n)
 {
     unsigned char *d = (unsigned char *)dst;
     const unsigned char *s = (const unsigned char *)src;
+    if (n >= 16 && !(((unsigned long)d | (unsigned long)s) & 1)) {
+        /* the 68060 handles misaligned longword moves on even addresses */
+        unsigned long *dl = (unsigned long *)d;
+        const unsigned long *sl = (const unsigned long *)s;
+        size_t words = n >> 2;
+        while (words >= 4) {
+            dl[0] = sl[0]; dl[1] = sl[1]; dl[2] = sl[2]; dl[3] = sl[3];
+            dl += 4; sl += 4; words -= 4;
+        }
+        while (words--) *dl++ = *sl++;
+        d = (unsigned char *)dl;
+        s = (const unsigned char *)sl;
+        n &= 3;
+    }
     while (n--) *d++ = *s++;
     return dst;
 }

@@ -95,7 +95,13 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
         EMIT_REJECT(0x1001UL);
     if (vertices && (!vertices->offsets || !vertices->drawCount ||
         vertices->drawCount > RADEON3D_STATE_BATCH_MAX_DRAWS ||
-        !vertices->bytes || vertices->bytes > RADEON3D_MAX_SEGMENT_BYTES ||
+        !vertices->bytes ||
+#if defined(__m68k__) || defined(__mc68000__)
+        /* minigl68k resident draws address the whole segment pool. */
+        vertices->bytes > RADEON3D_MAX_SEGMENTS * RADEON3D_MAX_SEGMENT_BYTES ||
+#else
+        vertices->bytes > RADEON3D_MAX_SEGMENT_BYTES ||
+#endif
         (vertices->gpuAddress & 3UL) ||
         vertices->bytes - 1UL > 0xffffffffUL - vertices->gpuAddress))
         EMIT_REJECT(0x1002UL);
@@ -149,10 +155,18 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
             if ((offset & 3UL) || offset >= vertices->bytes ||
                 (stateBatch && !vertices->offsets[index * 2UL + 1UL]))
                 EMIT_REJECT(0x100BUL);
+#if defined(__m68k__) || defined(__mc68000__)
+            /* minigl68k resident draws: the index ring and the resident
+             * vertex buffers are separate segments in any order. */
+            if (indexOffset &&
+                ((indexOffset & 3UL) || indexOffset >= vertices->bytes))
+                EMIT_REJECT(0x100CUL);
+#else
             if (indexOffset &&
                 ((indexOffset & 3UL) || indexOffset <= offset ||
                  indexOffset >= vertices->bytes))
                 EMIT_REJECT(0x100CUL);
+#endif
         }
     }
 
@@ -185,6 +199,10 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     emitter->CommitIndexOffset = 0;
     emitter->CommitDrawIndex = 0;
     emitter->CommitVbufAddress = 0;
+    emitter->CommitStreams = vertices ? vertices->streams : NULL;
+    emitter->CommitStream = NULL;
+    emitter->FastValid = FALSE;
+    emitter->FastAllowed = vertices && vertices->resident;
 
     if (stateBatch) {
         for (index = 0; index < recordDwords; ++index)
@@ -212,6 +230,9 @@ ULONG MGLPPCEmitBatch(ULONG *words, const ULONG *records, ULONG recordDwords,
     emitter->CommitIndexOffset = 0;
     emitter->CommitDrawIndex = 0;
     emitter->CommitVbufAddress = 0;
+    emitter->CommitStreams = NULL;
+    emitter->CommitStream = NULL;
+    emitter->FastAllowed = FALSE;
     emitter->StateValid = FALSE;
     emitter->ResolveUser = NULL;
     emitter->Words = NULL;

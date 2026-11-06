@@ -212,6 +212,17 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
         state = &context->captureCache;
         if (context->perfEnabled)
             context->perf.captureCacheHits++;
+#if R200_CPEMIT_68K
+    } else if (context->captureCacheValid &&
+               context->r68kTexOnlySerial == context->semanticStateSerial &&
+               context->captureCacheCommand == normalizedCommand &&
+               context->captureCacheHardwareTransform ==
+                   context->screenHardwareTransform &&
+               context->captureCacheProjective == context->screenProjective &&
+               R68KPatchCaptureTexture(context, &context->captureCache)) {
+        state = &context->captureCache;
+        context->captureCacheSerial = context->semanticStateSerial;
+#endif
     } else {
         ULONG previousFloatMode = BeginSemanticFloatMode();
         BOOL captured;
@@ -220,6 +231,9 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
 #endif
 
         state = &context->captureScratch;
+#if R200_CPEMIT_68K
+        { extern ULONG R68KStatCaptures; R68KStatCaptures++; }
+#endif
         captured = CapturePendingDrawState(context, command, state);
         EndSemanticFloatMode(previousFloatMode);
 #if MGLPPC_PROFILE
@@ -296,8 +310,14 @@ static void MaterializeScreenExt(struct MiniGLR200Context *context)
     context->screenExt = NULL;
 }
 
+#if R200_CPEMIT_68K
+ULONG R68KStatCaptures, R68KStatFlushes, R68KStatWaits[4];
+#endif
 BOOL FlushScreenVertices(struct MiniGLR200Context *context)
 {
+#if R200_CPEMIT_68K
+    if (context->screenVertexCount) R68KStatFlushes++;
+#endif
     struct SubmitSlot *slot = BuildSubmitSlot(context);
     const struct PendingDrawState *state = &context->pendingDraw;
 #if R200_DUMP_FIRST_BATCHES
@@ -2312,7 +2332,12 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
     }
     switch (primitive) {
     case GL_POINTS:
+#if defined(R68K_SPRITES) && R68K_SPRITES
+        /* the emitter draws sized TCL points as hardware point sprites */
+        if (0)
+#else
         if (context->pointSize > 1.5f)
+#endif
             return EmitSizedPoints(context, vertices, count);
         for (index = 0; index < count; index += batch) {
             batch = count - index;
@@ -2929,6 +2954,19 @@ static ULONG TypeSize(GLenum type)
 }
 static GLfloat ReadNumber(const UBYTE *pointer, GLenum type)
 {
+#if defined(__m68k__) || defined(__mc68000__)
+    /* The 68060 loads misaligned words and longwords in hardware: read the
+     * component directly instead of through a CopyBytes call per value. */
+    switch (type) {
+    case GL_FLOAT: return *(const GLfloat *)pointer;
+    case GL_INT: return (GLfloat)*(const LONG *)pointer;
+    case GL_SHORT: return (GLfloat)*(const WORD *)pointer;
+    case GL_UNSIGNED_SHORT: return (GLfloat)*(const UWORD *)pointer;
+    case GL_UNSIGNED_BYTE: return (GLfloat)*pointer;
+    case GL_BYTE: return (GLfloat)*(const BYTE *)pointer;
+    default: break;
+    }
+#endif
     switch (type) {
     case GL_BYTE: { signed char v; CopyBytes(&v,pointer,1); return v; }
     case GL_UNSIGNED_BYTE: { UBYTE v; CopyBytes(&v,pointer,1); return v; }
@@ -3187,7 +3225,8 @@ static BOOL FetchArrayVertex(struct MiniGLR200Context *context, ULONG index,
         !(context->normalArray.enabled && context->normalArray.pointer) &&
         (!context->colorArray.enabled || !context->colorArray.pointer ||
          (context->colorArray.type == GL_UNSIGNED_BYTE &&
-          context->colorArray.size == 4)) &&
+          context->colorArray.size == 4) ||
+         context->colorArray.type == MGL_UBYTE_ARGB) &&
         (!context->texcoordArray.enabled || !context->texcoordArray.pointer ||
          (context->texcoordArray.type == GL_FLOAT &&
           !(((ULONG)context->texcoordArray.pointer |
@@ -3204,8 +3243,11 @@ static BOOL FetchArrayVertex(struct MiniGLR200Context *context, ULONG index,
         if (context->colorArray.enabled && context->colorArray.pointer) {
             const UBYTE *rgba = context->colorArray.pointer +
                                 index * context->colorArray.stride;
-            color = ((ULONG)rgba[3] << 24) | ((ULONG)rgba[0] << 16) |
-                    ((ULONG)rgba[1] << 8) | (ULONG)rgba[2];
+            if (context->colorArray.type == MGL_UBYTE_ARGB)
+                color = *(const ULONG *)rgba;   /* already packed ARGB */
+            else
+                color = ((ULONG)rgba[3] << 24) | ((ULONG)rgba[0] << 16) |
+                        ((ULONG)rgba[1] << 8) | (ULONG)rgba[2];
         }
         vertex->color = color;
         vertex->nx = context->currentNormalX;

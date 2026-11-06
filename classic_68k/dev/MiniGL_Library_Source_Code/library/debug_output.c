@@ -12,9 +12,18 @@ static ULONG text_length(const char *s)
     return n;
 }
 
+#ifndef MGL_DEBUG_OUTPUT
+#define MGL_DEBUG_OUTPUT 1
+#endif
+
 static void write_text(const char *s, ULONG n)
 {
     BPTR out;
+#if !MGL_DEBUG_OUTPUT
+    /* release builds: no diagnostics on the client's console */
+    (void)s; (void)n; (void)out;
+    return;
+#endif
     if (!DOSBase || !s || !n) return;
     out = Output();
     if (out) Write(out, (APTR)s, (LONG)n);

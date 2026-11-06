@@ -54,6 +54,288 @@ void StreamDiagEvent(struct MiniGLR200Context *context, ULONG event,
 #endif
 }
 
+#if !R200_PPC_FRONTEND
+/*
+ * CP-emit submission for the native 68k library. Radeon9200.chip 0.41
+ * removed Radeon3DExecute/CommitBatch/CommitStateBatch; the same semantic
+ * records now go through the shared emitter (radeon3d_emit.c, wrapped by
+ * MGLPPCEmitBatch in r200_cp_emit.c) and run as an indirect buffer.
+ */
+#include <libraries/minigl_ppc_cp_emit.h>
+
+#define R200_CP_SEGMENT_BYTES \
+    (SUBMIT_SLOT_COUNT * R200_CP_SLOT_DWORDS * sizeof(ULONG))
+#define R200_CP_SURFACE_TILED 0x80000000UL
+
+ULONG MGLPPCClearBlend;
+extern ULONG R200EvictSearches, R200Evictions, R200Uploads;
+/* CP-path profile (perf counters on): printed when the context closes. */
+static ULONG CpEmitTicks, CpCopyTicks, CpDispatchTicks, CpCopyDwords, CpBatches;
+/* CP dword count last dispatched from each slot's region (stall dumps). */
+ULONG CpSlotDwords[SUBMIT_SLOT_COUNT];
+
+/* A fence that never retires: write the stalled slot's records and the CP
+ * stream it produced (host order) to T:cphang<n>.bin for offline decoding. */
+void CpDumpStalledSlot(struct MiniGLR200Context *context, ULONG slotIndex)
+{
+    extern struct DosLibrary *DOSBase;
+    static ULONG dumps;
+    struct SubmitSlot *slot = &context->submitSlots[slotIndex];
+    char path[] = "T:cphang0.bin";
+    ULONG header[4], index, count = CpSlotDwords[slotIndex];
+    const volatile ULONG *cp;
+    BPTR file;
+
+    if (!DOSBase || dumps >= 3UL || !context->cpSegment.CpuAddress)
+        return;
+    path[8] = (char)('0' + dumps++);
+    file = Open((STRPTR)path, MODE_NEWFILE);
+    if (!file)
+        return;
+    header[0] = 0x43504847UL; /* 'CPHG' */
+    header[1] = slot->recordCount;
+    header[2] = count;
+    header[3] = slot->commitMode;
+    Write(file, header, sizeof(header));
+    Write(file, slot->records, slot->recordCount * sizeof(ULONG));
+    cp = (const volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
+                                  slotIndex * R200_CP_SLOT_DWORDS * sizeof(ULONG));
+    for (index = 0; index < count; ++index) {
+        ULONG v = cp[index];
+        v = (v >> 24) | ((v >> 8) & 0xff00UL) | ((v << 8) & 0xff0000UL) | (v << 24);
+        Write(file, &v, sizeof(v));
+    }
+    Close(file);
+}
+/* Emitter switches the PPC frontend reads from ENV: (defaults). */
+ULONG MGLPPCStateMemo = 1;
+ULONG MGLPPCPalVar;
+
+static void CpResolveFill(struct MGLPPCEmitSurface *out,
+                          const struct Radeon3DSurface *surface, BOOL tiled)
+{
+    out->cpuAddress = (ULONG)surface->CpuAddress;
+    out->gpuAddress = surface->GpuAddress;
+    out->pitch = surface->Pitch;
+    out->width = surface->Width;
+    out->height = surface->Height;
+    out->format = surface->Format | (tiled ? R200_CP_SURFACE_TILED : 0UL);
+}
+
+static BOOL CpResolveSurface(void *user, ULONG handle,
+                             struct MGLPPCEmitSurface *out)
+{
+    struct MiniGLR200Context *context = user;
+    struct Radeon3DSurface *surface;
+    ULONG index, slot;
+
+    if (!handle)
+        return FALSE;
+    surface = TargetSurface(context);
+    if ((ULONG)surface->Handle == handle) {
+        CpResolveFill(out, surface, context->colorTiled &&
+                      surface == &context->surfaces[context->colorTileIndex]);
+        return TRUE;
+    }
+    if ((ULONG)context->depthSurface.Handle == handle) {
+        CpResolveFill(out, &context->depthSurface, FALSE);
+        return TRUE;
+    }
+    for (index = 0; index < R200_SCREEN_BUFFERS; ++index)
+        if ((ULONG)context->surfaces[index].Handle == handle) {
+            CpResolveFill(out, &context->surfaces[index], FALSE);
+            return TRUE;
+        }
+    slot = (handle ^ (handle >> 8) ^ (handle >> 16)) &
+           (R200_CP_RESOLVE_CACHE - 1UL);
+    surface = context->cpResolveSurface[slot];
+    if (context->cpResolveHandle[slot] == handle && surface &&
+        (ULONG)surface->Handle == handle) {
+        CpResolveFill(out, surface, FALSE);
+        return TRUE;
+    }
+    for (index = 0; index < MAX_TEXTURES; ++index) {
+        surface = &context->textures[index].surface;
+        if ((ULONG)surface->Handle == handle) {
+            context->cpResolveHandle[slot] = handle;
+            context->cpResolveSurface[slot] = surface;
+            CpResolveFill(out, surface, FALSE);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL EnsureCpSegment(struct MiniGLR200Context *context)
+{
+    ULONG index;
+
+    if (context->cpSegmentEpoch == context->deviceEpoch &&
+        context->cpSegment.CpuAddress)
+        return TRUE;
+    if (!context->cpStaging) {
+        context->cpStaging = AllocMem(R200_CP_SLOT_DWORDS * sizeof(ULONG),
+                                      MEMF_PUBLIC);
+        if (!context->cpStaging)
+            return FALSE;
+    }
+    for (index = 0; index < R200_CP_RESOLVE_CACHE; ++index) {
+        context->cpResolveHandle[index] = 0;
+        context->cpResolveSurface[index] = NULL;
+    }
+    ZeroMemory(&context->cpSegment, sizeof(context->cpSegment));
+    context->cpSegment.Size = sizeof(context->cpSegment);
+    if (!Radeon3DAllocSegment(context->device, R200_CP_SEGMENT_BYTES,
+                              &context->cpSegment) ||
+        context->cpSegment.Version != RADEON3D_SEGMENT_VERSION ||
+        !context->cpSegment.CpuAddress ||
+        context->cpSegment.Bytes < R200_CP_SEGMENT_BYTES) {
+        dbg_puts("[minigl] cp segment alloc failed\n");
+        ZeroMemory(&context->cpSegment, sizeof(context->cpSegment));
+        return FALSE;
+    }
+    context->cpSegmentEpoch = context->deviceEpoch;
+    dbg_puts("[minigl] cp segment cpu=");
+    dbg_hex32((ULONG)context->cpSegment.CpuAddress);
+    dbg_puts(" gpu=");
+    dbg_hex32(context->cpSegment.GpuAddress);
+    dbg_puts(" target cpu=");
+    dbg_hex32((ULONG)TargetSurface(context)->CpuAddress);
+    dbg_newline();
+    return TRUE;
+}
+
+void ReleaseCpSegment(struct MiniGLR200Context *context)
+{
+    {
+        dbg_puts("[minigl] cp batches=");
+        dbg_u32(CpBatches);
+        dbg_puts(" dwords=");
+        dbg_u32(CpCopyDwords);
+        dbg_puts(" emit_ticks=");
+        dbg_u32(CpEmitTicks);
+        dbg_puts(" copy_ticks=");
+        dbg_u32(CpCopyTicks);
+        dbg_puts(" dispatch_ticks=");
+        dbg_u32(CpDispatchTicks);
+        dbg_puts(" evict_searches=");
+        dbg_u32(R200EvictSearches);
+        dbg_puts(" evictions=");
+        dbg_u32(R200Evictions);
+        dbg_puts(" resident_uploads=");
+        dbg_u32(R200Uploads);
+        dbg_newline();
+    }
+    if (context->device && context->cpSegment.CpuAddress &&
+        context->cpSegmentEpoch == context->deviceEpoch)
+        (void)Radeon3DFreeSegment(context->device, context->cpSegment.Id);
+    ZeroMemory(&context->cpSegment, sizeof(context->cpSegment));
+    context->cpSegmentEpoch = 0;
+    if (context->cpStaging)
+        FreeMem(context->cpStaging, R200_CP_SLOT_DWORDS * sizeof(ULONG));
+    context->cpStaging = NULL;
+}
+
+/* Emit one submit slot and dispatch it. The slot's CP region is free: the
+ * caller retired this slot's previous fence (WaitSubmitSlot) before
+ * building into it. */
+static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
+                         struct SubmitSlot *slot, ULONG *fenceOut)
+{
+    struct MGLPPCEmitVertices vertices, *vertexDesc = NULL;
+    struct Radeon3DIndirect indirect;
+    ULONG *staging, count, index, byteOffset, t0, t1;
+    volatile ULONG *destination;
+    static ULONG failReports;
+
+    *fenceOut = 0;
+    if (!(context->radeonCaps & RADEON3D_CAP_INDIRECT_DISPATCH) ||
+        !EnsureCpSegment(context))
+        return FALSE;
+    staging = context->cpStaging;
+    if (slot->commitMode && slot->drawCount && context->segment.valid) {
+        ZeroMemory(&vertices, sizeof(vertices));
+        vertices.gpuAddress = context->segment.info.GpuAddress;
+        vertices.bytes = context->segment.info.Bytes;
+        vertices.drawCount = slot->drawCount;
+        vertices.stateBatch = slot->stateBatch;
+        vertices.offsets = slot->stateBatch
+                               ? (const ULONG *)slot->stateBatchDraws
+                               : slot->vertexOffsets;
+        vertexDesc = &vertices;
+    }
+    t0 = context->perfEnabled ? PerfClock() : 0;
+    count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
+                            vertexDesc, CpResolveSurface, context);
+    if (t0) {
+        t1 = PerfClock();
+        CpEmitTicks += t1 - t0;
+        t0 = t1;
+    }
+    if (!count && !MGLPPCEmitFailStage) {
+        /* Built fine but produced nothing (an empty or fully culled
+         * batch): nothing to run; the caller drops the slot (fence 0). */
+        return TRUE;
+    }
+    if (!count || count > R200_CP_SLOT_DWORDS - 1UL) {
+        if (failReports < 16UL) {
+            ++failReports;
+            dbg_puts("[minigl] cp emit fail stage=");
+            dbg_hex32(MGLPPCEmitFailStage);
+            dbg_puts(" rec=");
+            dbg_u32(slot->recordCount);
+            dbg_puts(" op=");
+            dbg_u32(slot->records[0]);
+            dbg_newline();
+        }
+        return FALSE;
+    }
+    /* Classic CP indirect dispatch needs an even dword count. */
+    if (count & 1UL)
+        staging[count++] = 0x80000000UL;
+    byteOffset = context->buildSlot * R200_CP_SLOT_DWORDS * sizeof(ULONG);
+    destination = (volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
+                                     byteOffset);
+    /* The CP reads little-endian dwords. */
+    for (index = 0; index < count; ++index) {
+        ULONG value = staging[index];
+        destination[index] = (value >> 24) | ((value >> 8) & 0xff00UL) |
+                             ((value << 8) & 0xff0000UL) | (value << 24);
+    }
+    (void)destination[count - 1UL];
+    CpSlotDwords[context->buildSlot] = count;
+    if (t0) {
+        t1 = PerfClock();
+        CpCopyTicks += t1 - t0;
+        t0 = t1;
+        CpCopyDwords += count;
+        CpBatches++;
+    }
+    ZeroMemory(&indirect, sizeof(indirect));
+    indirect.Size = sizeof(indirect);
+    indirect.Version = RADEON3D_INDIRECT_VERSION;
+    indirect.SegmentId = context->cpSegment.Id;
+    indirect.ByteOffset = byteOffset;
+    indirect.DwordCount = count;
+    if (!Radeon3DDispatchIndirect(context->device, &indirect, fenceOut) ||
+        !*fenceOut) {
+        if (failReports < 16UL) {
+            ++failReports;
+            dbg_puts("[minigl] cp dispatch fail fence=");
+            dbg_hex32(*fenceOut);
+            dbg_puts(" count=");
+            dbg_u32(count);
+            dbg_newline();
+        }
+        *fenceOut = 0;
+        return FALSE;
+    }
+    if (t0)
+        CpDispatchTicks += PerfClock() - t0;
+    return TRUE;
+}
+#endif
+
 void ResetSubmitSlot(struct SubmitSlot *slot)
 {
     slot->recordCount = 0;
@@ -323,7 +605,12 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
 {
     struct Radeon3DInfo info;
     struct Radeon3DDevice *device;
-    ULONG index, targetCount=context->fullscreen?2UL:1UL;
+    ULONG index, targetCount=context->fullscreen
+        ? (context->screenBufferCount ? context->screenBufferCount : 2UL) : 1UL;
+
+    dbg_puts("[minigl] RecoverDevice epoch=");
+    dbg_u32(context->deviceEpoch);
+    dbg_newline();
 
     Radeon3DClose(context->device);
     context->device=NULL;
@@ -336,7 +623,7 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
     context->screenCommand = RADEON3D_EXEC_DRAW_TRIANGLES;
     context->pendingDrawValid = FALSE;
     context->pendingSemanticStateSerial = 0;
-    for (index=0;index<2;++index)
+    for (index=0;index<R200_SCREEN_BUFFERS;++index)
         ZeroMemory(&context->surfaces[index],sizeof(context->surfaces[index]));
     ZeroMemory(&context->depthSurface,sizeof(context->depthSurface));
     for (index=0;index<MAX_TEXTURES;++index) {
@@ -353,9 +640,19 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
     }
     info.Size=sizeof(info);
     device=Radeon3DOpen(RADEON3D_IFACE_VERSION,&info);
+    /* Same capability view as context creation: since Radeon9200.chip 0.41
+     * the record caps describe the consumer emitter (Radeon3DRecordCaps).
+     * Without it the reopen always failed REQUIRED_CAPS and left the
+     * context with no device for good. */
+    info.Caps = Radeon3DRecordCaps(info.Caps);
     if (!device || (info.Caps&REQUIRED_CAPS)!=REQUIRED_CAPS ||
         (context->pixelDepth != 16UL &&
          !(info.Caps & RADEON3D_CAP_COLOR_TARGET_FORMATS))) {
+        dbg_puts("[minigl] recover: reopen failed dev=");
+        dbg_hex32((ULONG)device);
+        dbg_puts(" caps=");
+        dbg_hex32(info.Caps);
+        dbg_newline();
         if (device)
             Radeon3DClose(device);
         return FALSE;
@@ -401,6 +698,7 @@ BOOL RecoverDevice(struct MiniGLR200Context *context)
         context->streamSegments = FALSE;
     return TRUE;
 fail:
+    dbg_puts("[minigl] recover: surface re-import failed\n");
     Radeon3DClose(device);
     context->device=NULL;
     return FALSE;
@@ -460,6 +758,21 @@ BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
     }
     StreamDiagEvent(context, 0x31UL,
                     (ULONG)(slot - context->submitSlots), slot->fence);
+    dbg_puts("[minigl] fence wait timeout fence=");
+    dbg_hex32(slot->fence);
+    {
+        struct Radeon3DInfo info;
+        ZeroMemory(&info, sizeof(info));
+        info.Size = sizeof(info);
+        if (Radeon3DGetInfo(context->device, &info)) {
+            dbg_puts(" stage=");
+            dbg_hex32(info.CommitFailStage);
+        }
+    }
+    dbg_puts(" reason=");
+    dbg_u32(reason);
+    dbg_newline();
+    CpDumpStalledSlot(context, (ULONG)(slot - context->submitSlots));
     (void)RecoverDevice(context);
     return FALSE;
 #endif
@@ -605,132 +918,23 @@ BOOL Submit(struct MiniGLR200Context *context)
         context->perf.generatedDwords += slot->generatedDwordCount;
         start = PerfClock();
     }
-    if (slot->commitMode && context->streamSegments &&
-        context->segment.valid) {
-        /* Streaming path: headers only in the record chain, vertices
-         * already resident in this slot's segment half. One ring submit
-         * carries every draw; the service re-emits only state that
-         * changed between them. */
-        struct Radeon3DCommitBatch batch;
-
-        if (slot->stateBatch) {
-            struct Radeon3DStateBatch stateBatch;
-
-            stateBatch.Size = sizeof(stateBatch);
-            stateBatch.Version = RADEON3D_STATE_BATCH_VERSION;
-            stateBatch.Generation = context->radeonGeneration;
-            stateBatch.SegmentId = context->segment.info.Id;
-            stateBatch.Primitive = slot->records[0];
-            stateBatch.Header = slot->records;
-            stateBatch.HeaderDwords = slot->recordCount;
-            stateBatch.Draws = slot->stateBatchDraws;
-            stateBatch.DrawCount = slot->drawCount;
-            stateBatch.Flags = RADEON3D_SUBMIT_FENCE;
-            if (Radeon3DCommitStateBatch(context->device, &stateBatch,
-                                         &fence))
-                goto submitted;
-            {
-                struct Radeon3DInfo info;
-
-                dbg_puts("[minigl] state batch fail fence=");
-                dbg_hex32(fence);
-                dbg_puts(" rec=");
-                dbg_u32(slot->recordCount);
-                dbg_puts(" draws=");
-                dbg_u32(slot->drawCount);
-                dbg_puts(" op=");
-                dbg_u32(slot->records[0]);
-                dbg_puts(" len=");
-                dbg_u32(slot->records[1]);
-                dbg_puts(" generation=");
-                dbg_u32(context->radeonGeneration);
-                dbg_newline();
-                ZeroMemory(&info, sizeof(info));
-                info.Size = sizeof(info);
-                if (Radeon3DGetInfo(context->device, &info)) {
-                    dbg_puts("[minigl] state batch stage=");
-                    dbg_u32(info.CommitFailStage);
-                    dbg_puts(" service_generation=");
-                    dbg_u32(info.Generation);
-                    dbg_newline();
-                }
-            }
-            if (context->perfEnabled) {
-                context->perf.executeTicks += PerfClock() - start;
-                context->perf.executeFailures++;
-            }
-            ResetSubmitSlot(slot);
-            (void)RecoverDevice(context);
-            return FALSE;
-        }
-
-        batch.Size = sizeof(batch);
-        batch.Version = RADEON3D_COMMIT_BATCH_VERSION;
-        batch.SegmentId = context->segment.info.Id;
-        batch.Records = slot->records;
-        batch.RecordDwords = slot->recordCount;
-        batch.VertexOffsets = slot->vertexOffsets;
-        batch.RecordCount = slot->drawCount;
-        batch.Flags = RADEON3D_SUBMIT_FENCE;
-        if (!Radeon3DCommitBatch(context->device, &batch, &fence)) {
-            struct Radeon3DInfo info;
-
-            if (context->perfEnabled) {
-                context->perf.executeTicks += PerfClock() - start;
-                context->perf.executeFailures++;
-            }
-            /* The service encodes its reject stage in the fence slot as
-             * well, for the case where the info block is too old to carry
-             * one. Label the two sources apart. */
-            dbg_puts("[minigl] commit fail fencestage=");
-            dbg_hex32(fence);
-            dbg_puts(" rec=");
-            dbg_u32(slot->recordCount);
-            dbg_puts(" draws=");
-            dbg_u32(slot->drawCount);
-            dbg_puts(" slot=");
-            dbg_u32(context->buildSlot);
-            dbg_puts(" cursor=");
-            dbg_u32(slot->segmentCursor);
-            dbg_puts(" segId=");
-            dbg_u32(batch.SegmentId);
-            dbg_puts(" segBytes=");
-            dbg_u32(context->segment.info.Bytes);
-            dbg_puts(" off0=");
-            dbg_u32(slot->drawCount ? slot->vertexOffsets[0] : 0);
-            dbg_newline();
-            ZeroMemory(&info, sizeof(info));
-            info.Size = sizeof(info);
-            /* Stage zero means "nothing failed", so it must not be read
-             * from a service whose info block predates the field. */
-            if (Radeon3DGetInfo(context->device, &info) &&
-                info.Size >= RADEON3D_INFO_V3_SIZE) {
-                dbg_puts("[minigl] service stage=");
-                dbg_u32(info.CommitFailStage);
-                dbg_newline();
-            } else {
-                dbg_puts("[minigl] service stage unavailable, info size=");
-                dbg_u32(info.Size);
-                dbg_newline();
-            }
-            DumpFailBatch(context, slot);
-            StreamDiagEvent(context, 0x30UL, fence, slot->recordCount);
-            ResetSubmitSlot(slot);
-            (void)RecoverDevice(context);
-            return FALSE;
-        }
-    } else if (!Radeon3DExecute(context->device, slot->records,
-                                slot->recordCount, RADEON3D_SUBMIT_FENCE,
-                                &fence)) {
+    if (!CpSubmitSlot(context, slot, &fence)) {
         if (context->perfEnabled) {
             context->perf.executeTicks += PerfClock() - start;
             context->perf.executeFailures++;
         }
+        /* The batch is dropped. The device is fine (nothing reached the
+         * ring), so do not recover: that would discard every resident
+         * texture and make the next frames rebuild them. */
         ResetSubmitSlot(slot);
-        (void)RecoverDevice(context);
         return FALSE;
     }
-submitted:
+    if (!fence) {
+        /* Empty batch: nothing reached the GPU. */
+        ResetSubmitSlot(slot);
+        return TRUE;
+    }
+    /* submitted */
     if (context->perfEnabled) {
         context->perf.executeTicks += PerfClock() - start;
     }

@@ -22,6 +22,8 @@ LIB_CFLAGS += -DR200_PERF_TIMING=$(PERF_TIMING)
 # Segment streaming is the accepted default as of the T5 acceptance run
 # (see R200_STREAM_COMMITS in library/minigl_r200_internal.h). Build with
 # STREAM_COMMITS=0 to fall back to the inline Execute path.
+# Segment streaming: vertices are serialized byte-swapped straight into a
+# VRAM segment and the CP-emit stream carries only state and draw packets.
 STREAM_COMMITS ?= 1
 LIB_CFLAGS += -DR200_STREAM_COMMITS=$(STREAM_COMMITS)
 # Async segment rotation: park a submitted segment until its fence retires
@@ -41,7 +43,7 @@ LIB_CFLAGS += -DR200_RESIDENCY_DIAG=$(RESIDENCY_DIAG)
 EX_CFLAGS = -std=gnu99 -O2 -mcpu=$(CPU) -m68881 -noixemul -I$(WARP3D_INC) -I$(RADEON3D_INC) -Iinclude
 
 LIB_OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_r200.o \
-	$(OBJDIR)/r200_unity.o \
+	$(OBJDIR)/r200_unity.o $(OBJDIR)/r200_cp_emit.o $(OBJDIR)/radeon3d_emit.o \
 	$(OBJDIR)/context_state_r200.o \
 	$(OBJDIR)/debug_output.o $(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o
 CLIENT_OBJS = $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub_gcc.o
@@ -59,6 +61,19 @@ $(OBJDIR)/r200_unity.o: library/minigl_r200.c library/r200_math.c \
 	library/r200_submit.c library/r200_texture.c library/r200_state.c \
 	library/r200_geometry.c library/r200_surface.c \
 	library/minigl_r200_internal.h include/libraries/minigl_r200_bridge.h
+
+# Radeon9200.chip 0.41+ draws only through CP indirect buffers: the shared
+# emitter turns the library's semantic records into CP dwords. Both compile
+# against the consumer Radeon3D headers of backend_r200 (same as the DLL).
+R200_BACKEND ?= ../../../backend_r200
+R200_EMITTER_ROOT ?= $(R200_BACKEND)/third_party/radeon3d/emit
+EMIT_CFLAGS = $(COMMON_CFLAGS) -I$(R200_EMITTER_ROOT)/include \
+	-I$(R200_BACKEND)/third_party/radeon3d/include -I$(R200_BACKEND)/include \
+	-D__M68K__ -fno-baserel -Wall
+$(OBJDIR)/r200_cp_emit.o: $(R200_BACKEND)/library/r200_cp_emit.c | $(OBJDIR)
+	$(CC) $(EMIT_CFLAGS) -c $< -o $@
+$(OBJDIR)/radeon3d_emit.o: $(R200_EMITTER_ROOT)/src/radeon3d_emit.c | $(OBJDIR)
+	$(CC) $(EMIT_CFLAGS) -c $< -o $@
 
 $(OBJDIR)/%.o: library/%.c | $(OBJDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@

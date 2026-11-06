@@ -227,6 +227,24 @@ struct Radeon3DEmitter {
      * the current draw's, or 0 for a plain DRAW_VBUF_2. */
     const ULONG *CommitIndexOffsets;
     ULONG CommitIndexOffset;
+    /* Consumer extension (minigl68k): optional per-draw streams, 6 dwords a
+     * draw (position address/stride, colour address/stride, texcoord
+     * address/stride; absolute GPU addresses, strides in dwords; a zero
+     * position address = the interleaved vertex). CommitStream is the
+     * current draw's entry or NULL. */
+    const ULONG *CommitStreams;
+    const ULONG *CommitStream;
+    /* Consumer extension (minigl68k): the last fully validated draw
+     * header, so a draw differing only in texture, matrix and count skips
+     * the full decode and validation. */
+    BOOL FastValid;
+    BOOL FastAllowed;   /* consumer: resident draws only */
+    /* Consumer extension (minigl68k): point-sprite size (1/16 px) the
+     * TCL point-sprite state was last programmed for; 0 = never. */
+    ULONG SpriteSize;
+    ULONG FastLength, FastPrim, FastVertexState;
+    BOOL FastUseDepth, FastTextured, FastFragment, FastExtended, FastCompact;
+    ULONG FastRec[48];
     /* State memo (see struct Radeon3DStateMemo): MemoRec is set while a
      * full emission records into one entry; MemoRecBad marks a recording
      * that cannot be replayed (overflow, an uncached register). */
