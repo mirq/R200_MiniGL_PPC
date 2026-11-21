@@ -285,15 +285,27 @@ static ULONG PixelToken(const SurfaceView *view, ULONG x, ULONG y)
 static GLboolean g_captureTopOrigin = GL_FALSE;
 static GLboolean g_captureOrientationValid = GL_FALSE;
 
+/* C's truncating float-to-integer conversion. m68k GCC 6.5 converts a
+ * value already in an FPU register with a plain fmove.l, which rounds to
+ * nearest under the default FPCR: a pixel centre n + 0.5 became pixel
+ * n + 1 (the library's ColorByte has the same guard). */
+static ULONG TruncU(GLfloat value)
+{
+#if defined(__GNUC__) && defined(__HAVE_68881__)
+    __asm__ ("fintrz%.x %1,%0" : "=f" (value) : "f" (value));
+#endif
+    return (ULONG)value;
+}
+
 static ULONG SampleNDC(const SurfaceView *view, GLfloat x, GLfloat y)
 {
-    ULONG px = (ULONG)((x + 1.0f) * 0.5f * (GLfloat)view->width);
+    ULONG px = TruncU((x + 1.0f) * 0.5f * (GLfloat)view->width);
     ULONG py;
 
     if (g_captureTopOrigin)
-        py = (ULONG)((1.0f - y) * 0.5f * (GLfloat)view->height);
+        py = TruncU((1.0f - y) * 0.5f * (GLfloat)view->height);
     else
-        py = (ULONG)((y + 1.0f) * 0.5f * (GLfloat)view->height);
+        py = TruncU((y + 1.0f) * 0.5f * (GLfloat)view->height);
     return PixelToken(view, px, py);
 }
 
@@ -3249,10 +3261,10 @@ static void DrawQuakeRoomWalk(ULONG frame)
 static void BlockMeanRGB(const SurfaceView *view, const GLfloat *rect,
                          int *r, int *g, int *b)
 {
-    ULONG x0 = (ULONG)((rect[0] + 1.0f) * 0.5f * (GLfloat)view->width);
-    ULONG y0 = (ULONG)((1.0f - rect[1]) * 0.5f * (GLfloat)view->height);
-    ULONG x1 = (ULONG)((rect[2] + 1.0f) * 0.5f * (GLfloat)view->width);
-    ULONG y1 = (ULONG)((1.0f - rect[3]) * 0.5f * (GLfloat)view->height);
+    ULONG x0 = TruncU((rect[0] + 1.0f) * 0.5f * (GLfloat)view->width);
+    ULONG y0 = TruncU((1.0f - rect[1]) * 0.5f * (GLfloat)view->height);
+    ULONG x1 = TruncU((rect[2] + 1.0f) * 0.5f * (GLfloat)view->width);
+    ULONG y1 = TruncU((1.0f - rect[3]) * 0.5f * (GLfloat)view->height);
     ULONG x, y;
     ULONG count = 0;
     ULONG sumR = 0, sumG = 0, sumB = 0;
