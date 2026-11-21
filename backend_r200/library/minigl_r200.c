@@ -438,7 +438,11 @@ GLboolean MGLInit(void)
     LibraryBase = &R200BackendBase;
 
     StreamDiagEvent(NULL, 0x103UL, 0, 0);
+#if MGL_EVERGREEN
+    Radeon9200Base = OpenLibrary("Evergreen.chip", 1);
+#else
     Radeon9200Base = OpenLibrary("Radeon9200.chip", RADEON3D_LIBRARY_VERSION);
+#endif
     StreamDiagEvent(NULL, 0x104UL, Radeon9200Base != NULL, 0);
     P96Base = OpenLibrary("Picasso96API.library", 2);
     StreamDiagEvent(NULL, 0x105UL, P96Base != NULL, 0);

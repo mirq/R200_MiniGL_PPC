@@ -303,7 +303,11 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
     texture->surface.Size = sizeof(texture->surface);
     if (!Radeon3DImportBitMap(context->device, texture->bitmap,
                               &texture->surface) ||
-        texture->surface.Format != RADEON3D_FORMAT_B8G8R8A8 ||
+        (texture->surface.Format != RADEON3D_FORMAT_B8G8R8A8
+#if MGL_EVERGREEN
+         && texture->surface.Format != EG_FORMAT_A8R8G8B8
+#endif
+        ) ||
         texture->surface.Pitch * texture->surface.Height < texture->imageBytes) {
         if (texture->surface.Handle)
             Radeon3DReleaseSurface(context->device, &texture->surface);

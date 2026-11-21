@@ -5,8 +5,37 @@
 #include "r200_batch_budget.h"
 #include "debug_output.h"
 
+#if MGL_EVERGREEN
+/* Evergreen.chip offers the big-endian Picasso96 formats unless its
+ * PCFORMATS=YES ToolType asks for the PC ones: use whichever the board has
+ * (one probe; render targets take the board's layout, textures keep the
+ * frontend's BGRA bytes in either). */
+static LONG g_boardBigEndian = -1;
+
+BOOL BoardBigEndian(void)
+{
+    if (g_boardBigEndian < 0) {
+        struct TagItem tags[] = {
+            {P96_BESTMODE_FORMATS_ALLOWED, RGBFF_R5G6B5 | RGBFF_A8R8G8B8},
+            {P96_BESTMODE_NOMINAL_WIDTH, 640}, {P96_BESTMODE_NOMINAL_HEIGHT, 480},
+            {P96_BESTMODE_DEPTH, 16}, {TAG_DONE, 0}};
+        ULONG mode = P96Base ? p96BestModeIDTagList(tags) : (ULONG)INVALID_ID;
+        g_boardBigEndian = (mode != (ULONG)INVALID_ID && mode &&
+                            p96GetModeIDAttr(mode, P96_MODE_RGB_FORMAT) == RGBFB_R5G6B5)
+                               ? 1 : 0;
+    }
+    return g_boardBigEndian != 0;
+}
+#endif
+
 ULONG SurfaceFormatForDepth(ULONG depth)
 {
+#if MGL_EVERGREEN
+    if (BoardBigEndian()) {
+        if (depth == 16UL) return EG_FORMAT_R5G6B5;
+        if (depth == 32UL) return EG_FORMAT_A8R8G8B8;
+    }
+#endif
     if (depth == 8UL) return RADEON3D_FORMAT_CLUT8;
     if (depth == 16UL) return RADEON3D_FORMAT_R5G6B5PC;
     if (depth == 32UL) return RADEON3D_FORMAT_B8G8R8A8;
@@ -15,6 +44,12 @@ ULONG SurfaceFormatForDepth(ULONG depth)
 
 ULONG P96FormatForDepth(ULONG depth)
 {
+#if MGL_EVERGREEN
+    if (BoardBigEndian()) {
+        if (depth == 16UL) return RGBFB_R5G6B5;
+        if (depth == 32UL) return RGBFB_A8R8G8B8;
+    }
+#endif
     if (depth == 8UL) return RGBFB_CLUT;
     if (depth == 16UL) return RGBFB_R5G6B5PC;
     if (depth == 32UL) return RGBFB_B8G8R8A8;
@@ -23,6 +58,12 @@ ULONG P96FormatForDepth(ULONG depth)
 
 ULONG P96FormatMaskForDepth(ULONG depth)
 {
+#if MGL_EVERGREEN
+    if (BoardBigEndian()) {
+        if (depth == 16UL) return RGBFF_R5G6B5;
+        if (depth == 32UL) return RGBFF_A8R8G8B8;
+    }
+#endif
     if (depth == 8UL) return RGBFF_CLUT;
     if (depth == 16UL) return RGBFF_R5G6B5PC;
     if (depth == 32UL) return RGBFF_B8G8R8A8;
@@ -445,6 +486,12 @@ void Lib_glClearColor(GLclampf red, GLclampf green, GLclampf blue,
 
 void Lib_glClear(GLbitfield mask)
 {
+#if MGL_EVERGREEN
+    /* clients built with the upstream 29.1 SDK pass OpenGL's own values */
+    if (mask & 0x00004000UL) mask = (mask & ~0x00004000UL) | GL_COLOR_BUFFER_BIT;
+    if (mask & 0x00000100UL) mask = (mask & ~0x00000100UL) | GL_DEPTH_BUFFER_BIT;
+    mask &= ~0x00000400UL;      /* GL_STENCIL_BUFFER_BIT: no stencil buffer */
+#endif
     struct MiniGLR200Context *context = CurrentContext();
     struct SubmitSlot *slot;
     struct Radeon3DSurface *target;
@@ -527,6 +574,21 @@ void Lib_glClear(GLbitfield mask)
 static void ReadSurfacePixel(const UBYTE *surfacePixel, ULONG surfaceFormat,
                              UBYTE *rgba)
 {
+#if MGL_EVERGREEN
+    if (surfaceFormat==EG_FORMAT_A8R8G8B8) {
+        rgba[3]=surfacePixel[0]; rgba[0]=surfacePixel[1];
+        rgba[1]=surfacePixel[2]; rgba[2]=surfacePixel[3];
+        return;
+    }
+    if (surfaceFormat==EG_FORMAT_R5G6B5) {
+        UWORD value; CopyBytes(&value,surfacePixel,2);
+        rgba[0]=(UBYTE)(((value>>11)&31)*255/31);
+        rgba[1]=(UBYTE)(((value>>5)&63)*255/63);
+        rgba[2]=(UBYTE)((value&31)*255/31);
+        rgba[3]=255;
+        return;
+    }
+#endif
     if (surfaceFormat==RADEON3D_FORMAT_B8G8R8A8) {
         rgba[2]=surfacePixel[0]; rgba[1]=surfacePixel[1];
         rgba[0]=surfacePixel[2]; rgba[3]=surfacePixel[3];
@@ -576,6 +638,9 @@ static ULONG SurfaceBytesPerPixel(ULONG surfaceFormat)
 {
     if (surfaceFormat==RADEON3D_FORMAT_CLUT8) return 1;
     if (surfaceFormat==RADEON3D_FORMAT_R5G6B5PC) return 2;
+#if MGL_EVERGREEN
+    if (surfaceFormat==EG_FORMAT_R5G6B5) return 2;
+#endif
     return 4;
 }
 

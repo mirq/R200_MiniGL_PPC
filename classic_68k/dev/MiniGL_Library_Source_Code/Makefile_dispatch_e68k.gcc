@@ -1,0 +1,97 @@
+# minigl.library for the Radeon HD 5450 (Evergreen.chip): the MiniGL
+# frontend (backend_r200/library, R200_PPC_FRONTEND=0) built for the 68060,
+# with the native Evergreen command emitter and device service of
+# backend_evergreen/library in place of the R200 emitter and Radeon9200.chip.
+# OpenGL token values and the ABI-5 dispatch table of the top-level include/.
+#
+#   PATH=~/amiga/toolchains/m68k-ndk32/bin:$PATH make -f Makefile_dispatch_e68k.gcc
+#
+# EVERGREEN_DRIVER: the evergreen-p96-driver tree (its 3D hand-off header and
+# the xf86-video-ati Evergreen state code the emitter uses).
+CC := m68k-amigaos-gcc
+NM := m68k-amigaos-nm
+PYTHON ?= python3
+CPU ?= 68060
+TOP := $(abspath ../../..)
+BK := $(TOP)/backend_r200
+EG := $(TOP)/backend_evergreen
+R3D := $(BK)/third_party/radeon3d/include
+EVERGREEN_DRIVER ?= $(abspath $(TOP)/../evergreen-p96-driver)
+XATI := $(EVERGREEN_DRIVER)/src/hw/xati
+EGHW := $(EVERGREEN_DRIVER)/src/hw
+OBJDIR := obj_e68k
+OUTDIR := bin/e68k
+OPT ?= -O2
+PERF_TIMING ?= 0
+DEBUG_OUTPUT ?= 1
+LIBNAME ?= minigl.library
+
+BASE_CFLAGS = -std=gnu99 $(OPT) -mcpu=$(CPU) -m68881 -noixemul -ffreestanding \
+	-fno-builtin -fno-baserel -D__M68K__ -DMINIGL_BACKEND_R200 \
+	-DMINIGL_LIBRARY_BUILD -DR200_PERF_TIMING=$(PERF_TIMING) -DMGL_DEBUG_OUTPUT=$(DEBUG_OUTPUT) \
+	-DR200_STREAM_COMMITS=0 -DR200_ASYNC_ROTATION=1 -DR200_CPEMIT_68K=1 -DMGL_EVERGREEN=1
+# Frontend: the Evergreen overrides first, then the backend headers.
+FE_CFLAGS = $(BASE_CFLAGS) -I$(EG)/include -I$(EG)/library -I$(R3D) -Ithird_party/warp3d/include \
+	-I$(BK)/library -I$(BK)/include -I$(TOP)/include -Iinclude
+SDK_CFLAGS = $(BASE_CFLAGS) -I$(TOP)/include -I$(EG)/include -I$(R3D) \
+	-Ithird_party/warp3d/include -Ilibrary -I$(TOP)/ppc_common \
+	-DMINIGL_DISPATCH_DECLARATIONS -DMINIGL68K_EXT -DLIBNAME='"$(LIBNAME)"'
+EG_CFLAGS = $(BASE_CFLAGS) -I$(EG)/include -I$(EG)/library -I$(R3D) -I$(BK)/include \
+	-I$(TOP)/include -I$(EVERGREEN_DRIVER)/include -I$(XATI) -I$(EGHW)
+XATI_CFLAGS = $(BASE_CFLAGS) -I$(XATI) -I$(EGHW) -w
+
+OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_e68k.o \
+	$(OBJDIR)/r200_unity.o $(OBJDIR)/eg_emit.o $(OBJDIR)/eg_device.o \
+	$(OBJDIR)/evergreen_accel.o $(OBJDIR)/evergreen_shader.o \
+	$(OBJDIR)/r200_m68k_glue.o $(OBJDIR)/minigl_ppc_generic.o \
+	$(OBJDIR)/minigl_ppc_lists.o $(OBJDIR)/minigl_ppc_glu.o \
+	$(OBJDIR)/context_state_r68k.o $(OBJDIR)/debug_output.o \
+	$(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o
+
+.PHONY: all clean
+all: $(OUTDIR)/$(LIBNAME)
+
+$(OBJDIR) $(OUTDIR):
+	mkdir -p $@
+
+$(OBJDIR)/r200_unity.o: $(wildcard $(BK)/library/*.c $(BK)/library/*.h $(EG)/library/*.h) | $(OBJDIR)
+	$(CC) $(FE_CFLAGS) -c $(BK)/library/r200_unity.c -o $@
+
+$(OBJDIR)/r200_symbols.txt: $(OBJDIR)/r200_unity.o
+	$(NM) --defined-only --format=posix $< | \
+		awk '$$2 == "T" && $$1 ~ /^_Lib_/ { sub(/^_/, "", $$1); print $$1 }' | sort -u > $@
+
+$(OBJDIR)/dispatch_table_e68k.c: $(TOP)/include/libraries/minigl_dispatch.h \
+		$(OBJDIR)/r200_symbols.txt $(TOP)/tools/generate_dispatch_r200.py
+	$(PYTHON) $(TOP)/tools/generate_dispatch_r200.py \
+		$(TOP)/include/libraries/minigl_dispatch.h $(OBJDIR)/r200_symbols.txt $@
+
+$(OBJDIR)/dispatch_table_e68k.o: $(OBJDIR)/dispatch_table_e68k.c
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_ppc_%.o: $(TOP)/ppc_common/minigl_ppc_%.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/r200_m68k_glue.o: library/r200_m68k_glue.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/minigl_library.o: library/minigl_library.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -DMINIGL_LIB_VERSION=29 -c $< -o $@
+
+$(OBJDIR)/context_state_r68k.o $(OBJDIR)/debug_output.o \
+$(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o: $(OBJDIR)/%.o: library/%.c | $(OBJDIR)
+	$(CC) $(SDK_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/eg_%.o: $(EG)/library/eg_%.c $(wildcard $(EG)/library/*.h) | $(OBJDIR)
+	$(CC) $(EG_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/evergreen_%.o: $(XATI)/evergreen_%.c | $(OBJDIR)
+	$(CC) $(XATI_CFLAGS) -c $< -o $@
+
+$(OUTDIR)/$(LIBNAME): $(OBJS) | $(OUTDIR)
+	$(CC) -nostdlib -nostartfiles -nodefaultlibs -noixemul -mcpu=$(CPU) \
+		-m68881 -o $@ -Wl,--start-group $(OBJS) -lm -lgcc -Wl,--end-group
+	@test -z "$$($(NM) -u $@)" || { $(NM) -u $@; exit 1; }
+
+clean:
+	rm -f obj_e68k/* bin/e68k/*

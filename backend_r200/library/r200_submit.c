@@ -305,8 +305,23 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
         vertexDesc = &vertices;
     }
     t0 = context->perfEnabled ? PerfClock() : 0;
+#if MGL_EVERGREEN
+    /* native Evergreen commands; commit-mode batches (resident draws) are
+     * not served yet */
+    (void)vertexDesc;
+    if (slot->commitMode && slot->drawCount) {
+        count = 0;
+        MGLPPCEmitFailStage = 0x3001UL;
+    } else {
+        count = EgEmitBatch(staging, R200_CP_SLOT_DWORDS, context->buildSlot,
+                            slot->records, slot->recordCount,
+                            CpResolveSurface, context);
+        MGLPPCEmitFailStage = count ? 0 : (EgEmitFailStage ? EgEmitFailStage : 0x3002UL);
+    }
+#else
     count = MGLPPCEmitBatch(staging, slot->records, slot->recordCount,
                             vertexDesc, CpResolveSurface, context);
+#endif
     if (t0) {
         t1 = PerfClock();
         CpEmitTicks += t1 - t0;
@@ -351,12 +366,19 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
     byteOffset = context->buildSlot * R200_CP_SLOT_DWORDS * sizeof(ULONG);
     destination = (volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
                                      byteOffset);
+#if MGL_EVERGREEN
+    /* Evergreen.chip runs indirect buffers with the CP's 32-bit swap: the
+     * 68k's own longs */
+    for (index = 0; index < count; ++index)
+        destination[index] = staging[index];
+#else
     /* The CP reads little-endian dwords. */
     for (index = 0; index < count; ++index) {
         ULONG value = staging[index];
         destination[index] = (value >> 24) | ((value >> 8) & 0xff00UL) |
                              ((value << 8) & 0xff0000UL) | (value << 24);
     }
+#endif
     (void)destination[count - 1UL];
     CpSlotDwords[context->buildSlot] = count;
     {

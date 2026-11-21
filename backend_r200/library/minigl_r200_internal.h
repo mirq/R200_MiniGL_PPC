@@ -51,6 +51,34 @@
 #include <libraries/minigl_ppc_trace.h>
 #include "minigl_r200_base.h"
 
+#ifndef MGL_EVERGREEN
+#define MGL_EVERGREEN 0
+#endif
+#if MGL_EVERGREEN
+/* Radeon HD 5450 (Evergreen.chip): native emitter, device service on the
+ * chip's 3D hand-off API (backend_evergreen/library). */
+#include "eg_emit.h"
+BOOL BoardBigEndian(void);
+/* Never MOVE16 into VRAM (the bridges corrupt line bursts), and exec's
+ * CopyMem may use it: plain long or byte stores. */
+static __inline__ void MglCopyMem(const void *src, void *dst, ULONG n)
+{
+    const UBYTE *s = (const UBYTE *)src;
+    UBYTE *d = (UBYTE *)dst;
+    if (!(((ULONG)s | (ULONG)d | n) & 3UL)) {
+        const ULONG *ls = (const ULONG *)s;
+        volatile ULONG *ld = (volatile ULONG *)d;
+        n >>= 2;
+        while (n--)
+            *ld++ = *ls++;
+        return;
+    }
+    while (n--)
+        *d++ = *s++;
+}
+#define CopyMem(s, d, n) MglCopyMem((s), (d), (n))
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Build-time configuration                                            */
 /* ------------------------------------------------------------------ */
@@ -120,7 +148,13 @@ ULONG DepthStorageWidth(ULONG width);
 #endif
 #define R200_CP_RESOLVE_CACHE 256UL
 #define R68K_MAX_RESIDENT 10UL
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+/* Evergreen buffers carry the full engine state and per-draw resources:
+ * room for a batch of 8192 record dwords and 192 draws */
+#define R200_CP_SLOT_DWORDS 32768UL
+#else
 #define R200_CP_SLOT_DWORDS RADEON3D_MAX_BATCH_DWORDS
+#endif
 /* Maximum header-only draw records one slot can hold: the batch budget
  * divided by the smallest TCL header (44 dwords). */
 #define MAX_SLOT_DRAWS 192UL

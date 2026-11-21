@@ -53,7 +53,13 @@ void StreamDiagEvent(struct MiniGLR200Context *context, ULONG event,
 #ifndef LIBNAME
 #define LIBNAME "minigl.library"
 #endif
+#ifdef MINIGL_LIB_VERSION
+#define MINIGL_VER_STRING "29.0"
+#define VERSION MINIGL_LIB_VERSION
+#else
 #define VERSION 12
+#define MINIGL_VER_STRING "12.0"
+#endif
 #define REVISION 0
 
 static const char LibName[] = LIBNAME;
@@ -63,6 +69,8 @@ static const char LibName[] = LIBNAME;
 #define MINIGL_BACKEND_ID "fprintf stub, " MINIGL_CONTEXT_ID
 #elif defined(PISTORM3D)
 #define MINIGL_BACKEND_ID "PiStorm3D, " MINIGL_CONTEXT_ID
+#elif defined(MGL_EVERGREEN) && MGL_EVERGREEN
+#define MINIGL_BACKEND_ID "Radeon HD 5450 (Evergreen), " MINIGL_CONTEXT_ID
 #elif defined(MINIGL_BACKEND_R200)
 #define MINIGL_BACKEND_ID "Radeon R200 semantic, " MINIGL_CONTEXT_ID
 #else
@@ -70,7 +78,7 @@ static const char LibName[] = LIBNAME;
 #endif
 
 static const char LibId[] =
-    "$VER: " LIBNAME " 12.0 (5.11.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID "\r\n";
+    "$VER: " LIBNAME " " MINIGL_VER_STRING " (21.11.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID "\r\n";
 
 /* Library bases used by the AmigaOS NDK proto headers. */
 struct ExecBase *SysBase = 0;
@@ -132,6 +140,14 @@ static struct MiniGLLibrary *LibInit(
     if (!DOSBase)
         return 0;
 
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+    /*
+     * LibInit runs inside ramlib: opening a library that is not yet in
+     * memory from here (the IEEE math libraries, Picasso96API.library)
+     * makes ramlib wait for itself and every later OpenLibrary with it.
+     * The Evergreen build opens them in LibOpen, in the caller's task.
+     */
+#else
 #ifdef MINIGL_USES_MATH_SHIM
     if (!MiniGL_OpenMathLibrary()) {
         struct Library *dos = (struct Library *)DOSBase;
@@ -140,8 +156,9 @@ static struct MiniGLLibrary *LibInit(
         return 0;
     }
 #endif
+#endif
 
-#ifdef MINIGL_BACKEND_R200
+#if defined(MINIGL_BACKEND_R200) && !(defined(MGL_EVERGREEN) && MGL_EVERGREEN)
     /*
      * Bring the backend up at init time, as the R200 library always has: a
      * machine without Radeon9200.chip must fail to load rather than fail
@@ -170,6 +187,10 @@ static struct MiniGLLibrary *LibOpen(
 {
 #ifndef MINIGL_BACKEND_STUB
     if (!MiniGLInitialized) {
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN && defined(MINIGL_USES_MATH_SHIM)
+        if (!MiniGL_OpenMathLibrary())
+            return 0;
+#endif
         if (MGLInit() == GL_FALSE)
             return 0;
 
