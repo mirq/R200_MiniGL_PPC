@@ -164,9 +164,45 @@ void MultiplyMatrix(GLfloat *output, const GLfloat *left,
 
 GLfloat *CurrentMatrix(struct MiniGLR200Context *context)
 {
+   if (context->matrixMode == GL_TEXTURE) {
+       ULONG unit = context->activeTexture & 1UL;
+       return context->textureMatrix[unit][context->textureMatrixDepth[unit]];
+   }
    return context->matrixMode == GL_PROJECTION
               ? context->projection[context->projectionDepth]
               : context->modelview[context->modelviewDepth];
+}
+
+/* After any change to the active unit's texture matrix: is it still the
+ * identity (the common case, which costs the vertex paths nothing)? */
+void TextureMatrixChanged(struct MiniGLR200Context *context)
+{
+   ULONG unit = context->activeTexture & 1UL, i;
+   const GLfloat *m = context->textureMatrix[unit][context->textureMatrixDepth[unit]];
+   BOOL active = FALSE;
+
+   for (i = 0; i < 16; ++i)
+       if (m[i] != ((i % 5UL) == 0 ? 1.0f : 0.0f))
+           active = TRUE;
+   context->textureMatrixActive[unit] = active;
+}
+
+/* (s, t, 0, 1) through the unit's texture matrix, with the q divide. */
+void ApplyTextureMatrix(const struct MiniGLR200Context *context, ULONG unit,
+                        GLfloat *s, GLfloat *t)
+{
+   const GLfloat *m = context->textureMatrix[unit][context->textureMatrixDepth[unit]];
+   GLfloat is = *s, it = *t;
+   GLfloat q = m[3] * is + m[7] * it + m[15];
+   GLfloat os = m[0] * is + m[4] * it + m[12];
+   GLfloat ot = m[1] * is + m[5] * it + m[13];
+
+   if (q != 1.0f && q != 0.0f) {
+       os /= q;
+       ot /= q;
+   }
+   *s = os;
+   *t = ot;
 }
 
 void InvalidateSphereMapCache(struct MiniGLR200Context *context)
@@ -185,6 +221,11 @@ void InvalidateNormalMatrix(struct MiniGLR200Context *context)
     * record header (dwords 21..36), so a matrix change is serialized header
     * state: it must split any still-open deferred batch that was captured
     * under the old matrix. */
+   if (context->matrixMode == GL_TEXTURE) {
+       /* not part of the transform: only the captured s/t change */
+       TextureMatrixChanged(context);
+       return;
+   }
    context->combinedMatrixValid = FALSE;
    context->inverseModelviewValid = FALSE;
    BumpSemanticStateSerial(context);

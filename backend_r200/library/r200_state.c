@@ -735,7 +735,7 @@ void Lib_glMatrixMode(GLenum mode)
 {
     struct MiniGLR200Context *context = CurrentContext();
     if (!StateChangeAllowed(context)) return;
-    if (mode != GL_MODELVIEW && mode != GL_PROJECTION) {
+    if (mode != GL_MODELVIEW && mode != GL_PROJECTION && mode != GL_TEXTURE) {
         SetError(context, GL_INVALID_ENUM);
         return;
     }
@@ -795,6 +795,16 @@ void Lib_glPushMatrix(void)
 {
     struct MiniGLR200Context *context = CurrentContext();
     if (!StateChangeAllowed(context)) return;
+    if (context->matrixMode == GL_TEXTURE) {
+        ULONG unit = context->activeTexture & 1UL;
+        if (context->textureMatrixDepth[unit] + 1 >= TEXTURE_STACK_DEPTH) {
+            SetError(context, GL_STACK_OVERFLOW); return;
+        }
+        CopyMatrix(context->textureMatrix[unit][context->textureMatrixDepth[unit] + 1],
+                   context->textureMatrix[unit][context->textureMatrixDepth[unit]]);
+        ++context->textureMatrixDepth[unit];
+        return;
+    }
     if (context->matrixMode == GL_PROJECTION) {
         if (context->projectionDepth + 1 >= PROJECTION_STACK_DEPTH) {
             SetError(context, GL_STACK_OVERFLOW); return;
@@ -817,6 +827,13 @@ void Lib_glPopMatrix(void)
 {
     struct MiniGLR200Context *context = CurrentContext();
     if (!StateChangeAllowed(context)) return;
+    if (context->matrixMode == GL_TEXTURE) {
+        ULONG unit = context->activeTexture & 1UL;
+        if (!context->textureMatrixDepth[unit]) { SetError(context, GL_STACK_UNDERFLOW); return; }
+        --context->textureMatrixDepth[unit];
+        TextureMatrixChanged(context);
+        return;
+    }
     if (context->matrixMode == GL_PROJECTION) {
         if (!context->projectionDepth) { SetError(context, GL_STACK_UNDERFLOW); return; }
         --context->projectionDepth;

@@ -228,6 +228,8 @@ void InitializeFrontendContext(struct MiniGLR200Context *context)
     context->matrixMode = GL_MODELVIEW;
     Identity(context->modelview[0]);
     Identity(context->projection[0]);
+    Identity(context->textureMatrix[0][0]);
+    Identity(context->textureMatrix[1][0]);
     context->depthNear = 0.0f;
     context->depthFar = 1.0f;
     context->clearDepth = 1.0f;

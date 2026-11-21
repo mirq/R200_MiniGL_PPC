@@ -5344,6 +5344,70 @@ static GLboolean VerifyQuakeBurst32(char *detail)
     return log.failures==0;
 }
 
+/* GL_TEXTURE matrix: a 2x2 texture (red green / blue white) on the
+ * fullscreen quad with the texture matrix scaled by 2 repeats twice, so
+ * columns read texel 0,1,0,1 instead of 0,0,1,1. GLQuake's animated
+ * console background (gl_conanim) rotates and zooms this matrix. */
+static GLuint g_texMatrixTexture;
+
+static void DrawTextureMatrixScene(void)
+{
+    static const UBYTE texels[16] = {
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 255, 255
+    };
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    if (!g_texMatrixTexture)
+        g_texMatrixTexture = UploadTypedTexture(GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE,
+                                                2, 2, texels);
+    else
+        glBindTexture(GL_TEXTURE_2D, g_texMatrixTexture);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glMatrixMode(GL_TEXTURE);
+    glPushMatrix();
+    glLoadIdentity();
+    glScalef(2.0f, 2.0f, 1.0f);
+    glMatrixMode(GL_MODELVIEW);
+    DrawFullscreenQuad();
+    glMatrixMode(GL_TEXTURE);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glDisable(GL_TEXTURE_2D);
+}
+
+static void DrawTextureMatrix(ULONG frame)
+{
+    (void)frame;
+    DrawTextureMatrixScene();
+}
+
+static GLboolean VerifyTextureMatrix(char *detail)
+{
+    CheckLog log;
+    memset(&log, 0, sizeof(log));
+    if (!CalibrateChannels(detail)) return GL_FALSE;
+    DrainErrors();
+    DrawTextureMatrixScene();
+    /* quad u, v in 0..1 over NDC -0.9..0.9; texel = frac(2u) * 2 */
+    CheckRGB(&log, "u0.125", -0.9f + 1.8f * 0.125f, -0.9f + 1.8f * 0.125f, 255, 0, 0, 16);
+    CheckRGB(&log, "u0.375", -0.9f + 1.8f * 0.375f, -0.9f + 1.8f * 0.125f, 0, 255, 0, 16);
+    CheckRGB(&log, "u0.625", -0.9f + 1.8f * 0.625f, -0.9f + 1.8f * 0.125f, 255, 0, 0, 16);
+    CheckRGB(&log, "v0.375", -0.9f + 1.8f * 0.125f, -0.9f + 1.8f * 0.375f, 0, 0, 255, 16);
+    if (glGetError() != GL_NO_ERROR && !log.failures) {
+        strcpy(detail, "texture matrix calls raised a GL error");
+        return GL_FALSE;
+    }
+    if (log.failures) strncpy(detail, log.first, 95);
+    else strcpy(detail, "texture matrix x2 repeats the texture twice");
+    return log.failures == 0;
+}
+
 static GLboolean AlwaysAvailable(char *reason)
 {
     reason[0] = '\0';
@@ -5460,6 +5524,10 @@ static MiniGLTest g_tests[] = {
      "Upload distinct solid rows at 4x4, 8x2 and 16x2 and read one cell per row.",
      "Every row reads back its own colour; shifted or stale rows name a pitch mismatch.",
      DrawRowIdentity, VerifyRowIdentity, AlwaysAvailable, GL_TRUE, {0}},
+    {"texture.matrix", "TEXTURE", "TEXTURE MATRIX",
+     "Scale the GL_TEXTURE matrix by 2 over a 2x2 texture on a fullscreen quad.",
+     "Columns read texel 0,1,0,1 (the texture repeats twice); 0,0,1,1 means the matrix was ignored.",
+     DrawTextureMatrix, VerifyTextureMatrix, AlwaysAvailable, GL_TRUE, {0}},
     {"quake.alias-ogre", "QUAKE", "TEXTURED OGRE",
      "Render the real Quake Ogre mesh with its original game skin through "
      "its strided alias-array layout, alternating float and integer paths.",

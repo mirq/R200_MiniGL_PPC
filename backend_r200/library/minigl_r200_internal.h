@@ -198,6 +198,7 @@ ULONG DepthStorageWidth(ULONG width);
 #endif
 #define MODELVIEW_STACK_DEPTH 41UL
 #define PROJECTION_STACK_DEPTH 6UL
+#define TEXTURE_STACK_DEPTH 4UL
 /*
  * Texture names are an OpenGL namespace, not a residency limit.  Legacy
  * MiniGL clients use sparse fixed names (BlitzQuake uses 1024..1087 for
@@ -777,6 +778,11 @@ struct MiniGLR200Context {
     GLfloat projection[PROJECTION_STACK_DEPTH][16];
     ULONG modelviewDepth;
     ULONG projectionDepth;
+    /* GL_TEXTURE matrix stack per unit, applied to s/t when vertices are
+     * captured; textureMatrixActive is FALSE while it is the identity */
+    GLfloat textureMatrix[2][TEXTURE_STACK_DEPTH][16];
+    ULONG textureMatrixDepth[2];
+    BOOL textureMatrixActive[2];
     GLenum matrixMode;
     GLfloat depthNear;
     GLfloat depthFar;
@@ -1042,6 +1048,9 @@ void CopyMatrix(GLfloat *destination, const GLfloat *source);
 void MultiplyMatrix(GLfloat *output, const GLfloat *left,
                     const GLfloat *right);
 GLfloat *CurrentMatrix(struct MiniGLR200Context *context);
+void TextureMatrixChanged(struct MiniGLR200Context *context);
+void ApplyTextureMatrix(const struct MiniGLR200Context *context, ULONG unit,
+                        GLfloat *s, GLfloat *t);
 void InvalidateSphereMapCache(struct MiniGLR200Context *context);
 void InvalidateNormalMatrix(struct MiniGLR200Context *context);
 void MultCurrentMatrix(struct MiniGLR200Context *context,

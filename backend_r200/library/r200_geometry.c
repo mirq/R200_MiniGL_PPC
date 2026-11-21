@@ -2803,6 +2803,10 @@ static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
     vertex->s = context->currentS[0];
     vertex->s1 = context->currentS[1];
     vertex->t1 = context->currentT[1];
+    if (context->textureMatrixActive[0])
+        ApplyTextureMatrix(context, 0, &vertex->s, &vertex->t);
+    if (context->textureMatrixActive[1])
+        ApplyTextureMatrix(context, 1, &vertex->s1, &vertex->t1);
     vertex->fog = FogFactor(context,x,y,z,w);
     vertex->color = context->currentColor;
 }
@@ -3277,6 +3281,10 @@ static BOOL FetchArrayVertex(struct MiniGLR200Context *context, ULONG index,
             vertex->s = context->currentS[0];
             vertex->t = context->currentT[0];
         }
+        if (context->textureMatrixActive[0])
+            ApplyTextureMatrix(context, 0, &vertex->s, &vertex->t);
+        if (context->textureMatrixActive[1])
+            ApplyTextureMatrix(context, 1, &vertex->s1, &vertex->t1);
         return TRUE;
     }
     bytes = TypeSize(array->type);
@@ -4134,6 +4142,10 @@ void Lib_mglEndFastPath(MGLFastPath *fp)
                          ? input->u1 / q : context->currentS[1];
         output->t1 = (attributes & MGL_FASTPATH_TEXCOORD1)
                          ? input->v1 / q : context->currentT[1];
+        if (context->textureMatrixActive[0])
+            ApplyTextureMatrix(context, 0, &output->s, &output->t);
+        if (context->textureMatrixActive[1])
+            ApplyTextureMatrix(context, 1, &output->s1, &output->t1);
         output->fog = FogFactor(context, output->x, output->y,
                                 output->z, output->w);
     }
