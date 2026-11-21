@@ -1508,7 +1508,7 @@ void Lib_mglSwitchDisplay(void)
         if (!Submit(context) ||
             !EgPresent(context->device, &context->surfaces[context->drawingBuffer],
                        &context->surfaces[0], context->width, context->height,
-                       FALSE /* the CP's vblank wait stalled the ring: off for now */))
+                       TRUE))
             SetError(context, GL_INVALID_OPERATION);
         return;
     }

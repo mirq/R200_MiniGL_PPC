@@ -134,6 +134,30 @@ BOOL Radeon3DGetInfo(struct Radeon3DDevice *device, struct Radeon3DInfo *info)
     return TRUE;
 }
 
+/* CRTC 0 (the one Evergreen.chip scans the screen out with): little-endian
+ * MMIO registers. */
+static ULONG CrtcRead(ULONG reg)
+{
+    ULONG v = *(volatile ULONG *)((UBYTE *)Device.info.Registers + reg);
+    return (v >> 24) | ((v >> 8) & 0xff00UL) | ((v << 8) & 0xff0000UL) | (v << 24);
+}
+
+/* Until the start of a vertical blank (bounded: ~2 us per read, at most
+ * two frames at 20 Hz). The present copy, ~0.2 ms top to bottom, then runs
+ * ahead of the beam: no tear line. Polled by the CPU, not the CP: a CP
+ * register wait that never completes would take the engine down. */
+static void WaitVblank(void)
+{
+    ULONG i;
+
+    if (!Device.info.Registers || !(CrtcRead(0x6e70) & 1))     /* CRTC_CONTROL master enable */
+        return;
+    for (i = 0; i < 25000UL && (CrtcRead(0x6e8c) & 1); ++i)    /* CRTC_STATUS V_BLANK */
+        ;
+    for (i = 0; i < 25000UL && !(CrtcRead(0x6e8c) & 1); ++i)
+        ;
+}
+
 /* The frame in src onto the visible dst with the 3D engine (EgEmitPresent):
  * Picasso96's screen-buffer flip does not move this card's scanout, and its
  * blit path is not safe right after 3D work. Ordered behind the frame on
@@ -157,15 +181,20 @@ BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
                       (APTR)((UBYTE *)Device.info.Aperture + off + PRESENT_HALF - 256),
                       Device.info.VramGpuBase + off + PRESENT_HALF - 256,
                       src->GpuAddress, dst->GpuAddress, src->Pitch, src->Format,
-                      width, height, waitVblank);
+                      width, height, FALSE);
     if (!n)
         return FALSE;
     ib = (volatile ULONG *)((UBYTE *)Device.info.Aperture + off);
     for (i = 0; i < n; ++i)
         ib[i] = PresentWords[i];
     (void)ib[n - 1];
+    if (waitVblank && Device.lastFence)
+        /* the frame drawn, the engine idle: the copy then starts at once */
+        (void)Eg3DWait(Device.lastFence);
     if (!Eg3DLock())
         return FALSE;
+    if (waitVblank)
+        WaitVblank();
     fence = Eg3DSubmit(off, n);
     Eg3DUnlock();
     if (!fence)
