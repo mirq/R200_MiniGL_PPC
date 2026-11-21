@@ -66,7 +66,10 @@ ULONG EgEmitFailStage;
 ULONG MGLPPCEmitFailStage;       /* the frontend's diagnostics read it */
 /* the R200 emitter's counters, printed by the frontend's diagnostics */
 ULONG R3DStatDraws, R3DStatRegCalls, R3DStatRegWrites, R3DStatFast, R3DStatFastOther[48];
-ULONG EgEmitFace = 1;               /* PA_SU_SC_MODE_CNTL.FACE for GL front = CCW */
+ULONG EgEmitFace = 1;
+/* profiling counters (printed by the frontend at context end) */
+ULONG EgStatDraws, EgStatVtxDwords, EgStatConstUploads, EgStatStride[17], EgStatTcl,
+      EgStatClears, EgStatTexBinds, EgStatShaderBinds;               /* PA_SU_SC_MODE_CNTL.FACE for GL front = CCW */
 
 void EgEmitInit(APTR vramCpu, ULONG vramGpu, ULONG shaderOff, ULONG shaderSize,
                 ULONG streamOff, ULONG streamSlotSize)
@@ -126,6 +129,7 @@ static void ToVramLe(ULONG offset, const ULONG *src, ULONG dwords)
 #define VS_TEX0         0x0004UL
 #define VS_TEX1         0x0008UL
 #define VS_FOG          0x0010UL
+#define VS_STREAMS      0x0020UL    /* EG_EXEC_ARRAYS: one buffer per attribute */
 
 struct VsKey {
     ULONG flags;
@@ -220,19 +224,26 @@ static void CfExport(ULONG type, ULONG base, ULONG gpr, ULONG burst, BOOL eop)
                                      MARK(0), BARRIER(1)));
 }
 
-static void Fetch(ULONG dst, ULONG offset, ULONG format, ULONG bytes, ULONG nfa,
-                  ULONG fca, ULONG sx, ULONG sy, ULONG sz, ULONG sw)
+static void FetchB(ULONG dst, ULONG buffer, ULONG offset, ULONG format, ULONG bytes,
+                   ULONG nfa, ULONG fca, ULONG endian,
+                   ULONG sx, ULONG sy, ULONG sz, ULONG sw)
 {
     Out(VTX_DWORD0(VTX_INST(SQ_VTX_INST_FETCH), FETCH_TYPE(SQ_VTX_FETCH_VERTEX_DATA),
-                   FETCH_WHOLE_QUAD(0), BUFFER_ID(0), SRC_GPR(0), SRC_REL(ABSOLUTE),
+                   FETCH_WHOLE_QUAD(0), BUFFER_ID(buffer), SRC_GPR(0), SRC_REL(ABSOLUTE),
                    SRC_SEL_X(SQ_SEL_X), MEGA_FETCH_COUNT(bytes)));
     Out(VTX_DWORD1_GPR(DST_GPR(dst), DST_REL(0), DST_SEL_X(sx), DST_SEL_Y(sy),
                        DST_SEL_Z(sz), DST_SEL_W(sw), USE_CONST_FIELDS(0),
                        DATA_FORMAT(format), NUM_FORMAT_ALL(nfa),
                        FORMAT_COMP_ALL(fca), SRF_MODE_ALL(SRF_MODE_ZERO_CLAMP_MINUS_ONE)));
-    Out(VTX_DWORD2(OFFSET(offset), ENDIAN_SWAP(SQ_ENDIAN_8IN32), CONST_BUF_NO_STRIDE(0),
+    Out(VTX_DWORD2(OFFSET(offset), ENDIAN_SWAP(endian), CONST_BUF_NO_STRIDE(0),
                    MEGA_FETCH(1), ALT_CONST(0), BUFFER_INDEX_MODE(SQ_CF_INDEX_NONE)));
     Out(VTX_DWORD_PAD);
+}
+
+static void Fetch(ULONG dst, ULONG offset, ULONG format, ULONG bytes, ULONG nfa,
+                  ULONG fca, ULONG sx, ULONG sy, ULONG sz, ULONG sw)
+{
+    FetchB(dst, 0, offset, format, bytes, nfa, fca, SQ_ENDIAN_8IN32, sx, sy, sz, sw);
 }
 
 static void Pad128(void) { while (ProgN & 3) Out(0); }
@@ -264,6 +275,41 @@ static ULONG BuildVs(const struct VsKey *k, ULONG *gprs)
                  ALU_SRC_KCACHE0_BASE + i, j, 0, j == 3, 0, SQ_ALU_OMOD_OFF, SQ_ALU_VEC_012);
     while (ProgN < vtxAddr * 2)
         Out(0);
+    if (k->flags & VS_STREAMS) {
+        /* EG_EXEC_ARRAYS: buffer 0 position, 1 colour, 2 and 3 the
+         * texture coordinates; the formats are in posOff (EGA_FORMATS) */
+        ULONG size = k->posOff & EGA_POS_SIZE_MASK, col = k->posOff >> EGA_COL_SHIFT;
+        if (size == 2)
+            FetchB(1, 0, 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
+        else if (size == 4)
+            FetchB(1, 0, 0, FMT_32_32_32_32_FLOAT, 16, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W);
+        else
+            FetchB(1, 0, 0, FMT_32_32_32_FLOAT, 12, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_1);
+        if (col == EGA_COL_FLOAT3)
+            FetchB(2, 1, 0, FMT_32_32_32_FLOAT, 12, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_1);
+        else if (col == EGA_COL_FLOAT4)
+            FetchB(2, 1, 0, FMT_32_32_32_32_FLOAT, 16, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W);
+        else if (col == EGA_COL_ARGB)   /* A, R, G, B bytes: X = A */
+            FetchB(2, 1, 0, FMT_8_8_8_8, 4, SQ_NUM_FORMAT_NORM, SQ_FORMAT_COMP_UNSIGNED,
+                   SQ_ENDIAN_NONE, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W, SQ_SEL_X);
+        else    /* R, G, B, A bytes in memory order: no swap */
+            FetchB(2, 1, 0, FMT_8_8_8_8, 4, SQ_NUM_FORMAT_NORM, SQ_FORMAT_COMP_UNSIGNED,
+                   SQ_ENDIAN_NONE, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W);
+        p = 3;
+        if (k->flags & VS_TEX0)
+            FetchB(p++, 2, 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
+        if (k->flags & VS_TEX1)
+            FetchB(p++, 3, 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
+        *gprs = pos + 1;
+        return ProgN;
+    }
     if (k->flags & VS_POS_W4)
         Fetch(1, k->posOff, FMT_32_32_32_32_FLOAT, 16, SQ_NUM_FORMAT_SCALED,
               SQ_FORMAT_COMP_SIGNED, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W);
@@ -580,6 +626,7 @@ static ULONG ConstUpload(const ULONG *values, ULONG dwords)
 {
     ULONG off = StreamAlloc(256, 256);
 
+    ++EgStatConstUploads;
     if (off == ~0UL)
         return 0;
     ToVramLe(off, values, dwords);
@@ -594,6 +641,7 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
 
     if (Sh.valid && Sh.vs == vs && Sh.ps == ps && Sh.psInputs == inputs && Sh.flat == flat)
         return;
+    ++EgStatShaderBinds;
     if (!Sh.valid || Sh.vs != vs) {
         CLEAR(c);
         c.shader_addr = vs->gpu;
@@ -693,12 +741,12 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     Sh.tex[unit][3] = stride;
 }
 
-static void EmitVertexBuffer(ULONG gpu, ULONG bytes, ULONG stride)
+static void EmitVertexBufferId(ULONG id, ULONG gpu, ULONG bytes, ULONG stride)
 {
     RADEONInfoPtr info = &Xi;
 
     BEGIN_BATCH(10);
-    PACK0(SQ_FETCH_RESOURCE + SQ_FETCH_RESOURCE_vs * SQ_FETCH_RESOURCE_offset, 8);
+    PACK0(SQ_FETCH_RESOURCE + (SQ_FETCH_RESOURCE_vs + id) * SQ_FETCH_RESOURCE_offset, 8);
     E32(gpu);
     E32(bytes - 1);
     E32((stride << SQ_VTX_CONSTANT_WORD2_0__STRIDE_shift) |
@@ -715,10 +763,47 @@ static void EmitVertexBuffer(ULONG gpu, ULONG bytes, ULONG stride)
     END_BATCH();
 }
 
+static void EmitVertexBuffer(ULONG gpu, ULONG bytes, ULONG stride)
+{
+    EmitVertexBufferId(0, gpu, bytes, stride);
+}
+
+/* VGT_INDX_OFFSET: added to every index, auto-generated ones too */
+static ULONG IndexOffset;
+
+static void SetIndexOffset(ULONG offset)
+{
+    if (IndexOffset != offset) {
+        Reg(VGT_INDX_OFFSET, offset);
+        IndexOffset = offset;
+    }
+}
+
+/* count big-endian 16- or 32-bit indices at gpu */
+static void EmitDrawIndexed(ULONG prim, ULONG count, ULONG gpu, BOOL index32)
+{
+    RADEONInfoPtr info = &Xi;
+
+    BEGIN_BATCH(14);
+    EREG(VGT_PRIMITIVE_TYPE, prim);
+    PACK3(IT_INDEX_TYPE, 1);
+    E32(index32 ? (IT_INDEX_TYPE_SWAP_MODE(VGT_DMA_SWAP_32_BIT) | DI_INDEX_SIZE_32_BIT)
+                : (IT_INDEX_TYPE_SWAP_MODE(VGT_DMA_SWAP_16_BIT) | DI_INDEX_SIZE_16_BIT));
+    PACK3(IT_NUM_INSTANCES, 1);
+    E32(1);
+    PACK3(IT_DRAW_INDEX, 4);
+    E32(gpu);
+    E32(0);
+    E32(count);
+    E32(DI_SRC_SEL_DMA);
+    END_BATCH();
+}
+
 static void EmitDraw(ULONG prim, ULONG count)
 {
     draw_config_t d;
 
+    SetIndexOffset(0);
     CLEAR(d);
     d.prim_type = prim;
     d.vgt_draw_initiator = DI_SRC_SEL_AUTO_INDEX;
@@ -930,6 +1015,7 @@ static BOOL Clear(const ULONG *r, MGLPPCEmitResolve resolve, void *user)
     struct Shader *vs, *ps;
     ULONG psc[4] = {0, 0, 0, 0};
 
+    ++EgStatClears;
     if (!SetTargets(r[2], depthHandle,
                     depthHandle ? (Z_ENABLE_bit | Z_WRITE_ENABLE_bit | (FRAG_ALWAYS << ZFUNC_shift)) : 0,
                     resolve, user, &c))
@@ -973,7 +1059,7 @@ static BOOL Clear(const ULONG *r, MGLPPCEmitResolve resolve, void *user)
 }
 
 static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
-                 MGLPPCEmitResolve resolve, void *user)
+                 MGLPPCEmitResolve resolve, void *user, const ULONG *ga)
 {
     struct MGLPPCEmitSurface c, t0s, t1s;
     ULONG options = r[5], headerDwords, stride, count = r[10], depthControl = 0;
@@ -1043,7 +1129,19 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
         if (clipCoords) { k.flags |= VS_W_SEPARATE; k.wOff = 32; }
     }
     k.stride = (UBYTE)(stride * 4);
-    if (length < headerDwords + count * stride) {
+    if (ga) {
+        /* the client's arrays: the descriptors follow the header */
+        if (!tcl || normals || fog || length < headerDwords + EG_ARRAYS_DWORDS) {
+            EgEmitFailStage = 0x2107;
+            return FALSE;
+        }
+        ga = r + headerDwords;
+        count = ga[EGA_COUNT];
+        memset(&k, 0, sizeof(k));
+        k.flags = VS_STREAMS | (textured ? VS_TEX0 : 0) | (textured1 ? VS_TEX1 : 0);
+        k.posOff = (UBYTE)ga[EGA_FORMATS];
+        stride = 0;
+    } else if (length < headerDwords + count * stride) {
         EgEmitFailStage = 0x2103;
         return FALSE;
     }
@@ -1177,9 +1275,40 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
         if (!BindPsConst(psc))
             return FALSE;
     }
+    if (ga) {
+        ULONG n = ga[EGA_VERTS], fmt = ga[EGA_FORMATS], col = fmt >> EGA_COL_SHIFT;
+        ULONG posBytes = (fmt & EGA_POS_SIZE_MASK) * 4;
+        ULONG colBytes = col == EGA_COL_FLOAT4 ? 16 : col == EGA_COL_FLOAT3 ? 12 : 4;
+#define EGA_BYTES(st, elem) ((st) ? (st) * n : (elem))
+        EmitVertexBufferId(0, ga[EGA_POS_GPU], EGA_BYTES(ga[EGA_POS_STRIDE], posBytes),
+                           ga[EGA_POS_STRIDE]);
+        EmitVertexBufferId(1, ga[EGA_COL_GPU], EGA_BYTES(ga[EGA_COL_STRIDE], colBytes),
+                           ga[EGA_COL_STRIDE]);
+        if (textured)
+            EmitVertexBufferId(2, ga[EGA_TEX0_GPU], EGA_BYTES(ga[EGA_TEX0_STRIDE], 8),
+                               ga[EGA_TEX0_STRIDE]);
+        if (textured1)
+            EmitVertexBufferId(3, ga[EGA_TEX1_GPU], EGA_BYTES(ga[EGA_TEX1_STRIDE], 8),
+                               ga[EGA_TEX1_STRIDE]);
+#undef EGA_BYTES
+        ++EgStatDraws;
+        if (ga[EGA_INDEX_TYPE] == EGA_INDEX_NONE)
+            EmitDraw(PrimType[ga[EGA_PRIM] % 10], count);
+        else {
+            SetIndexOffset(ga[EGA_INDEX_OFFSET]);
+            EmitDrawIndexed(PrimType[ga[EGA_PRIM] % 10], count, ga[EGA_INDEX_GPU],
+                            ga[EGA_INDEX_TYPE] == EGA_INDEX_32);
+        }
+        Sh.valid = TRUE;
+        return TRUE;
+    }
     gpu = UploadVertices(vertices, count * stride);
     if (!gpu)
         return FALSE;
+    ++EgStatDraws;
+    EgStatVtxDwords += count * stride;
+    ++EgStatStride[stride > 16 ? 16 : stride];
+    if (tcl) ++EgStatTcl;
     EmitVertexBuffer(gpu, count * stride * 4, stride * 4);
     EmitDraw(PrimType[primitive], count);
     Sh.valid = TRUE;
@@ -1212,7 +1341,10 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
         if (op == RADEON3D_EXEC_CLEAR)
             ok = length == RADEON3D_EXEC_CLEAR_DWORDS && Clear(records + walk, resolve, user);
         else if (op >= RADEON3D_EXEC_DRAW_TRIANGLES && op <= RADEON3D_EXEC_DRAW_LINE_LOOP)
-            ok = Draw(records + walk, length, op, resolve, user);
+            ok = Draw(records + walk, length, op, resolve, user, NULL);
+        else if (op == EG_EXEC_ARRAYS)
+            ok = Draw(records + walk, length, RADEON3D_EXEC_DRAW_TRIANGLES, resolve, user,
+                      records + walk);
         else {
             EgEmitFailStage = 0x2202;   /* REUSE_* records: commit mode only */
             ok = FALSE;
@@ -1253,6 +1385,7 @@ static void BeginBuffer(ULONG *words, ULONG capacity)
     Xi.num_banks = 4;
 
     evergreen_set_default_state(&Xi);
+    IndexOffset = 0;
     /* everything the CPU wrote before this buffer: textures, vertices,
      * constants, shaders */
     BEGIN_BATCH(5);

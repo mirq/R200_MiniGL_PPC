@@ -665,6 +665,10 @@ void Lib_glHint(GLenum target, GLenum mode)
 {
     struct MiniGLR200Context *context = CurrentContext();
     if (!StateChangeAllowed(context)) return;
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+    if (EgArraysHint(context, target, mode))
+        return;
+#endif
     if (target == MGL_PERF_COUNTERS_HINT) {
         if (!PerfClockRate()) {
             SetError(context, GL_INVALID_OPERATION);

@@ -48,6 +48,15 @@ struct Radeon3DDevice {
 static ULONG PresentWords[PRESENT_DWORDS];
 
 static struct Radeon3DDevice Device;
+#if R200_PERF_TIMING
+ULONG PerfClock(void);
+ULONG EgStatPresentFenceTicks, EgStatVblankTicks, EgStatPresents;
+#define EG_TICK(v) ULONG v = PerfClock()
+#define EG_ADD(acc, t0) ((acc) += PerfClock() - (t0))
+#else
+#define EG_TICK(v) ULONG v = 0
+#define EG_ADD(acc, t0) ((void)(t0))
+#endif
 static BOOL DeviceOpen;
 static BOOL ScratchAlloc(ULONG bytes, ULONG *offOut);
 
@@ -207,18 +216,27 @@ BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
     for (i = 0; i < n; ++i)
         ib[i] = PresentWords[i];
     (void)ib[n - 1];
-    if (waitVblank && Device.lastFence)
-        /* the frame drawn, the engine idle: the copy then starts at once */
-        (void)Eg3DWait(Device.lastFence);
+    {
+        EG_TICK(t0);
+        if (waitVblank && Device.lastFence)
+            /* the frame drawn, the engine idle: the copy then starts at once */
+            (void)Eg3DWait(Device.lastFence);
+        EG_ADD(EgStatPresentFenceTicks, t0);
+    }
     if (!Eg3DLock())
         return FALSE;
     /* no task switch between seeing the blank start and the kick: a late
      * start could leave the copy finishing after the blank (interrupts
      * still run; the wait is at most a frame) */
     if (waitVblank) {
+        EG_TICK(t1);
         Forbid();
         WaitVblank();
+        EG_ADD(EgStatVblankTicks, t1);
     }
+#if R200_PERF_TIMING
+    ++EgStatPresents;
+#endif
     fence = Eg3DSubmit(off, n);
     if (waitVblank)
         Permit();

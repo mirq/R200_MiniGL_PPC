@@ -3663,6 +3663,10 @@ static BOOL DrawTrianglesTclFast(struct MiniGLR200Context *context,
     return TRUE;
 }
 
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+#include "r200_egarrays.c"
+#endif
+
 void Lib_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
     struct MiniGLR200Context *context = CurrentContext();
@@ -3673,6 +3677,10 @@ void Lib_glDrawArrays(GLenum mode, GLint first, GLsizei count)
     if ((ULONG)count > MAX_VERTICES || !context->vertexArray.enabled) {
         SetError(context, GL_INVALID_OPERATION); return;
     }
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+    if (EgArraysDraw(context, mode, (ULONG)first, (ULONG)count, NULL, 0))
+        return;
+#endif
     if (mode == GL_TRIANGLES && FlatArrayLayoutFast(context) &&
         !context->lightingEnabled && !HardwareSphereMapMask(context) &&
         !SoftwareSphereMapMask(context, 0) && !TclFastOff) {
@@ -3886,6 +3894,10 @@ void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
     if (!indices || !context->vertexArray.enabled || (ULONG)count > MAX_VERTICES) {
         SetError(context, GL_INVALID_OPERATION); return;
     }
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+    if (EgArraysDraw(context, mode, 0, (ULONG)count, (const UBYTE *)indices, type))
+        return;
+#endif
     /* Alias meshes reference each vertex many times: gather every unique
      * index exactly once into a generation-stamped cache. The cache is a
      * fixed 64K-entry table allocated at context creation covering the

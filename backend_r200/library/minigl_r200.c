@@ -404,6 +404,9 @@ static void DestroyContext(struct MiniGLR200Context *context)
 #if !R200_PPC_FRONTEND
         (void)WaitAllSubmissions(context);
         R68KReleaseResident(context);
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+        EgArraysRelease(context);
+#endif
         ReleaseCpSegment(context);
 #endif
         Radeon3DClose(context->device);
@@ -527,9 +530,17 @@ const GLubyte *Lib_glGetString(GLenum name)
      * the standard GL_ARB_multitexture token alone leaves Q3 on the
      * single-texture path. The R200 stack really drives two TMUs
      * (texture_format_probe multitexture section, hardware-verified). */
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+/* RadeonGL's array hints, served natively (r200_egarrays.c) */
+#define R200_BASE_EXTENSIONS \
+        "GL_ARB_multitexture GL_MGL_ARB_multitexture " \
+        "GL_MGL_performance_counters GL_MGL_flat_triangles " \
+        "GL_RGL_static_arrays GL_RGL_dynamic_arrays GL_RGL_arrays_tag"
+#else
 #define R200_BASE_EXTENSIONS \
         "GL_ARB_multitexture GL_MGL_ARB_multitexture " \
         "GL_MGL_performance_counters GL_MGL_flat_triangles"
+#endif
     static const GLubyte extensions[] = R200_BASE_EXTENSIONS;
     /* With the frontend's own command stream: glBlendEquation's subtract
      * modes and glTexEnv(GL_RGB_SCALE / GL_ALPHA_SCALE, 2) on a modulated

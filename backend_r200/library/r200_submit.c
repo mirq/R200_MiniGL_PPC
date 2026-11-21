@@ -249,6 +249,53 @@ void ReleaseCpSegment(struct MiniGLR200Context *context)
         dbg_u32(CpDispatchTicks);
         dbg_newline();
     }
+#if MGL_EVERGREEN && R200_PERF_TIMING
+    {
+        extern ULONG EgStatDraws, EgStatVtxDwords, EgStatConstUploads, EgStatStride[17],
+                     EgStatTcl, EgStatClears, EgStatTexBinds, EgStatShaderBinds,
+                     EgStatPresentFenceTicks, EgStatVblankTicks, EgStatPresents;
+        struct PerfMetrics *p = &context->perf;
+        ULONG k;
+        dbg_puts("[egperf] rate="); dbg_u32(PerfClockRate());
+        dbg_puts(" frames="); dbg_u32(p->frames);
+        dbg_puts(" presents="); dbg_u32(EgStatPresents);
+        dbg_puts(" draws="); dbg_u32(EgStatDraws);
+        dbg_puts(" tcl="); dbg_u32(EgStatTcl);
+        dbg_puts(" clears="); dbg_u32(EgStatClears);
+        dbg_puts(" vtxdw="); dbg_u32(EgStatVtxDwords);
+        dbg_puts(" consts="); dbg_u32(EgStatConstUploads);
+        dbg_puts(" texbinds="); dbg_u32(EgStatTexBinds);
+        dbg_puts(" shbinds="); dbg_u32(EgStatShaderBinds);
+        dbg_newline();
+        dbg_puts("[egperf] strides:");
+        for (k = 0; k < 17; ++k)
+            if (EgStatStride[k]) { dbg_puts(" "); dbg_u32(k); dbg_puts("="); dbg_u32(EgStatStride[k]); }
+        dbg_newline();
+        dbg_puts("[egperf] ticks present_fence="); dbg_u32(EgStatPresentFenceTicks);
+        dbg_puts(" vblank="); dbg_u32(EgStatVblankTicks);
+        dbg_puts(" wait="); dbg_u32(p->waitTicks);
+        dbg_puts(" front="); dbg_u32(R68KFrontTicks);
+        dbg_puts(" frontend="); dbg_u32(p->frontendTicks);
+        dbg_puts(" execute="); dbg_u32(p->executeTicks);
+        dbg_puts(" present="); dbg_u32(p->presentTicks);
+        dbg_puts(" texup="); dbg_u32(p->textureUploadTicks);
+        dbg_puts(" texbytes="); dbg_u32(p->textureUploadBytes);
+        dbg_newline();
+        dbg_puts("[egperf] prims="); dbg_u32(p->primitives);
+        dbg_puts(" invtx="); dbg_u32(p->inputVertices);
+        dbg_puts(" subvtx="); dbg_u32(p->submittedVertices);
+        dbg_puts(" drawrec="); dbg_u32(p->drawRecords);
+        dbg_puts(" merges="); dbg_u32(p->drawMerges);
+        dbg_puts(" submits="); dbg_u32(p->submits);
+        dbg_puts(" fencewaits="); dbg_u32(p->fenceWaits);
+        dbg_puts(" bufw="); dbg_u32(p->bufferWaits);
+        dbg_puts(" texw="); dbg_u32(p->textureWaits);
+        dbg_puts(" drainw="); dbg_u32(p->drainWaits);
+        dbg_puts(" statecalls="); dbg_u32(p->stateCalls);
+        dbg_puts(" noops="); dbg_u32(p->stateNoops);
+        dbg_newline();
+    }
+#endif
     if (context->device && context->cpSegment.CpuAddress &&
         context->cpSegmentEpoch == context->deviceEpoch)
         (void)Radeon3DFreeSegment(context->device, context->cpSegment.Id);

@@ -721,6 +721,23 @@ struct MiniGLR200Context {
     /* vertex stores in aux VRAM surfaces (handles 0x100 + n) */
     struct Radeon3DSurface r68kStore[2];
     ULONG r68kStoreEpoch[2];
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+    /* r200_egarrays.c: the client arrays' ring in VRAM */
+    struct BitMap *egRingBitMap;
+    struct Radeon3DSurface egRing;
+    ULONG egRingEpoch;
+    ULONG egRingCursor[SUBMIT_SLOT_COUNT];
+    ULONG egRingSerial[SUBMIT_SLOT_COUNT];
+    BOOL egArraysOff;
+    BOOL egCacheOff;
+    /* the resident copies (RadeonGL's array hints) */
+    struct BitMap *egCacheBitMap;
+    struct Radeon3DSurface egCacheSurface;
+    struct EgCacheEntry *egCache;
+    ULONG egCacheEpoch, egCacheTop, egCacheGen, egTag;
+    ULONG egCacheHits, egCacheMisses, egCacheFlushes;
+    BOOL egStaticArrays, egStaticIndices, egDynamic, egHintPad;
+#endif
     BOOL r68kPrevValid;
     ULONG r68kPrevBuffer, r68kPrevFence, r68kPrevEpoch;
     /* Segments parked between submit and fence retirement (async
@@ -1085,6 +1102,10 @@ BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
                     struct SubmitSlot *slot,
                     enum SubmitWaitReason reason);
 BOOL WaitAllSubmissions(struct MiniGLR200Context *context);
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+void EgArraysRelease(struct MiniGLR200Context *context);
+BOOL EgArraysHint(struct MiniGLR200Context *context, GLenum target, GLenum mode);
+#endif
 BOOL Submit(struct MiniGLR200Context *context);
 BOOL SubmitAndWait(struct MiniGLR200Context *context);
 void CpResolveRemember(struct MiniGLR200Context *context,

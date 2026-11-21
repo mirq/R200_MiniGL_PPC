@@ -36,6 +36,38 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
                     ULONG srcGpu, ULONG dstGpu, ULONG pitchBytes, ULONG format,
                     ULONG width, ULONG height, BOOL waitVblank);
 
+/* EG_EXEC_ARRAYS: a draw straight from the client's vertex arrays, copied
+ * into VRAM as they are (r200_egarrays.c). A hardware-TCL draw header
+ * (RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS; its vertex-layout options are
+ * ignored) followed by EG_ARRAYS_DWORDS of stream descriptors. Every
+ * attribute is fetched from its own buffer; stride 0 repeats one value. */
+#define EG_EXEC_ARRAYS      0x40UL
+#define EG_ARRAYS_DWORDS    16UL
+#define EGA_PRIM            0   /* RADEON3D_EXEC_DRAW_* */
+#define EGA_COUNT           1   /* indices (or vertices without indices) */
+#define EGA_INDEX_GPU       2
+#define EGA_INDEX_TYPE      3   /* EGA_INDEX_* */
+#define EGA_INDEX_OFFSET    4   /* added to every index (VGT_INDX_OFFSET) */
+#define EGA_FORMATS         5   /* EGA_POS_* | EGA_COL_* */
+#define EGA_VERTS           6   /* elements each buffer holds */
+#define EGA_POS_GPU         7
+#define EGA_POS_STRIDE      8
+#define EGA_COL_GPU         9
+#define EGA_COL_STRIDE      10
+#define EGA_TEX0_GPU        11
+#define EGA_TEX0_STRIDE     12
+#define EGA_TEX1_GPU        13
+#define EGA_TEX1_STRIDE     14
+#define EGA_INDEX_NONE      0UL
+#define EGA_INDEX_16        1UL     /* big-endian 16-bit */
+#define EGA_INDEX_32        2UL     /* big-endian 32-bit */
+#define EGA_POS_SIZE_MASK   0x7UL   /* 2, 3 or 4 floats */
+#define EGA_COL_SHIFT       4
+#define EGA_COL_UBYTE4      0UL     /* R, G, B, A bytes */
+#define EGA_COL_FLOAT3      1UL
+#define EGA_COL_FLOAT4      2UL
+#define EGA_COL_ARGB        3UL     /* A, R, G, B bytes (MGL_UBYTE_ARGB) */
+
 /* eg_device.c */
 struct Radeon3DDevice;
 struct Radeon3DSurface;
