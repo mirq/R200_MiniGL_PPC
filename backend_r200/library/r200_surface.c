@@ -890,7 +890,24 @@ DEFINE_PRECONTEXT_BOOL_CHOOSER(Lib_mglProhibitMipMapping, prohibitMipMapping)
 DEFINE_PRECONTEXT_BOOL_CHOOSER(Lib_mglProposeCloseDesktop, proposeCloseDesktop)
 DEFINE_PRECONTEXT_INT_CHOOSER(Lib_mglChooseTextureBufferSize, textureBufferSize)
 DEFINE_PRECONTEXT_INT_CHOOSER(Lib_mglChooseVertexBufferSize, vertexBufferSize)
-DEFINE_PRECONTEXT_INT_CHOOSER(Lib_mglChooseMtexBufferSize, mtexBufferSize)
+/* Also legal with a live context while no polygon is queued: the queue is
+ * allocated at the next capture, at the new size. */
+void Lib_mglChooseMtexBufferSize(int value)
+{
+    struct MiniGLR200Context *context = CurrentContext();
+    if (context) {
+        if (context->insideBegin || context->mtexQueueCount) {
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        FreeMtexQueue(context);
+    }
+    if (!LibraryBase)
+        return;
+    ObtainSemaphore(&LibraryBase->lock);
+    LibraryBase->mtexBufferSize = (LONG)value;
+    ReleaseSemaphore(&LibraryBase->lock);
+}
 
 /*
  * V19 parity: mglChooseNumberOfBuffers() selects the fullscreen screen

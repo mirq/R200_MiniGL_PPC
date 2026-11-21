@@ -5331,8 +5331,11 @@ static GLboolean VerifyQuakeBurst32(char *detail)
     memset(&log,0,sizeof(log));
     if(!CalibrateChannels(detail)) return GL_FALSE;
     DrawBurst32Scene();
-    /* First quad at (-0.9,-0.9) red base with top-half light (A0 -> 85) => 85,0,0 */
-    CheckRGB(&log,"burst-first", -0.8f,-0.8f, 85,0,0, 10);
+    /* First quad at (-0.9,-0.9): red base; its lightmap t (8..~140)/2048
+     * stays in rows 0-63, which BindBurstLight fills with 0x50 (inverted
+     * light 5/15). The blend keeps base x (1 - 5/15) = 170, the same rule
+     * by which quake.mtex-buffer-capacity's 0xA0 row gives 85. */
+    CheckRGB(&log,"burst-first", -0.8f,-0.8f, 170,0,0, 10);
     /* Middle burst poly should be inside and not black nor white */
     CheckRGB(&log,"burst-mid", 0.0f,0.0f, 0,0,0, 100); /* just ensure not crash, check not white */
     /* Use a more precise check: sample near centre of first quad */

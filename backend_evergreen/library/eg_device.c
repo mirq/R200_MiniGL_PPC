@@ -158,6 +158,25 @@ static void WaitVblank(void)
         ;
 }
 
+/* The surface CRTC 0 scans out, as a GPU address, if it has src's pitch
+ * (else dst's): Evergreen.chip moves the scanout on SetPanning, so with
+ * more than two screen buffers the screen's own bitmap need not be the one
+ * on the monitor. */
+static ULONG ScanoutTarget(const struct Radeon3DSurface *src,
+                           const struct Radeon3DSurface *dst, ULONG bpp)
+{
+    ULONG addr, pitch;
+
+    if (!Device.info.Registers || !(CrtcRead(0x6e70) & 1) || !(CrtcRead(0x6800) & 1))
+        return dst->GpuAddress;
+    addr = CrtcRead(0x6810) & ~0xffUL;                         /* GRPH_PRIMARY_SURFACE_ADDRESS */
+    pitch = (CrtcRead(0x6818) & 0x7fffUL) * bpp;               /* GRPH_PITCH, pixels */
+    if (addr < Device.info.VramGpuBase ||
+        addr - Device.info.VramGpuBase >= Device.info.VramSize || pitch != src->Pitch)
+        return dst->GpuAddress;
+    return addr;
+}
+
 /* The frame in src onto the visible dst with the 3D engine (EgEmitPresent):
  * Picasso96's screen-buffer flip does not move this card's scanout, and its
  * blit path is not safe right after 3D work. Ordered behind the frame on
@@ -180,7 +199,7 @@ BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
     n = EgEmitPresent(PresentWords, PRESENT_DWORDS,
                       (APTR)((UBYTE *)Device.info.Aperture + off + PRESENT_HALF - 256),
                       Device.info.VramGpuBase + off + PRESENT_HALF - 256,
-                      src->GpuAddress, dst->GpuAddress, src->Pitch, src->Format,
+                      src->GpuAddress, ScanoutTarget(src, dst, bpp), src->Pitch, src->Format,
                       width, height, FALSE);
     if (!n)
         return FALSE;
