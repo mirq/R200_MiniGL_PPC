@@ -632,12 +632,13 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
 {
     tex_resource_t tex;
     tex_sampler_t samp;
-    ULONG w = (size & 0xffffUL) + 1, h = (size >> 16) + 1, min, align, stride;
+    ULONG w = (size & 0xffffUL) + 1, h = (size >> 16) + 1, min, stride, levels;
     ULONG gpu = s->gpuAddress + offset;
 
-    /* the frontend's level-0 row stride (TextureLevelLayout) */
-    align = 63UL;                   /* the frontend's Evergreen layout */
-    stride = (w * 4 + align) & ~align;
+    /* the frontend's Evergreen mip tree (TextureLevelLayout): rows in
+     * whole 64 texels, level 1 at the first 256-byte boundary after level 0 */
+    levels = ((state & RADEON3D_TEX_LEVELS_MASK) >> RADEON3D_TEX_LEVELS_SHIFT) + 1;
+    stride = ((w + 63UL) & ~63UL) * 4;
     if (Sh.valid && Sh.tex[unit][0] == gpu && Sh.tex[unit][1] == size &&
         Sh.tex[unit][2] == (state & RADEON3D_TEX_STATE_MASK) && Sh.tex[unit][3] == stride)
         return;
@@ -649,7 +650,7 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     tex.depth = 0;
     tex.dim = SQ_TEX_DIM_2D;
     tex.base = gpu;
-    tex.mip_base = gpu;
+    tex.mip_base = gpu + ((stride * h + 255UL) & ~255UL);
     tex.size = stride * h;
     tex.format = FMT_8_8_8_8;
     tex.num_format_all = SQ_NUM_FORMAT_NORM;
@@ -660,8 +661,8 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     tex.dst_sel_z = SQ_SEL_X;
     tex.dst_sel_w = SQ_SEL_W;
     tex.base_level = 0;
-    tex.last_level = 0;
-    tex.array_mode = ARRAY_LINEAR_GENERAL;
+    tex.last_level = levels - 1;
+    tex.array_mode = ARRAY_LINEAR_ALIGNED;
     evergreen_set_tex_resource(&Xi, &tex, RADEON_GEM_DOMAIN_VRAM);
     CLEAR(samp);
     samp.id = unit;
@@ -679,8 +680,12 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
                           min == RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR)
                              ? SQ_TEX_XY_FILTER_BILINEAR : SQ_TEX_XY_FILTER_POINT;
     samp.z_filter = SQ_TEX_Z_FILTER_NONE;
-    samp.mip_filter = SQ_TEX_Z_FILTER_NONE;     /* level 0 only for now */
-    samp.max_lod = 0;
+    samp.mip_filter = (levels < 2 || min <= RADEON3D_TEX_MIN_LINEAR) ? SQ_TEX_Z_FILTER_NONE
+                    : (min == RADEON3D_TEX_MIN_NEAREST_MIPMAP_LINEAR ||
+                       min == RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR) ? SQ_TEX_Z_FILTER_LINEAR
+                    : SQ_TEX_Z_FILTER_POINT;
+    samp.min_lod = 0;
+    samp.max_lod = (levels - 1) << 6;           /* unsigned 4.6 */
     evergreen_set_tex_sampler(&Xi, &samp);
     Sh.tex[unit][0] = gpu;
     Sh.tex[unit][1] = size;
@@ -1275,6 +1280,21 @@ static ULONG EndBuffer(ULONG *words)
 
 /* --- present: the rendered buffer onto the visible one ------------------- */
 
+/* SURFACE_SYNC on every colour buffer: the CP waits until their writes
+ * reached memory (and invalidates the texture cache behind them). */
+static void SyncColorBuffers(void)
+{
+    RADEONInfoPtr info = &Xi;
+
+    BEGIN_BATCH(5);
+    PACK3(IT_SURFACE_SYNC, 4);
+    E32(CB_ACTION_ENA_bit | (0xffUL << 6) | TC_ACTION_ENA_bit);
+    E32(0xffffffffUL);
+    E32(0);
+    E32(10);
+    END_BATCH();
+}
+
 /* A bit-exact copy with the 3D engine (no format conversion on either
  * side, as the 2D driver's copies: docs/04-endianness.md), optionally after
  * the CP waits for the CRTC's vertical blank. vertCpu/vertGpu: 18 dwords
@@ -1299,6 +1319,11 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
     BeginBuffer(words, capacity);
     StreamSlot = 0;
     StreamPos = StreamSize;                 /* no stream: the constants below need none */
+    /* the frame must be in memory before it is read as a texture: its
+     * colour-buffer writes are flushed asynchronously at the previous
+     * buffer's end, so wait for every colour buffer here (stale 8x8 tiles
+     * otherwise) */
+    SyncColorBuffers();
     memset(&t, 0, sizeof(t));
     t.gpu = dstGpu;
     t.pitch = pitchBytes;
@@ -1396,5 +1421,8 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
         END_BATCH();
     }
     EmitDraw(DI_PT_RECTLIST, 3);
+    /* and the copy must be done before the next frame draws into its
+     * source */
+    SyncColorBuffers();
     return EndBuffer(words);
 }

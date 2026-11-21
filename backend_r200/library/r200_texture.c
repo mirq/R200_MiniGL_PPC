@@ -441,12 +441,25 @@ void TextureLevelLayout(const struct TextureObject *texture, ULONG level,
 {
     ULONG current, w=texture->width, h=texture->height, position=0;
 #if MGL_EVERGREEN
-    /* linear Evergreen textures: rows in whole 64 bytes (16 texels) */
-    ULONG alignment=63UL;
+    /* Evergreen linear-aligned mip tree (libdrm radeon_surface.c,
+     * linear aligned): every level's row in whole 64 texels, level 1 on a
+     * 256-byte boundary, the later levels packed behind it. */
+    for (current=0; current<level; ++current) {
+        position += ((w+63UL)&~63UL)*4UL*h;
+        if (current==0)
+            position=(position+255UL)&~255UL;
+        if (w>1)
+            w>>=1;
+        if (h>1)
+            h>>=1;
+    }
+    *offset=position;
+    *stride=((w+63UL)&~63UL)*4UL;
+    *width=w; *height=h;
+}
 #else
     ULONG alignment=PowerOfTwo(texture->width) &&
                     PowerOfTwo(texture->height) ? 31UL : 63UL;
-#endif
     for (current=0; current<level; ++current) {
         ULONG rowStride=(w*4UL+alignment)&~alignment;
         position += rowStride*h;
@@ -459,6 +472,7 @@ void TextureLevelLayout(const struct TextureObject *texture, ULONG level,
     *stride=(w*4UL+alignment)&~alignment;
     *width=w; *height=h;
 }
+#endif
 
 void MarkTextureDirty(struct MiniGLR200Context *context,
                              struct TextureObject *texture, ULONG level,
@@ -555,10 +569,17 @@ ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
 {
     ULONG total=0, level;
 #if MGL_EVERGREEN
-    ULONG alignment=63UL;
+    for (level=0; level<levels; ++level) {
+        total += ((width+63UL)&~63UL)*4UL*height;
+        if (level==0)
+            total=(total+255UL)&~255UL;
+        if (width>1)
+            width>>=1;
+        if (height>1)
+            height>>=1;
+    }
 #else
     ULONG alignment=PowerOfTwo(width) && PowerOfTwo(height) ? 31UL : 63UL;
-#endif
     for (level=0; level<levels; ++level) {
         ULONG stride=(width*4UL+alignment)&~alignment;
         total += stride*height;
@@ -567,6 +588,7 @@ ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
         if (height>1)
             height>>=1;
     }
+#endif
     return total;
 }
 
