@@ -440,8 +440,13 @@ void TextureLevelLayout(const struct TextureObject *texture, ULONG level,
                                ULONG *width, ULONG *height)
 {
     ULONG current, w=texture->width, h=texture->height, position=0;
+#if MGL_EVERGREEN
+    /* linear Evergreen textures: rows in whole 64 bytes (16 texels) */
+    ULONG alignment=63UL;
+#else
     ULONG alignment=PowerOfTwo(texture->width) &&
                     PowerOfTwo(texture->height) ? 31UL : 63UL;
+#endif
     for (current=0; current<level; ++current) {
         ULONG rowStride=(w*4UL+alignment)&~alignment;
         position += rowStride*h;
@@ -549,7 +554,11 @@ BOOL SyncTextureDirty(struct MiniGLR200Context *context,
 ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
 {
     ULONG total=0, level;
+#if MGL_EVERGREEN
+    ULONG alignment=63UL;
+#else
     ULONG alignment=PowerOfTwo(width) && PowerOfTwo(height) ? 31UL : 63UL;
+#endif
     for (level=0; level<levels; ++level) {
         ULONG stride=(width*4UL+alignment)&~alignment;
         total += stride*height;

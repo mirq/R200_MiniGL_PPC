@@ -472,7 +472,7 @@ static struct Shader *GetShader(ULONG k0, ULONG k1, ULONG k2, BOOL pixel)
     Pad128();
     n = ProgN;
     off = (ShaderUsed + 255UL) & ~255UL;
-    if (off + n * 4 > ShaderSize || ProgN >= 512)
+    if (off + n * 4 > ShaderSize - 256 || ProgN >= 512)   /* last 256: present constants */
         return NULL;
     /* the words are little-endian already (cpu_to_le32 in the macros) */
     ToVram(ShaderOff + off, Prog, n);
@@ -515,10 +515,12 @@ static void EmitTarget(const struct Target *t)
 {
     RADEONInfoPtr info = &Xi;
     ULONG bpp = (t->format == RADEON3D_FORMAT_R5G6B5PC ||
-                 t->format == EG_FORMAT_R5G6B5) ? 2 : 4;
+                 t->format == EG_FORMAT_R5G6B5 || t->format == EG_FORMAT_RAW16) ? 2 : 4;
     ULONG pitchPx = t->pitch / bpp, h = (t->height + 7) & ~7UL, info0, fmt, endian;
 
     switch (t->format) {
+    case EG_FORMAT_RAW16:          fmt = COLOR_5_6_5; endian = ENDIAN_NONE; break;
+    case EG_FORMAT_RAW32:          fmt = COLOR_8_8_8_8; endian = ENDIAN_NONE; break;
     case RADEON3D_FORMAT_R5G6B5PC: fmt = COLOR_5_6_5; endian = ENDIAN_NONE; break;
     case EG_FORMAT_R5G6B5:         fmt = COLOR_5_6_5; endian = ENDIAN_8IN16; break;
     case EG_FORMAT_A8R8G8B8:       fmt = COLOR_8_8_8_8; endian = ENDIAN_8IN32; break;
@@ -528,7 +530,7 @@ static void EmitTarget(const struct Target *t)
      * as the 2D path (eg_draw.c Target) */
     info0 = (endian << ENDIAN_shift) | (fmt << CB_COLOR0_INFO__FORMAT_shift) |
             (ARRAY_LINEAR_GENERAL << CB_COLOR0_INFO__ARRAY_MODE_shift) |
-            ((bpp == 4 ? 1UL : 0UL) << COMP_SWAP_shift) |
+            ((bpp == 4 && t->format != EG_FORMAT_RAW32 ? 1UL : 0UL) << COMP_SWAP_shift) |
             (EXPORT_4C_16BPC << SOURCE_FORMAT_shift) | BLEND_CLAMP_bit;
     BEGIN_BATCH(40);
     EREG(CB_COLOR0_BASE, t->gpu >> 8);
@@ -634,7 +636,7 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     ULONG gpu = s->gpuAddress + offset;
 
     /* the frontend's level-0 row stride (TextureLevelLayout) */
-    align = (!(w & (w - 1)) && !(h & (h - 1))) ? 31UL : 63UL;
+    align = 63UL;                   /* the frontend's Evergreen layout */
     stride = (w * 4 + align) & ~align;
     if (Sh.valid && Sh.tex[unit][0] == gpu && Sh.tex[unit][1] == size &&
         Sh.tex[unit][2] == (state & RADEON3D_TEX_STATE_MASK) && Sh.tex[unit][3] == stride)
@@ -1181,44 +1183,19 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
 
 /* --- one batch ----------------------------------------------------------- */
 
+static void BeginBuffer(ULONG *words, ULONG capacity);
+static ULONG EndBuffer(ULONG *words);
+
 ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
                   const ULONG *records, ULONG recordDwords,
                   MGLPPCEmitResolve resolve, void *user)
 {
-    RADEONInfoPtr info = &Xi;
     ULONG walk = 0;
 
     EgEmitFailStage = 0;
-    EmitOverflow = FALSE;
-    memset(&EmitHw, 0, sizeof(EmitHw));
-    memset(&EmitCp, 0, sizeof(EmitCp));
-    memset(&Accel, 0, sizeof(Accel));
-    memset(&Xi, 0, sizeof(Xi));
-    memset(&Sh, 0, sizeof(Sh));
-    EmitCp.Hw = &EmitHw;
-    EmitCp.Ring = (volatile ULONG *)words;
-    EmitCp.RingDw = 0x40000000UL;      /* no wrap: eg_cp_begin bounds it */
-    EmitCapacity = capacity;
-    Xi.cs = &EmitCp;
-    Xi.accel_state = &Accel;
-    Xi.ChipFamily = CHIP_FAMILY_CEDAR;
-    Xi.num_banks = 4;
+    BeginBuffer(words, capacity);
     StreamSlot = slot % EG_EMIT_SLOTS;
     StreamPos = 0;
-
-    evergreen_set_default_state(&Xi);
-    /* everything the CPU wrote before this buffer: textures, vertices,
-     * constants, shaders */
-    BEGIN_BATCH(5);
-    PACK3(IT_SURFACE_SYNC, 4);
-    E32(TC_ACTION_ENA_bit | SH_ACTION_ENA_bit);
-    E32(0xffffffffUL);
-    E32(0);
-    E32(10);
-    END_BATCH();
-    evergreen_set_screen_scissor(&Xi, 0, 0, 8192, 8192);
-    evergreen_set_window_scissor(&Xi, 0, 0, 8192, 8192);
-
     while (walk + 2 <= recordDwords) {
         ULONG op = records[walk], length = records[walk + 1];
         BOOL ok;
@@ -1246,6 +1223,46 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
         }
         walk += length;
     }
+    return EndBuffer(words);
+}
+
+/* A fresh buffer: the engine's default state, then a flush of everything
+ * the CPU wrote before it (textures, vertices, constants, shaders). */
+static void BeginBuffer(ULONG *words, ULONG capacity)
+{
+    RADEONInfoPtr info = &Xi;
+
+    EmitOverflow = FALSE;
+    memset(&EmitHw, 0, sizeof(EmitHw));
+    memset(&EmitCp, 0, sizeof(EmitCp));
+    memset(&Accel, 0, sizeof(Accel));
+    memset(&Xi, 0, sizeof(Xi));
+    memset(&Sh, 0, sizeof(Sh));
+    EmitCp.Hw = &EmitHw;
+    EmitCp.Ring = (volatile ULONG *)words;
+    EmitCp.RingDw = 0x40000000UL;      /* no wrap: eg_cp_begin bounds it */
+    EmitCapacity = capacity;
+    Xi.cs = &EmitCp;
+    Xi.accel_state = &Accel;
+    Xi.ChipFamily = CHIP_FAMILY_CEDAR;
+    Xi.num_banks = 4;
+
+    evergreen_set_default_state(&Xi);
+    /* everything the CPU wrote before this buffer: textures, vertices,
+     * constants, shaders */
+    BEGIN_BATCH(5);
+    PACK3(IT_SURFACE_SYNC, 4);
+    E32(TC_ACTION_ENA_bit | SH_ACTION_ENA_bit);
+    E32(0xffffffffUL);
+    E32(0);
+    E32(10);
+    END_BATCH();
+    evergreen_set_screen_scissor(&Xi, 0, 0, 8192, 8192);
+    evergreen_set_window_scissor(&Xi, 0, 0, 8192, 8192);
+}
+
+static ULONG EndBuffer(ULONG *words)
+{
     if (EmitOverflow) {
         EgEmitFailStage = 0x2204;
         return 0;
@@ -1254,4 +1271,130 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
     if (EmitCp.Wptr & 1)
         words[EmitCp.Wptr++] = 0x80000000UL;
     return EmitCp.Wptr;
+}
+
+/* --- present: the rendered buffer onto the visible one ------------------- */
+
+/* A bit-exact copy with the 3D engine (no format conversion on either
+ * side, as the 2D driver's copies: docs/04-endianness.md), optionally after
+ * the CP waits for the CRTC's vertical blank. vertCpu/vertGpu: 18 dwords
+ * of VRAM for the rectangle's vertices, owned by the caller. */
+ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
+                    ULONG srcGpu, ULONG dstGpu, ULONG pitchBytes, ULONG format,
+                    ULONG width, ULONG height, BOOL waitVblank)
+{
+    ULONG bpp = (format == RADEON3D_FORMAT_R5G6B5PC || format == EG_FORMAT_R5G6B5) ? 2 : 4;
+    BOOL be = format == EG_FORMAT_R5G6B5 || format == EG_FORMAT_A8R8G8B8;
+    RADEONInfoPtr info = &Xi;
+    struct Target t;
+    struct Depth z;
+    struct VsKey k;
+    struct Shader *vs, *ps;
+    tex_resource_t tex;
+    tex_sampler_t samp;
+    ULONG v[18], i, x[3], y[3], s3[3], t3[3], psc[4] = {0, 0, 0, 0};
+    volatile ULONG *dst = (volatile ULONG *)vertCpu;
+
+    EgEmitFailStage = 0;
+    BeginBuffer(words, capacity);
+    StreamSlot = 0;
+    StreamPos = StreamSize;                 /* no stream: the constants below need none */
+    memset(&t, 0, sizeof(t));
+    t.gpu = dstGpu;
+    t.pitch = pitchBytes;
+    t.height = height;
+    /* the same convention as the draws into this format (and as the 2D
+     * driver's copies): the texture fetch undoes the colour buffer's swap */
+    t.format = format;
+    EmitTarget(&t);
+    memset(&z, 0, sizeof(z));
+    EmitDepth(&z);
+    Sh.valid = FALSE;
+    EmitFragment(0xfUL, 0, 0, 0);
+    Sh.valid = TRUE;
+    Sh.target = t;
+    Sh.depth = z;
+    EmitScissor(0, 0, width, height);
+    Sh.valid = FALSE;
+    EmitRaster(0, CLIP_DISABLE_bit, VTX_XY_FMT_bit | VTX_Z_FMT_bit, NULL, 16);
+    Sh.valid = TRUE;
+    CLEAR(tex);
+    tex.id = 0;
+    tex.w = pitchBytes / bpp;
+    tex.h = height;
+    tex.pitch = pitchBytes / bpp;
+    tex.dim = SQ_TEX_DIM_2D;
+    tex.base = srcGpu;
+    tex.mip_base = srcGpu;
+    tex.size = pitchBytes * height;
+    tex.format = bpp == 2 ? FMT_5_6_5 : FMT_8_8_8_8;
+    tex.num_format_all = SQ_NUM_FORMAT_NORM;
+    tex.endian = !be ? SQ_ENDIAN_NONE : bpp == 2 ? SQ_ENDIAN_8IN16 : SQ_ENDIAN_8IN32;
+    tex.dst_sel_x = SQ_SEL_Z;
+    tex.dst_sel_y = SQ_SEL_Y;
+    tex.dst_sel_z = SQ_SEL_X;
+    tex.dst_sel_w = bpp == 2 ? SQ_SEL_1 : SQ_SEL_W;
+    tex.array_mode = ARRAY_LINEAR_GENERAL;
+    evergreen_set_tex_resource(&Xi, &tex, RADEON_GEM_DOMAIN_VRAM);
+    CLEAR(samp);
+    samp.id = 0;
+    samp.clamp_x = samp.clamp_y = SQ_TEX_CLAMP_LAST_TEXEL;
+    samp.clamp_z = SQ_TEX_WRAP;
+    samp.xy_mag_filter = samp.xy_min_filter = SQ_TEX_XY_FILTER_POINT;
+    evergreen_set_tex_sampler(&Xi, &samp);
+    memset(&k, 0, sizeof(k));
+    k.flags = VS_TEX0; k.posOff = 0; k.tex0Off = 12; k.colOff = 20; k.stride = 24;
+    vs = GetShader(k.flags, ((ULONG)k.posOff << 24) | ((ULONG)k.wOff << 16) |
+                   ((ULONG)k.colOff << 8) | k.tex0Off,
+                   ((ULONG)k.tex1Off << 24) | ((ULONG)k.fogOff << 16) | ((ULONG)k.stride << 8), FALSE);
+    ps = GetShader(PS_TEX0 | PS_TEX0_REPLACE, 0, 0, TRUE);
+    if (!vs || !ps) {
+        EgEmitFailStage = 0x2401;
+        return 0;
+    }
+    Sh.valid = FALSE;
+    BindShaders(vs, ps, 2, FALSE);
+    Sh.valid = TRUE;
+    {
+        /* constants without the stream: the identity and zero live in the
+         * shader cache's last 256 bytes, written once */
+        ULONG off = ShaderOff + ShaderSize - 256;
+        ToVramLe(off, Identity, 16);
+        ToVramLe(off + 64, psc, 4);
+        BEGIN_BATCH(12);
+        EREG(SQ_ALU_CONST_BUFFER_SIZE_VS_0, 1);
+        EREG(SQ_ALU_CONST_CACHE_VS_0, (VramGpu + off) >> 8);
+        EREG(SQ_ALU_CONST_BUFFER_SIZE_PS_0, 1);
+        EREG(SQ_ALU_CONST_CACHE_PS_0, (VramGpu + off + 64) >> 8);
+        END_BATCH();
+    }
+    /* RECTLIST: top-left, top-right, bottom-left (pixels; s, t 0..1) */
+    x[0] = 0; y[0] = 0; s3[0] = 0; t3[0] = 0;
+    x[1] = width; y[1] = 0; s3[1] = 1; t3[1] = 0;
+    x[2] = 0; y[2] = height; s3[2] = 0; t3[2] = 1;
+    for (i = 0; i < 3; ++i) {
+        v[i * 6 + 0] = FloatOf(x[i], 1);
+        v[i * 6 + 1] = FloatOf(y[i], 1);
+        v[i * 6 + 2] = 0;
+        v[i * 6 + 3] = s3[i] ? FloatOf(width, pitchBytes / bpp) : 0;
+        v[i * 6 + 4] = t3[i] ? 0x3f800000UL : 0;
+        v[i * 6 + 5] = 0xffffffffUL;
+    }
+    for (i = 0; i < 18; ++i)
+        dst[i] = v[i];
+    EmitVertexBuffer(vertGpu, 72, 24);
+    if (waitVblank) {
+        /* WAIT_REG_MEM: CRTC0 status, V_BLANK set */
+        BEGIN_BATCH(7);
+        PACK3(0x3C, 6);                     /* WAIT_REG_MEM */
+        E32(3);                             /* function equal, register space */
+        E32(0x6e8cUL >> 2);
+        E32(0);
+        E32(1);                             /* reference */
+        E32(1);                             /* mask */
+        E32(10);                            /* poll interval */
+        END_BATCH();
+    }
+    EmitDraw(DI_PT_RECTLIST, 3);
+    return EndBuffer(words);
 }

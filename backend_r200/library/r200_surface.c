@@ -1203,6 +1203,18 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
     }
     dbg_puts("[mgl] fs=ok buffers=");
     dbg_u32(context->screenBufferCount);
+#if MGL_EVERGREEN
+    {
+        ULONG index;
+        dbg_puts(" screen=");
+        dbg_hex32(p96GetBitMapAttr(context->screen->RastPort.BitMap, P96_BITMAP_MEMORY));
+        for (index = 0; index < context->screenBufferCount; ++index) {
+            dbg_puts(" sb=");
+            dbg_hex32(p96GetBitMapAttr(context->screenBuffers[index]->sb_BitMap,
+                                       P96_BITMAP_MEMORY));
+        }
+    }
+#endif
     dbg_newline();
     {
         TEXT present[12];
@@ -1483,6 +1495,24 @@ void RecordPerfFrame(struct MiniGLR200Context *context)
 void Lib_mglSwitchDisplay(void)
 {
     struct MiniGLR200Context *context = CurrentContext();
+#if MGL_EVERGREEN
+    /* Fullscreen on the HD 5450: draw into one back buffer, copy it onto
+     * the screen's own bitmap (the scanned-out one) with the 3D engine,
+     * from the vertical blank on when sync is on (EgPresent). */
+    if (context && context->fullscreen && !context->singleBuffer &&
+        context->screenBufferCount >= 2 && !context->insideBegin &&
+        context->drawBuffer != GL_FRONT) {
+        if (context->drawingBuffer == 0) {
+            context->drawingBuffer = 1;
+        }
+        if (!Submit(context) ||
+            !EgPresent(context->device, &context->surfaces[context->drawingBuffer],
+                       &context->surfaces[0], context->width, context->height,
+                       FALSE /* the CP's vblank wait stalled the ring: off for now */))
+            SetError(context, GL_INVALID_OPERATION);
+        return;
+    }
+#endif
 #if R200_PPC_FRONTEND
     ULONG perfStart = 0, executeBefore = 0, waitBefore = 0;
     if (!context)

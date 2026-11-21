@@ -38,10 +38,18 @@ struct Radeon3DDevice {
     struct EgAux aux[MAX_AUX];
     ULONG gpuOnlyTop;
     ULONG lastFence;
+    ULONG presentOff;           /* scratch: two halves of PRESENT_HALF bytes */
+    ULONG presentFence[2];
+    ULONG presentNext;
 };
+
+#define PRESENT_HALF    0x2000UL
+#define PRESENT_DWORDS  ((PRESENT_HALF - 256UL) / 4UL)
+static ULONG PresentWords[PRESENT_DWORDS];
 
 static struct Radeon3DDevice Device;
 static BOOL DeviceOpen;
+static BOOL ScratchAlloc(ULONG bytes, ULONG *offOut);
 
 static ULONG Caps(void)
 {
@@ -71,8 +79,14 @@ static void FillInfo(struct Radeon3DInfo *info)
 struct Radeon3DDevice *Radeon3DOpen(ULONG requestedVersion, struct Radeon3DInfo *info)
 {
     (void)requestedVersion;
-    if (DeviceOpen)
-        return NULL;
+    if (DeviceOpen) {
+        /* single-context library: a previous owner that died without
+         * mglDeleteContext (a client stopped with Ctrl-C) left it open;
+         * let its last work finish and take the device over */
+        if (Device.lastFence)
+            (void)Eg3DWait(Device.lastFence);
+        DeviceOpen = FALSE;
+    }
     if (!Eg3DBase)
         Eg3DBase = OpenLibrary((CONST_STRPTR)"Evergreen.chip", 1);
     if (!Eg3DBase)
@@ -85,6 +99,14 @@ struct Radeon3DDevice *Radeon3DOpen(ULONG requestedVersion, struct Radeon3DInfo 
         return NULL;
     }
     Device.gpuOnlyTop = Device.info.GpuOnlyOffset;
+    if (!ScratchAlloc(2 * PRESENT_HALF, &Device.presentOff)) {
+        CloseLibrary(Eg3DBase);
+        Eg3DBase = NULL;
+        return NULL;
+    }
+    Device.seg[MAX_SEGS - 1].used = TRUE;           /* keep it out of AllocSegment */
+    Device.seg[MAX_SEGS - 1].off = Device.presentOff;
+    Device.seg[MAX_SEGS - 1].bytes = 2 * PRESENT_HALF;
     EgEmitInit(Device.info.Aperture, Device.info.VramGpuBase,
                Device.info.ScratchOffset, SHADER_BYTES,
                Device.info.ScratchOffset + SHADER_BYTES, STREAM_BYTES);
@@ -109,6 +131,47 @@ BOOL Radeon3DGetInfo(struct Radeon3DDevice *device, struct Radeon3DInfo *info)
     if (device != &Device || !DeviceOpen)
         return FALSE;
     FillInfo(info);
+    return TRUE;
+}
+
+/* The frame in src onto the visible dst with the 3D engine (EgEmitPresent):
+ * Picasso96's screen-buffer flip does not move this card's scanout, and its
+ * blit path is not safe right after 3D work. Ordered behind the frame on
+ * the one ring. */
+BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
+               const struct Radeon3DSurface *dst, ULONG width, ULONG height,
+               BOOL waitVblank)
+{
+    ULONG half, off, n, bpp, i, fence;
+    volatile ULONG *ib;
+
+    if (device != &Device || !DeviceOpen || !src || !dst || src->Pitch != dst->Pitch)
+        return FALSE;
+    bpp = (src->Format == RADEON3D_FORMAT_R5G6B5PC || src->Format == EG_FORMAT_R5G6B5) ? 2 : 4;
+    half = Device.presentNext;
+    Device.presentNext ^= 1;
+    if (Device.presentFence[half] && !Eg3DDone(Device.presentFence[half]))
+        (void)Eg3DWait(Device.presentFence[half]);
+    off = Device.info.ScratchOffset + Device.presentOff + half * PRESENT_HALF;
+    n = EgEmitPresent(PresentWords, PRESENT_DWORDS,
+                      (APTR)((UBYTE *)Device.info.Aperture + off + PRESENT_HALF - 256),
+                      Device.info.VramGpuBase + off + PRESENT_HALF - 256,
+                      src->GpuAddress, dst->GpuAddress, src->Pitch, src->Format,
+                      width, height, waitVblank);
+    if (!n)
+        return FALSE;
+    ib = (volatile ULONG *)((UBYTE *)Device.info.Aperture + off);
+    for (i = 0; i < n; ++i)
+        ib[i] = PresentWords[i];
+    (void)ib[n - 1];
+    if (!Eg3DLock())
+        return FALSE;
+    fence = Eg3DSubmit(off, n);
+    Eg3DUnlock();
+    if (!fence)
+        return FALSE;
+    Device.presentFence[half] = fence;
+    Device.lastFence = fence;
     return TRUE;
 }
 
