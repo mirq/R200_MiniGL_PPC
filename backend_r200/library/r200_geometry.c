@@ -1570,7 +1570,7 @@ static struct ScreenVertex InterpolateScreenVertex(
     for (shift = 0; shift < 32; shift += 8) {
         GLfloat first = (GLfloat)((a->color >> shift) & 255UL);
         GLfloat second = (GLfloat)((b->color >> shift) & 255UL);
-        ULONG channel = (ULONG)(first + (second - first) * amount + 0.5f);
+        ULONG channel = (ULONG)ColorByte((first + (second - first) * amount) / 255.0f);
         if (channel > 255UL) channel = 255UL;
         output.color |= channel << shift;
     }

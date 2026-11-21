@@ -694,6 +694,13 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
     ULONG sourceBytes, levelOffset, levelStride, levelWidth, levelHeight;
     ULONG sourceWidth, sourceStride, row, column;
     const UBYTE *source;
+    /* classic MiniGL's 16-bit form (Silent Hill): the packed type in the
+     * format argument, GL_UNSIGNED_SHORT as the type */
+    if ((format==MGL_UNSIGNED_SHORT_5_6_5 || format==MGL_UNSIGNED_SHORT_4_4_4_4) &&
+        type==GL_UNSIGNED_SHORT) {
+        type=format;
+        format=type==MGL_UNSIGNED_SHORT_5_6_5 ? GL_RGB : GL_RGBA;
+    }
     if (!pixels || !SourceFormatBytes(format,type,&sourceBytes))
         return FALSE;
     TextureLevelLayout(texture,level,&levelOffset,&levelStride,
@@ -718,6 +725,13 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
                 ConvertPixel(context,source+row*sourceStride+column*sourceBytes,
                              format,type,texture->image+levelOffset+
                              (yoffset+row)*levelStride+(xoffset+column)*4UL);
+        }
+        if (texture->alphaBits) {
+            UBYTE *alpha=texture->image+levelOffset+(yoffset+row)*levelStride+
+                         xoffset*4UL+3UL;
+            for (column=0; column<width; ++column, alpha+=4)
+                *alpha = texture->alphaBits==1 ? (*alpha>=128 ? 255 : 0)
+                                               : (UBYTE)((*alpha>>4)*17);
         }
     }
     texture->definedLevels |= 1UL<<level;
@@ -850,7 +864,9 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
      * L8 to L, LA8 to LA, A8 to A). That is a deliberate precision
      * widening (8888 storage), consistent with the semantic-R200
      * frontend; Mesa's exact 565/4444 packing is intentionally not
-     * reproduced. GL_RGBA4 has no enumerator in mgl/gl.h (inserting
+     * reproduced -- except the alpha precision (texture->alphaBits):
+     * GL_RGB5_A1's single alpha bit is what makes Quake's palette alpha
+     * 0xAA opaque. GL_RGBA4 has no enumerator in mgl/gl.h (inserting
      * one would renumber the shared position-valued enum), so the
      * real-GL value is matched literally. */
     switch (internalFormat) {
@@ -894,6 +910,8 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
         texture->dirtyRects=newDirtyRects;
         texture->imageBytes=bytes; texture->width=(ULONG)width;
         texture->height=(ULONG)height; texture->levelCount=levels;
+        texture->alphaBits=internalFormat==GL_RGB5_A1 ? 1 :
+                           internalFormat==0x8052 /* GL_RGBA4 */ ? 4 : 0;
         context->texMemCurrent += (GLint)bytes;
         if (context->texMemCurrent > context->texMemPeak)
             context->texMemPeak = context->texMemCurrent;
