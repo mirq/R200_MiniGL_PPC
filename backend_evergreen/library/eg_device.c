@@ -212,9 +212,16 @@ BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
         (void)Eg3DWait(Device.lastFence);
     if (!Eg3DLock())
         return FALSE;
-    if (waitVblank)
+    /* no task switch between seeing the blank start and the kick: a late
+     * start could leave the copy finishing after the blank (interrupts
+     * still run; the wait is at most a frame) */
+    if (waitVblank) {
+        Forbid();
         WaitVblank();
+    }
     fence = Eg3DSubmit(off, n);
+    if (waitVblank)
+        Permit();
     Eg3DUnlock();
     if (!fence)
         return FALSE;
