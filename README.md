@@ -1,9 +1,9 @@
-# MiniGL V19 for WarpOS/PPC — direct-R200 stack
+# MiniGL 29.1 for WarpOS/PPC — direct-R200 stack
 
 MiniGL is an OpenGL-1.x-style 3D API for Amiga systems: a small `gl*`/`mgl*`
 surface, one global current context, and a positional **dispatch table**
 instead of per-call library opening. This repository builds the **WarpOS/PPC
-implementation** of MiniGL V19 for the Amiga 4000 (68060) + Prometheus +
+implementation** of MiniGL 29.1 (API 29, dispatch ABI 5; V19 lineage) for the Amiga 4000 (68060) + Prometheus +
 Radeon 9200 + PMC MPC7410/PPC configuration.
 
 The primary product is the **direct-R200 stack**: a PPC DLL (`minigl_ppc.dll`)
@@ -104,10 +104,11 @@ its own directory. Full ABI and synchronization rules:
 ## Design rules
 
 - **One indirect call per GL call**, no 68k transitions in the hot path.
-- **Bounded resources**: two 8192-dword submit slots, an 8 x 8192-dword ring,
+- **Bounded resources**: two 8192-dword submit slots, a 32 x 8192-dword ring,
   four vertex segments, ≤2 MiB texture staging, no per-frame heap churn.
-- **The PPC never touches PCI, MMIO, the CP ring or VRAM.** Only the driver
-  service does; caps are negotiated at context creation.
+- **The PPC never touches PCI, MMIO or the CP ring** outside the opt-in lease
+  mode; it writes only leased VRAM segments. Caps are negotiated at context
+  creation.
 - **Both CPUs are big-endian**; byte swapping is confined to GPU-consumed
   payloads at the aperture boundary.
 - **Diagnostics are opt-in**; console/trace logging is compiled out of release
@@ -116,7 +117,7 @@ its own directory. Full ABI and synchronization rules:
 ## Backends
 
 - **direct-R200 (primary)** — PPC frontend + 68k host + `Radeon9200.chip`
-  (`Makefile.dll.r200.gcc`). Protocol 15, ring control v6, mailbox v1.
+  (`Makefile.dll.r200.gcc`). Protocol 16, ring control v7, mailbox v1.
 - **legacy mglQ3/Warp3D** — shared GL core over `Warp3DPPC.library`
   (`Makefile.dll.gcc`). Same dispatch ABI and client flow, different rendering
   architecture; not used on the R200 target.

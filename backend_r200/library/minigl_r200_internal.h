@@ -106,7 +106,12 @@ ULONG DepthStorageWidth(ULONG width);
 #define SCREEN_VERTEX_CAPACITY MAX_SCREEN_VERTICES
 #define MAX_RECORD_DWORDS RADEON3D_MAX_BATCH_DWORDS
 #define MAX_GENERATED_DWORDS RADEON3D_MAX_BATCH_DWORDS
-#if defined(R200_CPEMIT_68K) && R200_CPEMIT_68K
+#ifndef R200_CPEMIT_68K
+/* 0 outside the minigl68k build (Makefile_dispatch_r68k.gcc): C code tests
+ * it as a value, not only in #if */
+#define R200_CPEMIT_68K 0
+#endif
+#if R200_CPEMIT_68K
 /* minigl68k: a third batch in flight, so a GPU-heavy batch (the static
  * world) does not stall the CPU at the next slot */
 #define SUBMIT_SLOT_COUNT 3UL
