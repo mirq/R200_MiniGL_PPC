@@ -335,8 +335,10 @@ static ULONG EgRingAlloc(struct MiniGLR200Context *context, ULONG bytes,
 }
 
 /* Longword stores only: no CopyMem or MOVE16 into VRAM. */
+static ULONG EgCopiedLongs, EgImmLongs;
 static void EgCopyLongs(volatile ULONG *dst, const ULONG *src, ULONG longs)
 {
+    EgCopiedLongs += longs;
     while (longs >= 4UL) {
         dst[0] = src[0];
         dst[1] = src[1];
@@ -860,6 +862,7 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
     ga[EGA_COUNT] += n;
     ga[EGA_VERTS] += n;
     record[10] += n;
+    EgImmLongs += n * strideDw;
     /* the vertices, in list order */
     {
 #define EG_PUT(vx) do { const struct Vertex *p_ = (vx); \
@@ -974,6 +977,10 @@ void EgArraysRelease(struct MiniGLR200Context *context)
                 dbg_u32(EgBumpN[k2]);
             }
         }
+        dbg_puts(" copiedlongs=");
+        dbg_u32(EgCopiedLongs);
+        dbg_puts(" immlongs=");
+        dbg_u32(EgImmLongs);
         dbg_puts(" submits tex/arrays=");
         dbg_u32(EgSubmitWhy[0]);
         dbg_puts("/");

@@ -111,7 +111,29 @@ void *memmove(void *dst, const void *src, size_t n)
 
 void *memset(void *dst, int value, size_t n)
 {
+    /* longword stores: the emitter clears its state structures with this
+     * on every draw (Evergreen) */
     unsigned char *d = (unsigned char *)dst;
+    unsigned long v = (unsigned char)value;
+    v |= v << 8;
+    v |= v << 16;
+    while (n && ((unsigned long)d & 3)) {
+        *d++ = (unsigned char)value;
+        --n;
+    }
+    {
+        unsigned long *dl = (unsigned long *)d;
+        while (n >= 16) {
+            dl[0] = v; dl[1] = v; dl[2] = v; dl[3] = v;
+            dl += 4;
+            n -= 16;
+        }
+        while (n >= 4) {
+            *dl++ = v;
+            n -= 4;
+        }
+        d = (unsigned char *)dl;
+    }
     while (n--) *d++ = (unsigned char)value;
     return dst;
 }
