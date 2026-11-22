@@ -29,7 +29,7 @@ LIBNAME ?= minigl.library
 BASE_CFLAGS = -std=gnu99 $(OPT) -mcpu=$(CPU) -m68881 -noixemul -ffreestanding \
 	-fno-builtin -fno-baserel -D__M68K__ -DMINIGL_BACKEND_R200 \
 	-DMINIGL_LIBRARY_BUILD -DR200_PERF_TIMING=$(PERF_TIMING) -DMGL_DEBUG_OUTPUT=$(DEBUG_OUTPUT) \
-	-DR200_STREAM_COMMITS=0 -DR200_ASYNC_ROTATION=1 -DR200_CPEMIT_68K=1 -DMGL_EVERGREEN=1
+	-DR200_STREAM_COMMITS=0 -DR200_ASYNC_ROTATION=1 -DR200_CPEMIT_68K=1 -DMGL_EVERGREEN=1 -DEG_CP_MIRROR=1
 # Frontend: the Evergreen overrides first, then the backend headers.
 FE_CFLAGS = $(BASE_CFLAGS) -I$(EG)/include -I$(EG)/library -I$(R3D) -Ithird_party/warp3d/include \
 	-I$(BK)/library -I$(BK)/include -I$(TOP)/include -Iinclude

@@ -60,12 +60,17 @@ static BOOL EmitOverflow;
  * (runs of 3-dword packets otherwise). Forgotten at every buffer start. */
 static ULONG CoalHdr = ~0UL, CoalEnd, CoalReg;
 
+/* write-through target of the buffer being built (eg_cp.h); NULL: off */
+volatile ULONG *EgCpMirror;
+
 static void EgCtxReg(ULONG reg, ULONG val)
 {
     if (reg >= SET_CONTEXT_REG_offset && reg < SET_CONTEXT_REG_end) {
         if (CoalHdr != ~0UL && EmitCp.Wptr == CoalEnd && reg == CoalReg + 4UL &&
             !EmitOverflow) {
             EmitCp.Ring[CoalHdr] += 1UL << 16;
+            if (EgCpMirror)
+                EgCpMirror[CoalHdr] = EmitCp.Ring[CoalHdr];
         } else {
             CoalHdr = EmitCp.Wptr;
             eg_cp_out(&EmitCp, RADEON_CP_PACKET3 | (IT_SET_CONTEXT_REG << 8) | (1UL << 16));
@@ -1943,7 +1948,11 @@ static ULONG EndBuffer(ULONG *words)
     }
     /* the CP wants an even-length buffer as the classic path padded it */
     if (EmitCp.Wptr & 1)
+    {
+        if (EgCpMirror)
+            EgCpMirror[EmitCp.Wptr] = 0x80000000UL;
         words[EmitCp.Wptr++] = 0x80000000UL;
+    }
     return EmitCp.Wptr;
 }
 

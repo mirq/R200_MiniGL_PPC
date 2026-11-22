@@ -394,10 +394,17 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
         count = 0;
         MGLPPCEmitFailStage = 0x3001UL;
     } else {
+        extern volatile ULONG *EgCpMirror;
         EGT_BEGIN();
+        /* written through to the slot as it is built: the bus writes
+         * overlap the emitter's work (eg_cp.h EG_CP_MIRROR) */
+        EgCpMirror = (volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
+                                        context->buildSlot * R200_CP_SLOT_DWORDS *
+                                        sizeof(ULONG));
         count = EgEmitBatch(staging, R200_CP_SLOT_DWORDS, context->buildSlot,
                             slot->records, slot->recordCount,
                             CpResolveSurface, context);
+        EgCpMirror = NULL;
         EGT_END(3);
         MGLPPCEmitFailStage = count ? 0 : (EgEmitFailStage ? EgEmitFailStage : 0x3002UL);
     }
@@ -445,7 +452,7 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
     }
     /* Classic CP indirect dispatch needs an even dword count. */
     if (count & 1UL)
-        staging[count++] = 0x80000000UL;
+        staging[count++] = 0x80000000UL;    /* EndBuffer pads already */
 #if MGL_EVERGREEN
     {
         /* MGLEgDump=n: the n-th command buffer to PI0:mgldiag/ib.bin */
@@ -476,8 +483,10 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
      * 68k's own longs */
     {
     EGT_BEGIN();
-    for (index = 0; index < count; ++index)
-        destination[index] = staging[index];
+    /* the emitter wrote the slot through already; only an odd count's
+     * padding above is new */
+    if (count >= 1UL)
+        destination[count - 1UL] = staging[count - 1UL];
     EGT_END(4);
     }
 #else
