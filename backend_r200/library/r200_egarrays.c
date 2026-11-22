@@ -137,6 +137,8 @@ static struct BitMap *EgAllocBlock(struct MiniGLR200Context *context, ULONG byte
     return bm;
 }
 
+static ULONG EgMask = 31;
+
 static BOOL EgRingReady(struct MiniGLR200Context *context)
 {
     ULONG index;
@@ -152,6 +154,12 @@ static BOOL EgRingReady(struct MiniGLR200Context *context)
         }
         if (GetVar("MGLEgCache", v, sizeof(v), 0) > 0 && v[0] == '0')
             context->egCacheOff = TRUE;
+        /* MGLEgMask: bit 0 ARGB colours, 1 other colour arrays, 2 constant
+         * colour, 3 indexed, 4 glDrawArrays (default all) */
+        EgMask = 31;
+        if (GetVar("MGLEgMask", v, sizeof(v), 0) > 0)
+            EgMask = (ULONG)(v[0] - '0') * (v[1] >= '0' ? 10UL : 1UL) +
+                     (v[1] >= '0' ? (ULONG)(v[1] - '0') : 0UL);
     }
     if (context->egRingBitMap) {
         p96FreeBitMap(context->egRingBitMap);
@@ -240,6 +248,8 @@ static BOOL EgCacheReady(struct MiniGLR200Context *context)
     return TRUE;
 }
 
+static ULONG EgMissBytes[2], EgMissCount[2], EgHitCount[2];
+
 static ULONG EgCacheHash(const UBYTE *start, ULONG bytes, ULONG tag, ULONG gen)
 {
     ULONG h = (ULONG)start * 2654435761UL;
@@ -250,10 +260,11 @@ static ULONG EgCacheHash(const UBYTE *start, ULONG bytes, ULONG tag, ULONG gen)
 /* The GPU address of a resident copy of bytes at start, copied in on a
  * miss; 0: not cacheable now (the caller streams it). A full cache is
  * emptied once every batch that may read it has retired. */
-static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, ULONG bytes)
+static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, ULONG bytes,
+                        BOOL tagged)
 {
     struct EgCacheEntry *e, *free = NULL;
-    ULONG tag = context->egTag, gen = context->egCacheGen, h, probe, off;
+    ULONG tag = tagged ? context->egTag : 0, gen = context->egCacheGen, h, probe, off;
 
     if (!EgCacheReady(context) || bytes > EG_CACHE_BYTES / 4UL)
         return 0;
@@ -267,6 +278,7 @@ static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, U
         }
         if (e->start == start && e->bytes == bytes && e->tag == tag && e->gen == gen) {
             context->egCacheHits++;
+            EgHitCount[tag ? 1 : 0]++;
             return context->egCacheSurface.GpuAddress + e->off;
         }
         if (!free && e->gen != gen)
@@ -291,6 +303,8 @@ static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, U
     free->off = off;
     context->egCacheTop = off + bytes;
     context->egCacheMisses++;
+    EgMissBytes[tag ? 1 : 0] += bytes;
+    EgMissCount[tag ? 1 : 0]++;
     return context->egCacheSurface.GpuAddress + off;
 }
 
@@ -428,6 +442,9 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
             EG_FAIL();
     }
 
+    if (!(EgMask & (haveColor ? (colFormat == EGA_COL_ARGB ? 1UL : 2UL) : 4UL)) ||
+        !(EgMask & (indices ? 8UL : 16UL)))
+        EG_FAIL();
     /* the element range the draw reads */
     if (indices) {
         if (context->lockedCount) {
@@ -527,10 +544,12 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
             indexCached = 0;
             if (context->egStaticArrays && !context->egDynamic)
                 for (i = 0; i < (merged ? 1UL : regions); ++i)
-                    cached[i] = EgCacheGet(context, region[i].start, region[i].bytes);
+                    /* the tag keys the model format (with colours) only */
+                    cached[i] = EgCacheGet(context, region[i].start, region[i].bytes,
+                                           haveColor);
             if (indices && context->egStaticIndices && type == GL_UNSIGNED_SHORT &&
                 !((ULONG)indices & 3UL))
-                indexCached = EgCacheGet(context, indices, indexBytes);
+                indexCached = EgCacheGet(context, indices, indexBytes, FALSE);
             if (flushes == context->egCacheFlushes)
                 break;
         }
@@ -668,6 +687,24 @@ void EgArraysRelease(struct MiniGLR200Context *context)
     dbg_u32(context->egCacheMisses);
     dbg_puts(" flushes=");
     dbg_u32(context->egCacheFlushes);
+    dbg_puts(" untagged hit/miss/bytes=");
+    dbg_u32(EgHitCount[0]); dbg_puts("/"); dbg_u32(EgMissCount[0]); dbg_puts("/");
+    dbg_u32(EgMissBytes[0]);
+    dbg_puts(" tagged=");
+    dbg_u32(EgHitCount[1]); dbg_puts("/"); dbg_u32(EgMissCount[1]); dbg_puts("/");
+    dbg_u32(EgMissBytes[1]);
+    {
+        extern ULONG UpStatKey[8], UpStatTexels[8], UpStatCalls[8];
+        dbg_puts(" uploads:");
+        for (i = 0; i < 8UL && UpStatKey[i]; ++i) {
+            dbg_puts(" ");
+            dbg_hex32(UpStatKey[i]);
+            dbg_puts("=");
+            dbg_u32(UpStatCalls[i]);
+            dbg_puts("/");
+            dbg_u32(UpStatTexels[i]);
+        }
+    }
     dbg_puts(" old path:");
     for (i = 0; i < 16UL && EgFailLine[i]; ++i) {
         dbg_puts(" L");

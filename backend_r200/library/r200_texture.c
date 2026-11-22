@@ -63,10 +63,10 @@ static void R68KCopyRows(struct TextureObject *texture,
         return;
     TextureLevelLayout(texture, 0, &levelOffset, &levelStride,
                        &levelWidth, &levelHeight);
-    rowBytes = ((ULONG)rect->right - (ULONG)rect->left) * 4UL;
+    rowBytes = ((ULONG)rect->right - (ULONG)rect->left) * texture->texelBytes;
     for (row = rect->top; row < rect->bottom; ++row) {
         ULONG offset = levelOffset + row * levelStride +
-                       (ULONG)rect->left * 4UL;
+                       (ULONG)rect->left * texture->texelBytes;
         CopyMem(texture->image + offset, output + offset, rowBytes);
     }
 }
@@ -427,6 +427,9 @@ ULONG TextureState(const struct MiniGLR200Context *context,
     }
     state |= minFilter << RADEON3D_TEX_MIN_SHIFT;
     state |= (levels - 1UL) << RADEON3D_TEX_LEVELS_SHIFT;
+#if MGL_EVERGREEN
+    state |= (ULONG)texture->texelFormat << EG_TEX_FORMAT_SHIFT;
+#endif
     state |= (texture->contentSerial & 0xffffUL) <<
              RADEON3D_TEX_CONTENT_SHIFT;
     return state;
@@ -444,8 +447,10 @@ void TextureLevelLayout(const struct TextureObject *texture, ULONG level,
     /* Evergreen linear-aligned mip tree (libdrm radeon_surface.c,
      * linear aligned): every level's row in whole 64 texels, level 1 on a
      * 256-byte boundary, the later levels packed behind it. */
+    ULONG bpe=texture->texelBytes ? texture->texelBytes : 4UL;
+    /* rows in whole 256 bytes: 64 texels of 4 bytes, 128 of 2 */
     for (current=0; current<level; ++current) {
-        position += ((w+63UL)&~63UL)*4UL*h;
+        position += ((w*bpe+255UL)&~255UL)*h;
         if (current==0)
             position=(position+255UL)&~255UL;
         if (w>1)
@@ -454,7 +459,7 @@ void TextureLevelLayout(const struct TextureObject *texture, ULONG level,
             h>>=1;
     }
     *offset=position;
-    *stride=((w+63UL)&~63UL)*4UL;
+    *stride=(w*bpe+255UL)&~255UL;
     *width=w; *height=h;
 }
 #else
@@ -545,10 +550,10 @@ BOOL SyncTextureDirty(struct MiniGLR200Context *context,
         dirty = &texture->dirtyRects[level];
         TextureLevelLayout(texture, level, &levelOffset, &levelStride,
                            &levelWidth, &levelHeight);
-        rowBytes = ((ULONG)dirty->right - (ULONG)dirty->left) * 4UL;
+        rowBytes = ((ULONG)dirty->right - (ULONG)dirty->left) * texture->texelBytes;
         for (row = dirty->top; row < dirty->bottom; ++row) {
             ULONG offset = levelOffset + row * levelStride +
-                           (ULONG)dirty->left * 4UL;
+                           (ULONG)dirty->left * texture->texelBytes;
             CopyMem(texture->image + offset, output + offset, rowBytes);
             copied += rowBytes;
         }
@@ -565,12 +570,14 @@ BOOL SyncTextureDirty(struct MiniGLR200Context *context,
     return TRUE;
 }
 
-ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
+/* bytes of a width x height mip tree of levels levels, bpe bytes a texel
+ * (TextureLevelLayout's layout) */
+static ULONG TextureStorageBytesBpe(ULONG width, ULONG height, ULONG levels, ULONG bpe)
 {
     ULONG total=0, level;
 #if MGL_EVERGREEN
     for (level=0; level<levels; ++level) {
-        total += ((width+63UL)&~63UL)*4UL*height;
+        total += ((width*bpe+255UL)&~255UL)*height;
         if (level==0)
             total=(total+255UL)&~255UL;
         if (width>1)
@@ -580,6 +587,7 @@ ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
     }
 #else
     ULONG alignment=PowerOfTwo(width) && PowerOfTwo(height) ? 31UL : 63UL;
+    (void)bpe;
     for (level=0; level<levels; ++level) {
         ULONG stride=(width*4UL+alignment)&~alignment;
         total += stride*height;
@@ -590,6 +598,11 @@ ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
     }
 #endif
     return total;
+}
+
+ULONG TextureStorageBytes(ULONG width, ULONG height, ULONG levels)
+{
+    return TextureStorageBytesBpe(width, height, levels, 4UL);
 }
 
 ULONG FullMipLevelCount(ULONG width, ULONG height)
@@ -685,6 +698,8 @@ void ConvertPixel(struct MiniGLR200Context *context,
     destination[0]=b; destination[1]=g; destination[2]=r; destination[3]=a;
 }
 
+ULONG UpStatKey[8], UpStatTexels[8], UpStatCalls[8];
+
 BOOL UploadTextureRegion(struct MiniGLR200Context *context,
                                 struct TextureObject *texture, ULONG level,
                                 ULONG xoffset, ULONG yoffset, ULONG width,
@@ -703,6 +718,16 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
     }
     if (!pixels || !SourceFormatBytes(format,type,&sourceBytes))
         return FALSE;
+    {
+        ULONG k;
+        for (k = 0; k < 8UL; ++k)
+            if (!UpStatKey[k] || UpStatKey[k] == ((format & 0xffffUL) << 16 | (type & 0xffffUL) ^ (texture->texelBytes << 12))) {
+                UpStatKey[k] = (format & 0xffffUL) << 16 | (type & 0xffffUL) ^ (texture->texelBytes << 12);
+                UpStatTexels[k] += width * height;
+                UpStatCalls[k]++;
+                break;
+            }
+    }
     TextureLevelLayout(texture,level,&levelOffset,&levelStride,
                        &levelWidth,&levelHeight);
     if (xoffset>levelWidth || yoffset>levelHeight || width>levelWidth-xoffset ||
@@ -714,6 +739,56 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
                  ~(context->unpackAlignment-1UL);
     source=(const UBYTE *)pixels + context->unpackSkipRows*sourceStride +
            context->unpackSkipPixels*sourceBytes;
+#if MGL_EVERGREEN
+    if (texture->texelBytes == 1) {
+        /* luminance bytes: as they are, or the converted texel's red */
+        for (row=0; row<height; ++row) {
+            UBYTE *destination=texture->image+levelOffset+(yoffset+row)*levelStride+xoffset;
+            const UBYTE *input=source+row*sourceStride;
+            if (format==GL_LUMINANCE && type==GL_UNSIGNED_BYTE) {
+                CopyMem(input,destination,width);
+                continue;
+            }
+            for (column=0; column<width; ++column) {
+                UBYTE p[4];
+                ConvertPixel(context,input+column*sourceBytes,format,type,p);
+                destination[column]=p[2];
+            }
+        }
+        texture->definedLevels |= 1UL<<level;
+        MarkTextureDirty(context, texture, level, xoffset, yoffset, width, height);
+        return TRUE;
+    }
+    if (texture->texelBytes == 2) {
+        /* 16-bit storage: the client's texels as they are, or converted */
+        ULONG want = texture->texelFormat == EG_TEX_FORMAT_4444 ? MGL_UNSIGNED_SHORT_4_4_4_4
+                                                                : MGL_UNSIGNED_SHORT_5_6_5;
+        for (row=0; row<height; ++row) {
+            UBYTE *destination=texture->image+levelOffset+
+                (yoffset+row)*levelStride+xoffset*2UL;
+            const UBYTE *input=source+row*sourceStride;
+            if (type == want) {
+                CopyMem(input,destination,width*2UL);
+                continue;
+            }
+            for (column=0; column<width; ++column) {
+                UBYTE p[4];
+                UWORD v;
+                ConvertPixel(context,input+column*sourceBytes,format,type,p);
+                /* p: B, G, R, A */
+                if (texture->texelFormat == EG_TEX_FORMAT_4444)
+                    v = (UWORD)(((p[3]>>4)<<12)|((p[2]>>4)<<8)|((p[1]>>4)<<4)|(p[0]>>4));
+                else
+                    v = (UWORD)(((p[2]>>3)<<11)|((p[1]>>2)<<5)|(p[0]>>3));
+                destination[column*2UL]=(UBYTE)(v>>8);
+                destination[column*2UL+1UL]=(UBYTE)v;
+            }
+        }
+        texture->definedLevels |= 1UL<<level;
+        MarkTextureDirty(context, texture, level, xoffset, yoffset, width, height);
+        return TRUE;
+    }
+#endif
     for (row=0; row<height; ++row) {
         if (format==MGL_UBYTE_BGRA && type==GL_UNSIGNED_BYTE) {
             UBYTE *destination=texture->image+levelOffset+
@@ -894,7 +969,33 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
             return;
         }
         levels=FullMipLevelCount((ULONG)width,(ULONG)height);
-        bytes=TextureStorageBytes((ULONG)width,(ULONG)height,levels);
+        {
+            /* 16-bit sources stay 16-bit (Evergreen fetches them as they
+             * are): no per-texel conversion, half the bytes on the bus */
+            GLenum t = type, f = format;
+            if ((f==MGL_UNSIGNED_SHORT_5_6_5 || f==MGL_UNSIGNED_SHORT_4_4_4_4) &&
+                t==GL_UNSIGNED_SHORT)
+                t = f;
+            texture->texelBytes = 4;
+            texture->texelFormat = 0;
+#if MGL_EVERGREEN
+            if (t==MGL_UNSIGNED_SHORT_4_4_4_4 && internalFormat!=GL_RGB5_A1) {
+                texture->texelBytes = 2;
+                texture->texelFormat = EG_TEX_FORMAT_4444;
+            } else if (t==MGL_UNSIGNED_SHORT_5_6_5) {
+                texture->texelBytes = 2;
+                texture->texelFormat = EG_TEX_FORMAT_565;
+            } else if (t==GL_UNSIGNED_BYTE && f==GL_LUMINANCE &&
+                       (internalFormat==GL_LUMINANCE || internalFormat==GL_LUMINANCE8 ||
+                        internalFormat==1)) {
+                texture->texelBytes = 1;
+                texture->texelFormat = EG_TEX_FORMAT_L8;
+            }
+#else
+            (void)t;
+#endif
+        }
+        bytes=TextureStorageBytesBpe((ULONG)width,(ULONG)height,levels,texture->texelBytes);
         newImage=AllocMem(bytes,MEMF_PUBLIC|MEMF_CLEAR);
         newDirtyRects=AllocMem(levels*sizeof(struct TextureDirtyRect),
                                MEMF_PUBLIC|MEMF_CLEAR);
@@ -992,6 +1093,14 @@ void Lib_glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         SetError(context,GL_INVALID_VALUE);
         return;
     }
+#if MGL_EVERGREEN
+    /* Evergreen: every buffer starts with a texture-cache invalidate
+     * (eg_emit.c BeginBuffer), so the resident surface is rewritten in
+     * place: the dirty rectangle goes over at the next draw that samples
+     * it, after the texture's last use retired (SyncTextureDirty). No
+     * re-import, no spare surface, one copy of the changed rows. */
+    return;
+#endif
     /* An in-place texel rewrite is invisible to this GPU: once its texture
      * cache holds a surface's lines it keeps serving them for that
      * address, and neither texture-register rewrites nor HDP read-buffer

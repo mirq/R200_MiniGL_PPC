@@ -682,32 +682,43 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     tex_sampler_t samp;
     ULONG w = (size & 0xffffUL) + 1, h = (size >> 16) + 1, min, stride, levels;
     ULONG gpu = s->gpuAddress + offset;
+    ULONG fmt = (state & EG_TEX_FORMAT_MASK) >> EG_TEX_FORMAT_SHIFT;
+    ULONG bpe = fmt == EG_TEX_FORMAT_8888 ? 4 : fmt == EG_TEX_FORMAT_L8 ? 1 : 2;
+    ULONG key = state & (RADEON3D_TEX_STATE_MASK | EG_TEX_FORMAT_MASK);
 
     /* the frontend's Evergreen mip tree (TextureLevelLayout): rows in
-     * whole 64 texels, level 1 at the first 256-byte boundary after level 0 */
+     * whole 256 bytes, level 1 at the first 256-byte boundary after level 0 */
     levels = ((state & RADEON3D_TEX_LEVELS_MASK) >> RADEON3D_TEX_LEVELS_SHIFT) + 1;
-    stride = ((w + 63UL) & ~63UL) * 4;
+    stride = (w * bpe + 255UL) & ~255UL;
     if (Sh.valid && Sh.tex[unit][0] == gpu && Sh.tex[unit][1] == size &&
-        Sh.tex[unit][2] == (state & RADEON3D_TEX_STATE_MASK) && Sh.tex[unit][3] == stride)
+        Sh.tex[unit][2] == key && Sh.tex[unit][3] == stride)
         return;
     CLEAR(tex);
     tex.id = unit;
     tex.w = w;
     tex.h = h;
-    tex.pitch = stride / 4;
+    tex.pitch = stride / bpe;
     tex.depth = 0;
     tex.dim = SQ_TEX_DIM_2D;
     tex.base = gpu;
     tex.mip_base = gpu + ((stride * h + 255UL) & ~255UL);
     tex.size = stride * h;
-    tex.format = FMT_8_8_8_8;
     tex.num_format_all = SQ_NUM_FORMAT_NORM;
-    /* BGRA bytes, no swap: X = blue, Y = green, Z = red, W = alpha */
-    tex.endian = SQ_ENDIAN_NONE;
+    /* BGRA bytes, no swap: X = blue, Y = green, Z = red, W = alpha; the
+     * 16-bit formats are big-endian shorts with the colour in the same
+     * order from the low bits (B, G, R, A), swapped 8-in-16 */
+    tex.format = fmt == EG_TEX_FORMAT_4444 ? FMT_4_4_4_4 :
+                 fmt == EG_TEX_FORMAT_565 ? FMT_5_6_5 :
+                 fmt == EG_TEX_FORMAT_L8 ? FMT_8 : FMT_8_8_8_8;
+    tex.endian = bpe == 2 ? SQ_ENDIAN_8IN16 : SQ_ENDIAN_NONE;
     tex.dst_sel_x = SQ_SEL_Z;
     tex.dst_sel_y = SQ_SEL_Y;
     tex.dst_sel_z = SQ_SEL_X;
-    tex.dst_sel_w = SQ_SEL_W;
+    tex.dst_sel_w = fmt == EG_TEX_FORMAT_565 ? SQ_SEL_1 : SQ_SEL_W;
+    if (fmt == EG_TEX_FORMAT_L8) {
+        tex.dst_sel_x = tex.dst_sel_y = tex.dst_sel_z = SQ_SEL_X;
+        tex.dst_sel_w = SQ_SEL_1;
+    }
     tex.base_level = 0;
     tex.last_level = levels - 1;
     tex.array_mode = ARRAY_LINEAR_ALIGNED;
@@ -737,7 +748,7 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     evergreen_set_tex_sampler(&Xi, &samp);
     Sh.tex[unit][0] = gpu;
     Sh.tex[unit][1] = size;
-    Sh.tex[unit][2] = state & RADEON3D_TEX_STATE_MASK;
+    Sh.tex[unit][2] = key;
     Sh.tex[unit][3] = stride;
 }
 
@@ -1384,6 +1395,17 @@ static void BeginBuffer(ULONG *words, ULONG capacity)
     Xi.ChipFamily = CHIP_FAMILY_CEDAR;
     Xi.num_banks = 4;
 
+    /* The default state rewrites the SQ's GPR and thread resource
+     * configuration, which may change only while no shader runs: the
+     * previous buffer's draws can still be in flight (MEASURED: a GPU hang
+     * once batches got heavy enough to overlap). Drain the 3D pipe first. */
+    BEGIN_BATCH(8);
+    PACK3(IT_EVENT_WRITE, 1);
+    E32(PS_PARTIAL_FLUSH | (4UL << 8));
+    PACK3(IT_EVENT_WRITE, 1);
+    E32(VS_PARTIAL_FLUSH | (4UL << 8));
+    EREG(WAIT_UNTIL, WAIT_3D_IDLE_bit | WAIT_3D_IDLECLEAN_bit);
+    END_BATCH();
     evergreen_set_default_state(&Xi);
     IndexOffset = 0;
     /* everything the CPU wrote before this buffer: textures, vertices,

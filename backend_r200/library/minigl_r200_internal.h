@@ -482,6 +482,10 @@ struct TextureObject {
     /* alpha precision of the level-0 internal format: 0 = 8 bits, else
      * 1 (GL_RGB5_A1) or 4 (GL_RGBA4); applied to every uploaded texel */
     UBYTE alphaBits;
+    /* storage: texel bytes (4 = BGRA8888, 2 = the source's own 16-bit
+     * texels) and EG_TEX_FORMAT_* (eg_emit.h) */
+    UBYTE texelBytes;
+    UBYTE texelFormat;
     /* PPC-frontend only: retained canonical BGRA8888 shadow of the
      * level-0 image of a direct-fill texture. Letting a TexSubImage
      * patch this shadow and re-commit the full image through the direct

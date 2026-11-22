@@ -68,6 +68,16 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
 #define EGA_COL_FLOAT4      2UL
 #define EGA_COL_ARGB        3UL     /* A, R, G, B bytes (MGL_UBYTE_ARGB) */
 
+/* Texture storage formats, in texture state bits 14..15 (free in
+ * radeon3d_records.h): 16-bit texels as the client gave them (big-endian
+ * shorts, fetched with the 8-in-16 swap). */
+#define EG_TEX_FORMAT_SHIFT 14
+#define EG_TEX_FORMAT_MASK  (3UL << EG_TEX_FORMAT_SHIFT)
+#define EG_TEX_FORMAT_8888  0UL
+#define EG_TEX_FORMAT_4444  1UL     /* MGL_UNSIGNED_SHORT_4_4_4_4: A R G B */
+#define EG_TEX_FORMAT_565   2UL     /* MGL_UNSIGNED_SHORT_5_6_5: R G B */
+#define EG_TEX_FORMAT_L8    3UL     /* GL_LUMINANCE bytes */
+
 /* eg_device.c */
 struct Radeon3DDevice;
 struct Radeon3DSurface;

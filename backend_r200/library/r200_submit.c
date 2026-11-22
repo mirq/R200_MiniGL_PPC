@@ -81,21 +81,21 @@ void CpDumpStalledSlot(struct MiniGLR200Context *context, ULONG slotIndex)
     extern struct DosLibrary *DOSBase;
     static ULONG dumps;
     struct SubmitSlot *slot = &context->submitSlots[slotIndex];
-    char path[] = "T:cphang0.bin";
+    char path[] = "PI0:mgldiag/cphang0.bin";
     ULONG header[4], index, count = CpSlotDwords[slotIndex];
     const volatile ULONG *cp;
     BPTR file;
 
     if (!DOSBase || dumps >= 3UL || !context->cpSegment.CpuAddress)
         return;
-    path[8] = (char)('0' + dumps++);
+    path[18] = (char)('0' + dumps++);
     file = Open((STRPTR)path, MODE_NEWFILE);
     if (!file)
         return;
     header[0] = 0x43504847UL; /* 'CPHG' */
     header[1] = slot->recordCount;
     header[2] = count;
-    header[3] = slot->commitMode;
+    header[3] = slotIndex;
     Write(file, header, sizeof(header));
     Write(file, slot->records, slot->recordCount * sizeof(ULONG));
     cp = (const volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
@@ -105,6 +105,21 @@ void CpDumpStalledSlot(struct MiniGLR200Context *context, ULONG slotIndex)
         v = (v >> 24) | ((v >> 8) & 0xff00UL) | ((v << 8) & 0xff0000UL) | (v << 24);
         Write(file, &v, sizeof(v));
     }
+#if MGL_EVERGREEN
+    {
+        /* the slot's array ring part: GPU base, bytes, then the bytes */
+        ULONG ring[2], i;
+        ring[0] = context->egRing.GpuAddress + slotIndex * 0x80000UL;
+        ring[1] = context->egRingCursor[slotIndex];
+        Write(file, ring, sizeof(ring));
+        if (context->egRing.CpuAddress)
+            for (i = 0; i < ring[1] / 4UL; ++i) {
+                ULONG v = ((volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
+                                              slotIndex * 0x80000UL))[i];
+                Write(file, &v, sizeof(v));
+            }
+    }
+#endif
     Close(file);
 }
 /* Emitter switches the PPC frontend reads from ENV: (defaults). */
@@ -472,11 +487,75 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
             dbg_u32(count);
             dbg_newline();
         }
+#if MGL_EVERGREEN
+        {
+            static BOOL dumped;
+            if (!dumped) {
+                ULONG k;
+                dumped = TRUE;
+                CpSlotDwords[context->buildSlot] = count;
+                dbg_puts("[minigl] dispatch failed in slot ");
+                dbg_u32(context->buildSlot);
+                for (k = 0; k < SUBMIT_SLOT_COUNT; ++k) {
+                    dbg_puts(" s");
+                    dbg_u32(k);
+                    dbg_puts(":inflight=");
+                    dbg_u32(context->submitSlots[k].inFlight);
+                    dbg_puts(",fence=");
+                    dbg_hex32(context->submitSlots[k].fence);
+                }
+                dbg_newline();
+                for (k = 0; k < SUBMIT_SLOT_COUNT; ++k)
+                    CpDumpStalledSlot(context, k);
+            }
+        }
+#endif
         *fenceOut = 0;
         return FALSE;
     }
     if (t0)
         CpDispatchTicks += PerfClock() - t0;
+#if MGL_EVERGREEN
+    {
+        /* MGLEgSync=1: each batch waited for at once; the first one that
+         * does not finish is written to PI0:mgldiag/hang.bin (records, the
+         * command buffer, the slot's array ring part) */
+        static LONG sync = -1;
+        if (sync < 0) {
+            char v[4];
+            sync = GetVar("MGLEgSync", v, sizeof(v), 0) > 0 && v[0] == '1';
+        }
+        if (sync > 0 && !Radeon3DWaitFence(context->device, *fenceOut, 2000)) {
+            BPTR f = Open("PI0:mgldiag/hang.bin", MODE_NEWFILE);
+            dbg_puts("[minigl] sync: batch hung, dumped\n");
+            if (f) {
+                ULONG hdr[6];
+                ULONG ringBytes = context->egRingCursor[context->buildSlot];
+                hdr[0] = 0x48414e47UL;
+                hdr[1] = slot->recordCount;
+                hdr[2] = count;
+                hdr[3] = ringBytes;
+                hdr[4] = context->egRing.GpuAddress + context->buildSlot * 0x80000UL;
+                hdr[5] = context->buildSlot;
+                Write(f, hdr, sizeof(hdr));
+                Write(f, slot->records, slot->recordCount * 4);
+                Write(f, staging, count * 4);
+                if (context->egRing.CpuAddress && ringBytes) {
+                    ULONG i, buf[256];
+                    volatile ULONG *src = (volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
+                                                             context->buildSlot * 0x80000UL);
+                    for (i = 0; i < ringBytes / 4; i += 256) {
+                        ULONG k, n = ringBytes / 4 - i > 256 ? 256 : ringBytes / 4 - i;
+                        for (k = 0; k < n; ++k) buf[k] = src[i + k];
+                        Write(f, buf, n * 4);
+                    }
+                }
+                Close(f);
+            }
+            sync = 0;
+        }
+    }
+#endif
     return TRUE;
 }
 #endif
@@ -933,7 +1012,24 @@ BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
     dbg_puts("[minigl] fence wait timeout fence=");
     dbg_hex32(slot->fence);
     dbg_newline();
-    CpDumpStalledSlot(context, (ULONG)(slot - context->submitSlots));
+    {
+        ULONG k;
+        dbg_puts("[minigl] stalled slot=");
+        dbg_u32((ULONG)(slot - context->submitSlots));
+        dbg_puts(" build=");
+        dbg_u32(context->buildSlot);
+        for (k = 0; k < SUBMIT_SLOT_COUNT; ++k) {
+            dbg_puts(" s");
+            dbg_u32(k);
+            dbg_puts(":inflight=");
+            dbg_u32(context->submitSlots[k].inFlight);
+            dbg_puts(",fence=");
+            dbg_hex32(context->submitSlots[k].fence);
+        }
+        dbg_newline();
+        for (k = 0; k < SUBMIT_SLOT_COUNT; ++k)
+            CpDumpStalledSlot(context, k);
+    }
     (void)RecoverDevice(context);
     return FALSE;
 #endif
