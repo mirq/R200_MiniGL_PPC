@@ -155,16 +155,33 @@ static void CpResolveFill(struct MGLPPCEmitSurface *out,
 
 /* Enters a texture surface into the resolve cache (a new import or a
  * swapped-in spare would otherwise cost a scan of every texture). */
+/* Handles are bitmap and surface pointers: aligned, so the low bits say
+ * little. Multiplicative hash, a few slots probed. */
+#define CP_RESOLVE_PROBE 8UL
+static ULONG CpResolveSlot(ULONG handle)
+{
+    return ((handle * 2654435761UL) >> 24) & (R200_CP_RESOLVE_CACHE - 1UL);
+}
+
 void CpResolveRemember(struct MiniGLR200Context *context,
                        struct Radeon3DSurface *surface)
 {
-    ULONG handle = (ULONG)surface->Handle, slot;
+    ULONG handle = (ULONG)surface->Handle, slot, k, use;
     if (!handle)
         return;
-    slot = (handle ^ (handle >> 8) ^ (handle >> 16)) &
-           (R200_CP_RESOLVE_CACHE - 1UL);
-    context->cpResolveHandle[slot] = handle;
-    context->cpResolveSurface[slot] = surface;
+    slot = CpResolveSlot(handle);
+    use = slot;
+    for (k = 0; k < CP_RESOLVE_PROBE; ++k) {
+        ULONG s = (slot + k) & (R200_CP_RESOLVE_CACHE - 1UL);
+        struct Radeon3DSurface *old = context->cpResolveSurface[s];
+        if (context->cpResolveHandle[s] == handle || !old ||
+            (ULONG)old->Handle != context->cpResolveHandle[s]) {
+            use = s;        /* the same handle, a free or a stale slot */
+            break;
+        }
+    }
+    context->cpResolveHandle[use] = handle;
+    context->cpResolveSurface[use] = surface;
 }
 
 static BOOL CpResolveSurface(void *user, ULONG handle,
@@ -190,19 +207,20 @@ static BOOL CpResolveSurface(void *user, ULONG handle,
             CpResolveFill(out, &context->surfaces[index], FALSE);
             return TRUE;
         }
-    slot = (handle ^ (handle >> 8) ^ (handle >> 16)) &
-           (R200_CP_RESOLVE_CACHE - 1UL);
-    surface = context->cpResolveSurface[slot];
-    if (context->cpResolveHandle[slot] == handle && surface &&
-        (ULONG)surface->Handle == handle) {
-        CpResolveFill(out, surface, FALSE);
-        return TRUE;
+    slot = CpResolveSlot(handle);
+    for (index = 0; index < CP_RESOLVE_PROBE; ++index) {
+        ULONG s = (slot + index) & (R200_CP_RESOLVE_CACHE - 1UL);
+        surface = context->cpResolveSurface[s];
+        if (context->cpResolveHandle[s] == handle && surface &&
+            (ULONG)surface->Handle == handle) {
+            CpResolveFill(out, surface, FALSE);
+            return TRUE;
+        }
     }
     for (index = 0; index < MAX_TEXTURES; ++index) {
         surface = &context->textures[index].surface;
         if ((ULONG)surface->Handle == handle) {
-            context->cpResolveHandle[slot] = handle;
-            context->cpResolveSurface[slot] = surface;
+            CpResolveRemember(context, surface);
             CpResolveFill(out, surface, FALSE);
             return TRUE;
         }
