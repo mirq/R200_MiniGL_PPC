@@ -553,8 +553,8 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
                     /* the tag keys the model format (with colours) only */
                     cached[i] = EgCacheGet(context, region[i].start, region[i].bytes,
                                            haveColor);
-            if (indices && context->egStaticIndices && type == GL_UNSIGNED_SHORT &&
-                !((ULONG)indices & 3UL))
+            /* 2-byte aligned lists too: the 68060 reads misaligned longs */
+            if (indices && context->egStaticIndices && type == GL_UNSIGNED_SHORT)
                 indexCached = EgCacheGet(context, indices, indexBytes, FALSE);
             if (flushes == context->egCacheFlushes)
                 break;
@@ -679,15 +679,10 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
             ga[EGA_INDEX_GPU] = indexCached;
         else if ((ga[EGA_INDEX_GPU] = EgRingAlloc(context, indexBytes, &cpu)), type == GL_UNSIGNED_INT)
             EgCopyLongs(cpu, (const ULONG *)indices, count);
-        else if (type == GL_UNSIGNED_SHORT && !((ULONG)indices & 3UL))
+        else if (type == GL_UNSIGNED_SHORT)
+            /* aligned or not: the 68060 reads misaligned longs itself */
             EgCopyLongs(cpu, (const ULONG *)indices, indexBytes >> 2);
-        else if (type == GL_UNSIGNED_SHORT) {
-            const UWORD *w = (const UWORD *)indices;
-            for (i = 0; i + 1UL < count; i += 2UL)
-                *cpu++ = ((ULONG)w[i] << 16) | w[i + 1];
-            if (count & 1UL)
-                *cpu = (ULONG)w[count - 1UL] << 16;
-        } else {
+        else {
             for (i = 0; i + 1UL < count; i += 2UL)
                 *cpu++ = ((ULONG)indices[i] << 16) | indices[i + 1];
             if (count & 1UL)
