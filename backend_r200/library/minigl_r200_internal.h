@@ -774,6 +774,10 @@ struct MiniGLR200Context {
      * at the same generation has the same header (no compare to merge) */
     ULONG egHdrGen, egImmHdrGen;
     ULONG egDirOkSerial, egDirOkGen, egDirOkMode;   /* EgDirectBegin's last pass */
+    /* EG_EXEC_ARRAYS_TEXONLY: the last array record (its header generation,
+     * where it ends) and the last texture-only patch (generations) */
+    BOOL egRecValid, egPatchMatrix;
+    ULONG egRecGen, egRecSerial, egRecSlot, egRecEnd, egTexFromGen, egTexOnlyGen;
     volatile ULONG *egDirCpu;
     ULONG egDirStart, egDirSlot, egDirSerial, egDirCap, egDirPrim, egDirStride;
     struct PendingDrawState *egDirState;

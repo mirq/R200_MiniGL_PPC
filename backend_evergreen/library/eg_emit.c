@@ -603,7 +603,8 @@ static void Replay(const ULONG *w, ULONG n);
 static ULONG CaptureNoSync(ULONG *dst, ULONG start, ULONG end);
 /* Draw's fast path: the last array draw's header and descriptors */
 static __inline__ BOOL SameLongs(const void *a, const void *b, ULONG longs);
-static const ULONG *PrevHdr;     /* the record itself (valid for the walk) */
+static const ULONG *PrevHdr;
+static BOOL DrawTexOnly;        /* the walker: an EG_EXEC_ARRAYS_TEXONLY record */     /* the record itself (valid for the walk) */
 static ULONG PrevFmt, PrevOffs;
 static BOOL PrevOk;
 
@@ -756,9 +757,8 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
 
 /* Command words emitted once and replayed: a texture unit's resource and
  * sampler for (unit, address, size, state). */
-#define TEX_REPLAY 32
+#define TEX_REPLAY 256         /* direct mapped by the key's hash */
 static struct { ULONG key[4]; ULONG n; ULONG w[24]; } TexReplay[TEX_REPLAY];
-static ULONG TexReplayNext;
 /* the sampler words each unit has in this buffer (0: unknown) */
 static ULONG SampShadow[2][3];
 
@@ -807,9 +807,10 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     if (Sh.valid && Sh.tex[unit][0] == gpu && Sh.tex[unit][1] == size &&
         Sh.tex[unit][2] == key)
         return;
-    for (i = 0; i < TEX_REPLAY; ++i)
-        if (TexReplay[i].n && TexReplay[i].key[0] == gpu && TexReplay[i].key[1] == k3 &&
-            TexReplay[i].key[2] == key) {
+    i = ((gpu >> 8) ^ (gpu >> 17) ^ (k3 * 0x9e3779b1UL >> 24) ^ (key * 0x85ebca6bUL >> 24)) &
+        (TEX_REPLAY - 1UL);
+    if (TexReplay[i].n && TexReplay[i].key[0] == gpu && TexReplay[i].key[1] == k3 &&
+        TexReplay[i].key[2] == key) {
             /* the resource (10 words), then the sampler (5) unless the unit
              * has the same sampler already */
             if (TexReplay[i].n == 15UL && SampShadow[unit][0] &&
@@ -833,7 +834,6 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
         }
     start = EmitCp.Wptr;
     EmitTexture2(unit, s, offset, size, state);
-    i = TexReplayNext++ % TEX_REPLAY;
     TexReplay[i].n = 0;
     if (!EmitOverflow && EmitCp.Wptr > start && EmitCp.Wptr - start <= 24UL) {
         ULONG k;
@@ -1209,14 +1209,14 @@ static __inline__ BOOL SameLongs(const void *a, const void *b, ULONG longs)
 
 /* Handle to surface, remembered for one batch (EgEmitBatch clears it):
  * every draw resolves its target, depth and textures. */
-#define RC_SLOTS 8
+#define RC_SLOTS 64
 static ULONG RcHandle[RC_SLOTS];
 static struct MGLPPCEmitSurface RcSurf[RC_SLOTS];
 
 static BOOL Resolve(MGLPPCEmitResolve resolve, void *user, ULONG handle,
                     struct MGLPPCEmitSurface *out)
 {
-    ULONG i = (handle ^ (handle >> 7)) & (RC_SLOTS - 1UL);
+    ULONG i = ((handle * 0x9e3779b1UL) >> 26) & (RC_SLOTS - 1UL);
 
     if (handle && RcHandle[i] == handle) {
         *out = RcSurf[i];
@@ -1489,9 +1489,10 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
         BOOL same = g[EGA_FORMATS] == PrevFmt && g[EGA_OFFSETS] == PrevOffs &&
                     !((r[13] ^ PrevHdr[13]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK)) &&
                     !((r[18] ^ PrevHdr[18]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK));
-        for (i = 2; same && i < 44UL; ++i)
-            if (!TexWord[i] && r[i] != PrevHdr[i])
-                same = FALSE;
+        if (!DrawTexOnly)
+            for (i = 2; same && i < 44UL; ++i)
+                if (!TexWord[i] && r[i] != PrevHdr[i])
+                    same = FALSE;
         if (same) {
             if (textured) {
                 if (!r[4] || !Resolve(resolve, user, r[4], &t0s)) {
@@ -1781,14 +1782,17 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
             ok = length == RADEON3D_EXEC_CLEAR_DWORDS && Clear(records + walk, resolve, user);
         else if (op >= RADEON3D_EXEC_DRAW_TRIANGLES && op <= RADEON3D_EXEC_DRAW_LINE_LOOP)
             ok = Draw(records + walk, length, op, resolve, user, NULL);
-        else if (op == EG_EXEC_ARRAYS)
+        else if (op == EG_EXEC_ARRAYS || op == EG_EXEC_ARRAYS_TEXONLY) {
+            DrawTexOnly = op == EG_EXEC_ARRAYS_TEXONLY;
             ok = Draw(records + walk, length, RADEON3D_EXEC_DRAW_TRIANGLES, resolve, user,
                       records + walk);
+            DrawTexOnly = FALSE;
+        }
         else {
             EgEmitFailStage = 0x2202;   /* REUSE_* records: commit mode only */
             ok = FALSE;
         }
-        EGE_END(op == EG_EXEC_ARRAYS ? 12 : 13);
+        EGE_END(op == EG_EXEC_ARRAYS || op == EG_EXEC_ARRAYS_TEXONLY ? 12 : 13);
         if (!ok) {
             if (!EgEmitFailStage)
                 EgEmitFailStage = 0x2203;

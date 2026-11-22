@@ -43,6 +43,9 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
  * attribute is fetched from its own buffer; stride 0 repeats one value. */
 #define EG_EXEC_ARRAYS      0x40UL
 #define EG_ARRAYS_DWORDS    16UL
+/* EG_EXEC_ARRAYS_TEXONLY: an EG_EXEC_ARRAYS record whose header equals the
+ * record right before it but for the texture words (the frontend knows) */
+#define EG_EXEC_ARRAYS_TEXONLY 0x42UL
 #define EGA_PRIM            0   /* RADEON3D_EXEC_DRAW_* */
 #define EGA_COUNT           1   /* indices (or vertices without indices) */
 #define EGA_INDEX_GPU       2

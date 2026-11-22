@@ -410,6 +410,26 @@ static void EgFailNote(ULONG line)
 }
 #define EG_FAIL() do { EgFailNote(__LINE__); return FALSE; } while (0)
 
+/* The op for an array record starting at slot->recordCount: TEXONLY when
+ * it follows the last array record and its header differs from that one's
+ * at most in the texture words (eg_emit.c skips the compare). Remembers it. */
+static ULONG EgArraysOp(struct MiniGLR200Context *context, struct SubmitSlot *slot, ULONG need)
+{
+    BOOL texOnly = context->egRecValid && context->egRecSerial == context->batchSerial &&
+                   context->egRecSlot == context->buildSlot &&
+                   context->egRecEnd == slot->recordCount &&
+                   (context->egHdrGen == context->egRecGen ||
+                    (context->egHdrGen == context->egTexOnlyGen &&
+                     context->egTexFromGen == context->egRecGen));
+
+    context->egRecValid = TRUE;
+    context->egRecGen = context->egHdrGen;
+    context->egRecSerial = context->batchSerial;
+    context->egRecSlot = context->buildSlot;
+    context->egRecEnd = slot->recordCount + need;
+    return texOnly ? EG_EXEC_ARRAYS_TEXONLY : EG_EXEC_ARRAYS;
+}
+
 static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
                          ULONG first, ULONG count, const UBYTE *indices, GLenum type)
 {
@@ -645,7 +665,7 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
     record = slot->records + slot->recordCount;
     for (i = 0; i < state->headerDwords; ++i)
         record[i] = state->header[i];
-    record[0] = EG_EXEC_ARRAYS;
+    record[0] = EgArraysOp(context, slot, need);
     record[1] = need;
     record[10] = count;
     ga = record + state->headerDwords;
@@ -895,7 +915,7 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
         record = slot->records + slot->recordCount;
         for (i = 0; i < state->headerDwords; ++i)
             record[i] = state->header[i];
-        record[0] = EG_EXEC_ARRAYS;
+        record[0] = EgArraysOp(context, slot, need);
         record[1] = need;
         record[10] = 0;
         ga = record + state->headerDwords;
@@ -1216,7 +1236,7 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
         record = slot->records + slot->recordCount;
         for (i = 0; i < state->headerDwords; ++i)
             record[i] = state->header[i];
-        record[0] = EG_EXEC_ARRAYS;
+        record[0] = EgArraysOp(context, slot, need);
         record[1] = need;
         record[10] = 0;
         ga = record + state->headerDwords;

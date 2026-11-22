@@ -222,7 +222,9 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
                R68KPatchCaptureTexture(context, &context->captureCache)) {
         state = &context->captureCache;
         EgN[2]++;
+        context->egTexFromGen = context->egHdrGen;
         context->egHdrGen++;
+        context->egTexOnlyGen = context->egPatchMatrix ? 0 : context->egHdrGen;
         context->captureCacheSerial = context->semanticStateSerial;
 #endif
     } else {

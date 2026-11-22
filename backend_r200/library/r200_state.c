@@ -220,6 +220,7 @@ BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
     ULONG serial = context->semanticStateSerial, unit;
     static const UBYTE handleAt[2] = {4, 15}, sizeAt[2] = {12, 17}, stateAt[2] = {13, 18};
 
+    context->egPatchMatrix = (context->r68kTexOnlyUnits & 4UL) != 0;
     /* the units must be on or off as in the capture (a disable and an
      * enable between two draws come out even) */
     for (unit = 0; unit < 2UL; ++unit)
