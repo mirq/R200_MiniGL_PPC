@@ -58,10 +58,14 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
 #define EGA_TEX0_STRIDE     12
 #define EGA_TEX1_GPU        13
 #define EGA_TEX1_STRIDE     14
+#define EGA_OFFSETS         15  /* EGA_INTERLEAVED: colour, tex0, tex1 byte
+                                 * offsets from the position (8 bits each) */
 #define EGA_INDEX_NONE      0UL
 #define EGA_INDEX_16        1UL     /* big-endian 16-bit */
 #define EGA_INDEX_32        2UL     /* big-endian 32-bit */
 #define EGA_POS_SIZE_MASK   0x7UL   /* 2, 3 or 4 floats */
+#define EGA_INTERLEAVED     0x100UL /* the arrays one buffer: EGA_POS_GPU, EGA_POS_STRIDE */
+#define EGA_COL_ARRAY       0x200UL /* the colour is an array in that buffer */
 #define EGA_COL_SHIFT       4
 #define EGA_COL_UBYTE4      0UL     /* R, G, B, A bytes */
 #define EGA_COL_FLOAT3      1UL

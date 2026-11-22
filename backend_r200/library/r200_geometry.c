@@ -221,6 +221,7 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
                context->captureCacheProjective == context->screenProjective &&
                R68KPatchCaptureTexture(context, &context->captureCache)) {
         state = &context->captureCache;
+        EgN[2]++;
         context->captureCacheSerial = context->semanticStateSerial;
 #endif
     } else {
@@ -231,6 +232,9 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
 #endif
 
         state = &context->captureScratch;
+        EgN[15]++;
+        if (context->captureCacheValid && context->r68kTexOnlySerial == context->semanticStateSerial)
+            EgT[15]++;      /* the patch was possible but refused */
 #if R200_CPEMIT_68K
         { extern ULONG R68KStatCaptures; R68KStatCaptures++; }
 #endif
@@ -2407,6 +2411,20 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
                     return FALSE;
             return TRUE;
         }
+#if MGL_EVERGREEN
+        /* small fans (GLQuake's per-polygon surfaces) as triangle lists:
+         * consecutive ones with the same state merge into one draw */
+        if (count <= 16UL) {
+            struct Vertex tri[3 * 14];
+            ULONG n = 0;
+            for (index = 1; index + 1UL < count; ++index) {
+                tri[n++] = vertices[0];
+                tri[n++] = vertices[index];
+                tri[n++] = vertices[index + 1UL];
+            }
+            return EmitHardwareBatch(context, tri, n, RADEON3D_EXEC_DRAW_TRIANGLES);
+        }
+#endif
         if (count <= MAX_SCREEN_VERTICES)
             return EmitHardwareBatch(context, vertices, count,
                                      RADEON3D_EXEC_DRAW_TRI_FAN);
@@ -2831,6 +2849,8 @@ void Lib_glEnd(void)
         return;
     }
     context->insideBegin = FALSE;
+    {
+    EGTX_BEGIN();
     /* V19 parity: GL_POLYGON with texture unit 1 enabled goes to the
      * two-pass multitexture queue instead of drawing immediately --
      * but only for the classic fake-multitexture feed order, where unit 0
@@ -2842,11 +2862,15 @@ void Lib_glEnd(void)
      * QUADS/TRIANGLE_FAN always do. */
     if (context->primitive == GL_POLYGON && context->textureEnabled[1] &&
         !(context->texCoordFeedMask & 2UL) &&
-        CaptureMtexPolygon(context))
+        CaptureMtexPolygon(context)) {
+        EGTX_END(0);
         return;
+    }
     if (!EmitPrimitive(context, context->vertices, context->vertexCount,
                        context->primitive))
         SetError(context, GL_INVALID_OPERATION);
+    EGTX_END(0);
+    }
 }
 
 void Lib_glTexCoord2f(GLfloat s, GLfloat t)
@@ -3679,8 +3703,14 @@ void Lib_glDrawArrays(GLenum mode, GLint first, GLsizei count)
         SetError(context, GL_INVALID_OPERATION); return;
     }
 #if defined(MGL_EVERGREEN) && MGL_EVERGREEN
-    if (EgArraysDraw(context, mode, (ULONG)first, (ULONG)count, NULL, 0))
-        return;
+    {
+        BOOL done;
+        EGT_BEGIN();
+        done = EgArraysDraw(context, mode, (ULONG)first, (ULONG)count, NULL, 0);
+        EGT_END(1);
+        if (done)
+            return;
+    }
 #endif
     if (mode == GL_TRIANGLES && FlatArrayLayoutFast(context) &&
         !context->lightingEnabled && !HardwareSphereMapMask(context) &&
@@ -3896,8 +3926,14 @@ void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
         SetError(context, GL_INVALID_OPERATION); return;
     }
 #if defined(MGL_EVERGREEN) && MGL_EVERGREEN
-    if (EgArraysDraw(context, mode, 0, (ULONG)count, (const UBYTE *)indices, type))
-        return;
+    {
+        BOOL done;
+        EGTX_BEGIN();
+        done = EgArraysDraw(context, mode, 0, (ULONG)count, (const UBYTE *)indices, type);
+        EGTX_END(1);
+        if (done)
+            return;
+    }
 #endif
     /* Alias meshes reference each vertex many times: gather every unique
      * index exactly once into a generation-stamped cache. The cache is a

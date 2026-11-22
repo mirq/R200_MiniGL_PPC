@@ -69,7 +69,7 @@ ULONG R3DStatDraws, R3DStatRegCalls, R3DStatRegWrites, R3DStatFast, R3DStatFastO
 ULONG EgEmitFace = 1;
 /* profiling counters (printed by the frontend at context end) */
 ULONG EgStatDraws, EgStatVtxDwords, EgStatConstUploads, EgStatStride[17], EgStatTcl,
-      EgStatClears, EgStatTexBinds, EgStatShaderBinds;               /* PA_SU_SC_MODE_CNTL.FACE for GL front = CCW */
+      EgStatClears, EgStatTexBinds, EgStatShaderBinds, EgStatOldPrim[20], EgStatOldVerts[20];               /* PA_SU_SC_MODE_CNTL.FACE for GL front = CCW */
 
 void EgEmitInit(APTR vramCpu, ULONG vramGpu, ULONG shaderOff, ULONG shaderSize,
                 ULONG streamOff, ULONG streamSlotSize)
@@ -277,8 +277,12 @@ static ULONG BuildVs(const struct VsKey *k, ULONG *gprs)
         Out(0);
     if (k->flags & VS_STREAMS) {
         /* EG_EXEC_ARRAYS: buffer 0 position, 1 colour, 2 and 3 the
-         * texture coordinates; the formats are in posOff (EGA_FORMATS) */
-        ULONG size = k->posOff & EGA_POS_SIZE_MASK, col = k->posOff >> EGA_COL_SHIFT;
+         * texture coordinates; the formats are in posOff (EGA_FORMATS
+         * low byte), wOff bit 0 = interleaved (everything in buffer 0 at
+         * colOff, tex0Off, tex1Off), bit 1 = colour array there */
+        ULONG size = k->posOff & EGA_POS_SIZE_MASK, col = (k->posOff >> EGA_COL_SHIFT) & 3;
+        BOOL il = (k->wOff & 1) != 0;
+        ULONG cb = il && (k->wOff & 2) ? 0 : 1, co = cb ? 0 : k->colOff;
         if (size == 2)
             FetchB(1, 0, 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
                    SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
@@ -289,24 +293,24 @@ static ULONG BuildVs(const struct VsKey *k, ULONG *gprs)
             FetchB(1, 0, 0, FMT_32_32_32_FLOAT, 12, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
                    SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_1);
         if (col == EGA_COL_FLOAT3)
-            FetchB(2, 1, 0, FMT_32_32_32_FLOAT, 12, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+            FetchB(2, cb, co, FMT_32_32_32_FLOAT, 12, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
                    SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_1);
         else if (col == EGA_COL_FLOAT4)
-            FetchB(2, 1, 0, FMT_32_32_32_32_FLOAT, 16, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
+            FetchB(2, cb, co, FMT_32_32_32_32_FLOAT, 16, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
                    SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W);
         else if (col == EGA_COL_ARGB)   /* A, R, G, B bytes: X = A */
-            FetchB(2, 1, 0, FMT_8_8_8_8, 4, SQ_NUM_FORMAT_NORM, SQ_FORMAT_COMP_UNSIGNED,
+            FetchB(2, cb, co, FMT_8_8_8_8, 4, SQ_NUM_FORMAT_NORM, SQ_FORMAT_COMP_UNSIGNED,
                    SQ_ENDIAN_NONE, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W, SQ_SEL_X);
         else    /* R, G, B, A bytes in memory order: no swap */
-            FetchB(2, 1, 0, FMT_8_8_8_8, 4, SQ_NUM_FORMAT_NORM, SQ_FORMAT_COMP_UNSIGNED,
+            FetchB(2, cb, co, FMT_8_8_8_8, 4, SQ_NUM_FORMAT_NORM, SQ_FORMAT_COMP_UNSIGNED,
                    SQ_ENDIAN_NONE, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_Z, SQ_SEL_W);
         p = 3;
         if (k->flags & VS_TEX0)
-            FetchB(p++, 2, 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
-                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
+            FetchB(p++, il ? 0 : 2, il ? k->tex0Off : 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED,
+                   SQ_FORMAT_COMP_SIGNED, SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
         if (k->flags & VS_TEX1)
-            FetchB(p++, 3, 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED, SQ_FORMAT_COMP_SIGNED,
-                   SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
+            FetchB(p++, il ? 0 : 3, il ? k->tex1Off : 0, FMT_32_32_FLOAT, 8, SQ_NUM_FORMAT_SCALED,
+                   SQ_FORMAT_COMP_SIGNED, SQ_ENDIAN_8IN32, SQ_SEL_X, SQ_SEL_Y, SQ_SEL_0, SQ_SEL_1);
         *gprs = pos + 1;
         return ProgN;
     }
@@ -725,7 +729,32 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     tex.base_level = 0;
     tex.last_level = levels - 1;
     tex.array_mode = ARRAY_LINEAR_ALIGNED;
-    evergreen_set_tex_resource(&Xi, &tex, RADEON_GEM_DOMAIN_VRAM);
+    {
+        /* evergreen_set_tex_resource's words for a linear texture, without
+         * its texture-cache flush: every buffer starts with one, and the
+         * texels change only between buffers */
+        RADEONInfoPtr info = &Xi;
+        BEGIN_BATCH(10);
+        PACK0(SQ_FETCH_RESOURCE + unit * SQ_FETCH_RESOURCE_offset, 8);
+        E32((SQ_TEX_DIM_2D << DIM_shift) | ((((tex.pitch + 7) >> 3) - 1) << PITCH_shift) |
+            ((w - 1) << TEX_WIDTH_shift));
+        E32((ARRAY_LINEAR_ALIGNED << SQ_TEX_RESOURCE_WORD1_0__ARRAY_MODE_shift) |
+            ((h - 1) << TEX_HEIGHT_shift));
+        E32(tex.base >> 8);
+        E32(tex.mip_base >> 8);
+        E32((SQ_NUM_FORMAT_NORM << SQ_TEX_RESOURCE_WORD4_0__NUM_FORMAT_ALL_shift) |
+            (tex.endian << SQ_TEX_RESOURCE_WORD4_0__ENDIAN_SWAP_shift) |
+            (tex.dst_sel_x << SQ_TEX_RESOURCE_WORD4_0__DST_SEL_X_shift) |
+            (tex.dst_sel_y << SQ_TEX_RESOURCE_WORD4_0__DST_SEL_Y_shift) |
+            (tex.dst_sel_z << SQ_TEX_RESOURCE_WORD4_0__DST_SEL_Z_shift) |
+            (tex.dst_sel_w << SQ_TEX_RESOURCE_WORD4_0__DST_SEL_W_shift));
+        E32(tex.last_level << LAST_LEVEL_shift);
+        E32(4UL << SQ_TEX_RESOURCE_WORD6_0__TILE_SPLIT_shift);
+        E32((tex.format << SQ_TEX_RESOURCE_WORD7_0__DATA_FORMAT_shift) |
+            (1UL << SQ_TEX_RESOURCE_WORD7_0__NUM_BANKS_shift) |
+            (SQ_TEX_VTX_VALID_TEXTURE << SQ_TEX_RESOURCE_WORD7_0__TYPE_shift));
+        END_BATCH();
+    }
     CLEAR(samp);
     samp.id = unit;
     samp.clamp_x = (state & RADEON3D_TEX_REPEAT_S) ? SQ_TEX_WRAP
@@ -755,6 +784,8 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     Sh.tex[unit][3] = stride;
 }
 
+static ULONG VbufShadow[4][3];
+
 static void EmitVertexBufferId(ULONG id, ULONG gpu, ULONG bytes, ULONG stride)
 {
     RADEONInfoPtr info = &Xi;
@@ -780,7 +811,24 @@ static void EmitVertexBufferId(ULONG id, ULONG gpu, ULONG bytes, ULONG stride)
 static void EmitVertexBuffer(ULONG gpu, ULONG bytes, ULONG stride)
 {
     EmitVertexBufferId(0, gpu, bytes, stride);
+    VbufShadow[0][0] = 0;       /* written without the shadow */
 }
+
+/* a vertex buffer resource unless it is the one already set in this
+ * buffer (the shadow is cleared at every buffer start) */
+
+static void VertexBufferOnce(ULONG id, ULONG gpu, ULONG bytes, ULONG stride)
+{
+    if (VbufShadow[id][0] == gpu && VbufShadow[id][1] == bytes && VbufShadow[id][2] == stride)
+        return;
+    EmitVertexBufferId(id, gpu, bytes, stride);
+    VbufShadow[id][0] = gpu;
+    VbufShadow[id][1] = bytes;
+    VbufShadow[id][2] = stride;
+}
+
+/* VGT_PRIMITIVE_TYPE, INDEX_TYPE: as last set in this buffer (~0 unknown) */
+static ULONG PrimShadow, IndexTypeShadow;
 
 /* VGT_INDX_OFFSET: added to every index, auto-generated ones too */
 static ULONG IndexOffset;
@@ -798,13 +846,22 @@ static void EmitDrawIndexed(ULONG prim, ULONG count, ULONG gpu, BOOL index32)
 {
     RADEONInfoPtr info = &Xi;
 
+    ULONG it = index32 ? (IT_INDEX_TYPE_SWAP_MODE(VGT_DMA_SWAP_32_BIT) | DI_INDEX_SIZE_32_BIT)
+                       : (IT_INDEX_TYPE_SWAP_MODE(VGT_DMA_SWAP_16_BIT) | DI_INDEX_SIZE_16_BIT);
+
     BEGIN_BATCH(14);
-    EREG(VGT_PRIMITIVE_TYPE, prim);
-    PACK3(IT_INDEX_TYPE, 1);
-    E32(index32 ? (IT_INDEX_TYPE_SWAP_MODE(VGT_DMA_SWAP_32_BIT) | DI_INDEX_SIZE_32_BIT)
-                : (IT_INDEX_TYPE_SWAP_MODE(VGT_DMA_SWAP_16_BIT) | DI_INDEX_SIZE_16_BIT));
-    PACK3(IT_NUM_INSTANCES, 1);
-    E32(1);
+    if (PrimShadow != prim) {
+        EREG(VGT_PRIMITIVE_TYPE, prim);
+        PrimShadow = prim;
+    }
+    if (IndexTypeShadow != it) {
+        PACK3(IT_INDEX_TYPE, 1);
+        E32(it);
+        /* NUM_INSTANCES stays 1: every draw sets it so */
+        PACK3(IT_NUM_INSTANCES, 1);
+        E32(1);
+        IndexTypeShadow = it;
+    }
     PACK3(IT_DRAW_INDEX, 4);
     E32(gpu);
     E32(0);
@@ -825,6 +882,8 @@ static void EmitDraw(ULONG prim, ULONG count)
     d.num_indices = count;
     d.index_type = DI_INDEX_SIZE_16_BIT;
     evergreen_draw_auto(&Xi, &d);
+    PrimShadow = prim;
+    IndexTypeShadow = DI_INDEX_SIZE_16_BIT;
 }
 
 static void EmitScissor(ULONG l, ULONG t, ULONG r, ULONG b)
@@ -1009,14 +1068,26 @@ static BOOL BindPsConst(const ULONG *c)
     return TRUE;
 }
 
+#if R200_PERF_TIMING
+ULONG PerfClock(void);
+extern ULONG EgT[16], EgN[16];
+#define EGE_BEGIN() ULONG ege0_ = PerfClock()
+#define EGE_END(k) do { EgT[k] += PerfClock() - ege0_; EgN[k]++; } while (0)
+#else
+#define EGE_BEGIN() do { } while (0)
+#define EGE_END(k) do { } while (0)
+#endif
+
 /* Vertices into the stream; returns the GPU address or 0. */
 static ULONG UploadVertices(const ULONG *v, ULONG dwords)
 {
     ULONG off = StreamAlloc(dwords * 4, 256);
+    EGE_BEGIN();
 
     if (off == ~0UL)
         return 0;
     ToVram(off, v, dwords);
+    EGE_END(11);
     return VramGpu + off;
 }
 
@@ -1154,6 +1225,12 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
         memset(&k, 0, sizeof(k));
         k.flags = VS_STREAMS | (textured ? VS_TEX0 : 0) | (textured1 ? VS_TEX1 : 0);
         k.posOff = (UBYTE)ga[EGA_FORMATS];
+        if (ga[EGA_FORMATS] & EGA_INTERLEAVED) {
+            k.wOff = (UBYTE)(1 | ((ga[EGA_FORMATS] & EGA_COL_ARRAY) ? 2 : 0));
+            k.colOff = (UBYTE)ga[EGA_OFFSETS];
+            k.tex0Off = textured ? (UBYTE)(ga[EGA_OFFSETS] >> 8) : 0;
+            k.tex1Off = textured1 ? (UBYTE)(ga[EGA_OFFSETS] >> 16) : 0;
+        }
         stride = 0;
     } else if (length < headerDwords + count * stride) {
         EgEmitFailStage = 0x2103;
@@ -1292,18 +1369,26 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     if (ga) {
         ULONG n = ga[EGA_VERTS], fmt = ga[EGA_FORMATS], col = fmt >> EGA_COL_SHIFT;
         ULONG posBytes = (fmt & EGA_POS_SIZE_MASK) * 4;
-        ULONG colBytes = col == EGA_COL_FLOAT4 ? 16 : col == EGA_COL_FLOAT3 ? 12 : 4;
+        ULONG colBytes = (col & 3) == EGA_COL_FLOAT4 ? 16 : (col & 3) == EGA_COL_FLOAT3 ? 12 : 4;
 #define EGA_BYTES(st, elem) ((st) ? (st) * n : (elem))
-        EmitVertexBufferId(0, ga[EGA_POS_GPU], EGA_BYTES(ga[EGA_POS_STRIDE], posBytes),
-                           ga[EGA_POS_STRIDE]);
-        EmitVertexBufferId(1, ga[EGA_COL_GPU], EGA_BYTES(ga[EGA_COL_STRIDE], colBytes),
-                           ga[EGA_COL_STRIDE]);
-        if (textured)
-            EmitVertexBufferId(2, ga[EGA_TEX0_GPU], EGA_BYTES(ga[EGA_TEX0_STRIDE], 8),
-                               ga[EGA_TEX0_STRIDE]);
-        if (textured1)
-            EmitVertexBufferId(3, ga[EGA_TEX1_GPU], EGA_BYTES(ga[EGA_TEX1_STRIDE], 8),
-                               ga[EGA_TEX1_STRIDE]);
+        if (fmt & EGA_INTERLEAVED) {
+            /* one buffer, the attributes at their offsets: n whole records
+             * from the position on */
+            VertexBufferOnce(0, ga[EGA_POS_GPU], ga[EGA_POS_STRIDE] * n, ga[EGA_POS_STRIDE]);
+            if (!(fmt & EGA_COL_ARRAY))
+                VertexBufferOnce(1, ga[EGA_COL_GPU], colBytes, 0);
+        } else {
+            VertexBufferOnce(0, ga[EGA_POS_GPU], EGA_BYTES(ga[EGA_POS_STRIDE], posBytes),
+                             ga[EGA_POS_STRIDE]);
+            VertexBufferOnce(1, ga[EGA_COL_GPU], EGA_BYTES(ga[EGA_COL_STRIDE], colBytes),
+                             ga[EGA_COL_STRIDE]);
+            if (textured)
+                VertexBufferOnce(2, ga[EGA_TEX0_GPU], EGA_BYTES(ga[EGA_TEX0_STRIDE], 8),
+                                 ga[EGA_TEX0_STRIDE]);
+            if (textured1)
+                VertexBufferOnce(3, ga[EGA_TEX1_GPU], EGA_BYTES(ga[EGA_TEX1_STRIDE], 8),
+                                 ga[EGA_TEX1_STRIDE]);
+        }
 #undef EGA_BYTES
         ++EgStatDraws;
         if (ga[EGA_INDEX_TYPE] == EGA_INDEX_NONE)
@@ -1319,6 +1404,8 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     gpu = UploadVertices(vertices, count * stride);
     if (!gpu)
         return FALSE;
+    EgStatOldPrim[(primitive % 10) + (tcl ? 0 : 10)]++;
+    EgStatOldVerts[(primitive % 10) + (tcl ? 0 : 10)] += count;
     ++EgStatDraws;
     EgStatVtxDwords += count * stride;
     ++EgStatStride[stride > 16 ? 16 : stride];
@@ -1341,7 +1428,11 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
     ULONG walk = 0;
 
     EgEmitFailStage = 0;
+    {
+    EGE_BEGIN();
     BeginBuffer(words, capacity);
+    EGE_END(14);
+    }
     StreamSlot = slot % EG_EMIT_SLOTS;
     StreamPos = 0;
     while (walk + 2 <= recordDwords) {
@@ -1352,6 +1443,7 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
             EgEmitFailStage = 0x2201;
             return 0;
         }
+        EGE_BEGIN();
         if (op == RADEON3D_EXEC_CLEAR)
             ok = length == RADEON3D_EXEC_CLEAR_DWORDS && Clear(records + walk, resolve, user);
         else if (op >= RADEON3D_EXEC_DRAW_TRIANGLES && op <= RADEON3D_EXEC_DRAW_LINE_LOOP)
@@ -1363,6 +1455,7 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
             EgEmitFailStage = 0x2202;   /* REUSE_* records: commit mode only */
             ok = FALSE;
         }
+        EGE_END(op == EG_EXEC_ARRAYS ? 12 : 13);
         if (!ok) {
             if (!EgEmitFailStage)
                 EgEmitFailStage = 0x2203;
@@ -1411,6 +1504,8 @@ static void BeginBuffer(ULONG *words, ULONG capacity)
     END_BATCH();
     evergreen_set_default_state(&Xi);
     IndexOffset = 0;
+    PrimShadow = IndexTypeShadow = ~0UL;
+    memset(VbufShadow, 0, sizeof(VbufShadow));
     /* everything the CPU wrote before this buffer: textures, vertices,
      * constants, shaders */
     BEGIN_BATCH(5);

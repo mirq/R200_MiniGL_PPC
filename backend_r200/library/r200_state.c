@@ -217,24 +217,35 @@ BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
                              struct PendingDrawState *state)
 {
     struct TextureObject *texture;
-    ULONG serial = context->semanticStateSerial;
+    ULONG serial = context->semanticStateSerial, unit;
+    static const UBYTE handleAt[2] = {4, 15}, sizeAt[2] = {12, 17}, stateAt[2] = {13, 18};
 
-    if (!context->textureEnabled[0] || !state->textured[0] ||
-        context->boundTexture[0] >= MAX_TEXTURES)
-        return FALSE;
-    texture = &context->textures[context->boundTexture[0]];
-    if (!EnsureTextureResident(context, texture) ||
-        (IsMipFilter(texture->minFilter) &&
-         texture->definedLevels != ((1UL << texture->levelCount) - 1UL)) ||
-        !SyncTextureDirty(context, texture) ||
-        !texture->surface.Handle ||
-        context->semanticStateSerial != serial)
-        return FALSE;
-    state->textureName[0] = context->boundTexture[0];
-    state->header[4] = (ULONG)texture->surface.Handle;
-    state->header[12] = (texture->width - 1UL) |
-                        ((texture->height - 1UL) << 16);
-    state->header[13] = TextureState(context, texture, 0);
+    /* the units must be on or off as in the capture (a disable and an
+     * enable between two draws come out even) */
+    for (unit = 0; unit < 2UL; ++unit)
+        if (!context->textureEnabled[unit] != !state->textured[unit])
+            return FALSE;
+    for (unit = 0; unit < 2UL; ++unit) {
+        if (!(context->r68kTexOnlyUnits & (1UL << unit)) || !context->textureEnabled[unit])
+            continue;
+        if (!context->textureEnabled[unit] || !state->textured[unit] ||
+            context->boundTexture[unit] >= MAX_TEXTURES)
+            return FALSE;
+        texture = &context->textures[context->boundTexture[unit]];
+        if (!EnsureTextureResident(context, texture) ||
+            (IsMipFilter(texture->minFilter) &&
+             texture->definedLevels != ((1UL << texture->levelCount) - 1UL)) ||
+            !SyncTextureDirty(context, texture) ||
+            !texture->surface.Handle ||
+            context->semanticStateSerial != serial)
+            return FALSE;
+        state->textureName[unit] = context->boundTexture[unit];
+        state->header[handleAt[unit]] = (ULONG)texture->surface.Handle;
+        state->header[sizeAt[unit]] = (texture->width - 1UL) |
+                                      ((texture->height - 1UL) << 16);
+        state->header[stateAt[unit]] = TextureState(context, texture, unit);
+    }
+    context->r68kTexOnlyUnits = 0;
     return TRUE;
 }
 #endif
@@ -1136,7 +1147,7 @@ void Lib_glEnable(GLenum capability)
     } else if (capability == GL_TEXTURE_2D) {
         if (context->textureEnabled[context->activeTexture]) goto noop;
         context->textureEnabled[context->activeTexture] = TRUE;
-        semanticChange = TRUE;
+        TextureOnlyChange(context, context->activeTexture);
     } else if (capability == GL_FOG) {
         if (context->fogEnabled) goto noop;
         context->fogEnabled = TRUE;
@@ -1253,7 +1264,7 @@ void Lib_glDisable(GLenum capability)
     } else if (capability == GL_TEXTURE_2D) {
         if (!context->textureEnabled[context->activeTexture]) goto noop;
         context->textureEnabled[context->activeTexture] = FALSE;
-        semanticChange = TRUE;
+        TextureOnlyChange(context, context->activeTexture);
     } else if (capability == GL_FOG) {
         if (!context->fogEnabled) goto noop;
         context->fogEnabled = FALSE;

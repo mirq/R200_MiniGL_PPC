@@ -514,18 +514,32 @@ void MarkTextureDirty(struct MiniGLR200Context *context,
     }
 }
 
+static BOOL SyncTextureDirty2(struct MiniGLR200Context *context,
+                              struct TextureObject *texture);
 BOOL SyncTextureDirty(struct MiniGLR200Context *context,
                              struct TextureObject *texture)
 {
-    ULONG level, mask, start = 0, copied = 0;
-    UBYTE *output;
+    BOOL ok;
+    EGT_BEGIN();
     if (!texture->resident || !texture->dirtyLevelMask)
         return TRUE;
+    ok = SyncTextureDirty2(context, texture);
+    EGT_END(5);
+    return ok;
+}
+
+static BOOL SyncTextureDirty2(struct MiniGLR200Context *context,
+                              struct TextureObject *texture)
+{
+    ULONG level, mask, start = 0, copied = 0;
+    UBYTE *output;
     /* Records already carrying this surface handle must see the previous
      * generation. Submit that dependency, then wait only for the texture-use
      * fence before changing mapped pixels. Unrelated submitted work remains
      * asynchronous and presentation fences stay independent. */
     if (TextureQueued(context, texture)) {
+        extern ULONG EgSubmitWhy[4];
+        EgSubmitWhy[0]++;
         if (context->perfEnabled)
             context->perf.textureUploadBarriers++;
         if (!Submit(context))
@@ -856,15 +870,28 @@ void Lib_glBindTexture(GLenum target, GLuint name)
     }
     context->textures[name].generated=TRUE;
     context->boundTexture[context->activeTexture]=name;
+    TextureOnlyChange(context, context->activeTexture);
+}
+
+/* A change to texture unit 0 or 1 alone (binding, enable): patched into
+ * the last capture (R68KPatchCaptureTexture) instead of a full rebuild,
+ * as long as nothing else changed since that capture. */
+void TextureOnlyChange(struct MiniGLR200Context *context, ULONG unit)
+{
 #if R200_CPEMIT_68K
-    {
-        BOOL clean = context->activeTexture == 0 && context->captureCacheValid &&
-            (context->captureCacheSerial == context->semanticStateSerial ||
-             context->r68kTexOnlySerial == context->semanticStateSerial);
-        BumpSemanticStateSerial(context);
-        context->r68kTexOnlySerial = clean ? context->semanticStateSerial : 0;
-    }
+    BOOL fresh = context->captureCacheValid &&
+                 context->captureCacheSerial == context->semanticStateSerial;
+    BOOL clean = unit < 2UL && context->captureCacheValid &&
+        (fresh || context->r68kTexOnlySerial == context->semanticStateSerial);
+    BumpSemanticStateSerial(context);
+    if (clean) {
+        context->r68kTexOnlyUnits = (fresh ? 0UL : context->r68kTexOnlyUnits) |
+                                    (1UL << unit);
+        context->r68kTexOnlySerial = context->semanticStateSerial;
+    } else
+        context->r68kTexOnlySerial = 0;
 #else
+    (void)unit;
     BumpSemanticStateSerial(context);
 #endif
 }
@@ -1098,6 +1125,8 @@ void Lib_glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+    {
+    EGT_BEGIN();
     if (level<0 || (ULONG)level>=texture->levelCount || xoffset<0 || yoffset<0 ||
         width<0 || height<0 ||
         !UploadTextureRegion(context,texture,(ULONG)level,(ULONG)xoffset,
@@ -1105,6 +1134,8 @@ void Lib_glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
                              format,type,pixels)) {
         SetError(context,GL_INVALID_VALUE);
         return;
+    }
+    EGT_END(7);
     }
 #if MGL_EVERGREEN
     /* Evergreen: every buffer starts with a texture-cache invalidate

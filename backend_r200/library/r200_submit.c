@@ -69,6 +69,7 @@ void StreamDiagEvent(struct MiniGLR200Context *context, ULONG event,
 
 ULONG MGLPPCClearBlend;
 /* CP-path profile (perf counters on): printed when the context closes. */
+ULONG EgT[16], EgN[16];
 ULONG CpEmitTicks, CpCopyTicks, CpDispatchTicks, CpCopyDwords, CpBatches;
 ULONG R68KFrontTicks;
 /* CP dword count last dispatched from each slot's region (stall dumps). */
@@ -393,9 +394,11 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
         count = 0;
         MGLPPCEmitFailStage = 0x3001UL;
     } else {
+        EGT_BEGIN();
         count = EgEmitBatch(staging, R200_CP_SLOT_DWORDS, context->buildSlot,
                             slot->records, slot->recordCount,
                             CpResolveSurface, context);
+        EGT_END(3);
         MGLPPCEmitFailStage = count ? 0 : (EgEmitFailStage ? EgEmitFailStage : 0x3002UL);
     }
 #else
@@ -449,8 +452,12 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
 #if MGL_EVERGREEN
     /* Evergreen.chip runs indirect buffers with the CP's 32-bit swap: the
      * 68k's own longs */
+    {
+    EGT_BEGIN();
     for (index = 0; index < count; ++index)
         destination[index] = staging[index];
+    EGT_END(4);
+    }
 #else
     /* The CP reads little-endian dwords. */
     for (index = 0; index < count; ++index) {

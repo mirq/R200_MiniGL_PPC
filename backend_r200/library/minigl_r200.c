@@ -169,8 +169,16 @@ void ResetPerf(struct MiniGLR200Context *context)
     context->perf.frameStartTicks = PerfClock();
 }
 
+ULONG EgBumpAt[16], EgBumpN[16];
 void BumpSemanticStateSerial(struct MiniGLR200Context *context)
 {
+#if R200_PERF_TIMING
+    {
+        ULONG ra = (ULONG)__builtin_return_address(0) - (ULONG)BumpSemanticStateSerial, k;
+        for (k = 0; k < 16UL; ++k)
+            if (EgBumpAt[k] == ra || !EgBumpAt[k]) { EgBumpAt[k] = ra; EgBumpN[k]++; break; }
+    }
+#endif
     if (++context->semanticStateSerial == 0) {
         context->semanticStateSerial = 1;
         /* Do not let a wrapped generation alias an old pending snapshot. */

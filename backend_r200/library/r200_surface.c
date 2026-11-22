@@ -1551,6 +1551,7 @@ void Lib_mglSwitchDisplay(void)
         /* three buffers: show the one just drawn from the next vertical
          * blank on (EgFlip), draw into the one shown before it */
         ULONG drawn = context->drawingBuffer, handle;
+        EGT_BEGIN();
         if (!Submit(context)) {
             SetError(context, GL_INVALID_OPERATION);
             return;
@@ -1571,6 +1572,7 @@ void Lib_mglSwitchDisplay(void)
         if (context->pendingDrawValid)
             context->pendingDraw.header[2] = handle;
         ReapDeferredSurfaces(context);
+        EGT_END(6);
         return;
     }
     if (context && context->fullscreen && !context->singleBuffer &&

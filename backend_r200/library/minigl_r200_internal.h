@@ -719,6 +719,7 @@ struct MiniGLR200Context {
     ULONG r68kLastFence, r68kLastEpoch;
     /* semantic serial reached only by unit-0 binds since the capture cache */
     ULONG r68kTexOnlySerial;
+    ULONG r68kTexOnlyUnits;     /* bit n: unit n's binding changed since the capture */
     /* the next resident draw's streams (6 dwords) or NULL */
     const ULONG *r68kPendingStream;
     ULONG r68kNextCommand;   /* resident draw primitive, 0 = triangles */
@@ -1102,6 +1103,7 @@ void InvalidateSubmissionState(struct MiniGLR200Context *context);
 BOOL TextureQueued(const struct MiniGLR200Context *context,
                    const struct TextureObject *texture);
 void MarkTextureQueued(struct MiniGLR200Context *context, GLuint name);
+void TextureOnlyChange(struct MiniGLR200Context *context, ULONG unit);
 BOOL RecoverDevice(struct MiniGLR200Context *context);
 void ReleaseCpSegment(struct MiniGLR200Context *context);
 void R68KReleaseResident(struct MiniGLR200Context *context);
@@ -1109,6 +1111,20 @@ BOOL WaitSubmitSlot(struct MiniGLR200Context *context,
                     struct SubmitSlot *slot,
                     enum SubmitWaitReason reason);
 BOOL WaitAllSubmissions(struct MiniGLR200Context *context);
+/* Evergreen profiling: EClock ticks per path (R200_PERF_TIMING builds) */
+extern ULONG EgT[16], EgN[16];
+#if R200_PERF_TIMING && defined(MGL_EVERGREEN) && MGL_EVERGREEN
+#define EGT_BEGIN() ULONG egt0_ = PerfClock()
+#define EGT_END(k) do { EgT[k] += PerfClock() - egt0_; EgN[k]++; } while (0)
+/* the same, without the batch emits and copies inside (EgT[3], EgT[4]) */
+#define EGTX_BEGIN() ULONG egt0_ = PerfClock(), egn0_ = EgT[3] + EgT[4] + EgT[5]
+#define EGTX_END(k) do { EgT[k] += PerfClock() - egt0_ - (EgT[3] + EgT[4] + EgT[5] - egn0_); EgN[k]++; } while (0)
+#else
+#define EGTX_BEGIN() do { } while (0)
+#define EGTX_END(k) do { } while (0)
+#define EGT_BEGIN() do { } while (0)
+#define EGT_END(k) do { } while (0)
+#endif
 #if defined(MGL_EVERGREEN) && MGL_EVERGREEN
 void EgArraysRelease(struct MiniGLR200Context *context);
 BOOL EgArraysHint(struct MiniGLR200Context *context, GLenum target, GLenum mode);

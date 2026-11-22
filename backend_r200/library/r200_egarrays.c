@@ -363,6 +363,7 @@ static BOOL EgArrayUsable(const struct ArrayState *a, ULONG minSize, ULONG maxSi
 }
 
 /* why draws took the old path: (source line, count) */
+ULONG EgSubmitWhy[4];
 static ULONG EgFailLine[16], EgFailCount[16], EgDrawn;
 static void EgFailNote(ULONG line)
 {
@@ -518,7 +519,11 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         EG_FAIL();
     context->screenHardwareTransform = TRUE;
     context->screenProjective = FALSE;
+    {
+    EGT_BEGIN();
     i = PrepareScreenAppend(context, prim);
+    EGT_END(8);
+    }
     context->screenHardwareTransform = FALSE;
     if (!i)
         EG_FAIL();
@@ -536,6 +541,7 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
     /* resident copies under the static hints (before the room check:
      * a full cache is emptied behind a submit) */
     {
+        EGT_BEGIN();
         ULONG pass, flushes;
         for (pass = 0; pass < 2UL; ++pass) {
             flushes = context->egCacheFlushes;
@@ -553,6 +559,7 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
             if (flushes == context->egCacheFlushes)
                 break;
         }
+        EGT_END(9);
         if (flushes != context->egCacheFlushes)
             EG_FAIL();
     }
@@ -564,6 +571,7 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         slot->recordCount + need > context->batchDwords ||
         slot->generatedDwordCount + EG_ARRAYS_GENERATED > R200_CP_SLOT_DWORDS - 1024UL ||
         EgRingUsed(context) + ringBytes > EG_RING_SLOT_BYTES) {
+        EgSubmitWhy[1]++;
         if (!Submit(context))
             EG_FAIL();
         slot = BuildSubmitSlot(context);
@@ -573,6 +581,8 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
     }
 
     /* the arrays */
+    {
+    EGT_BEGIN();
     for (i = 0; i < (merged ? 1UL : regions); ++i) {
         if (cached[i]) {
             region[i].gpu = cached[i];
@@ -580,6 +590,8 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         }
         region[i].gpu = EgRingAlloc(context, region[i].bytes, &cpu);
         EgCopyLongs(cpu, (const ULONG *)region[i].start, region[i].bytes >> 2);
+    }
+    EGT_END(10);
     }
     for (i = 0; i < regions; ++i) {
         const struct EgArrayRegion *r = merged ? &region[0] : &region[i];
@@ -602,6 +614,34 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
     ga[EGA_FORMATS] = (ULONG)va->size | (colFormat << EGA_COL_SHIFT);
     ga[EGA_POS_GPU] = gpu[0];
     ga[EGA_POS_STRIDE] = stride[0];
+    if (merged && stride[0] &&
+        (!state->textured[0] || haveTex[0]) && (!state->textured[1] || haveTex[1])) {
+        /* one buffer when every array is a record field at a small offset
+         * after the position, with the position's stride */
+        ULONG k, offs = 0, shift[4], n2 = 0;
+        BOOL il = TRUE;
+        shift[0] = 0;                       /* colour */
+        shift[1] = 8;                       /* tex0 */
+        shift[2] = 16;                      /* tex1 */
+        k = 1;
+        if (haveColor) {
+            ULONG o = gpu[k] - gpu[0];
+            if (stride[k] != stride[0] || o > 252UL || (o & 3UL)) il = FALSE;
+            offs |= o << shift[0];
+            ++k;
+        }
+        for (n2 = 0; n2 < 2UL; ++n2)
+            if (haveTex[n2]) {
+                ULONG o = gpu[k] - gpu[0];
+                if (stride[k] != stride[0] || o > 252UL || (o & 3UL)) il = FALSE;
+                offs |= o << shift[1 + n2];
+                ++k;
+            }
+        if (il) {
+            ga[EGA_FORMATS] |= EGA_INTERLEAVED | (haveColor ? EGA_COL_ARRAY : 0UL);
+            ga[EGA_OFFSETS] = offs;
+        }
+    }
     i = 1;
     if (haveColor) {
         ga[EGA_COL_GPU] = gpu[i];
@@ -678,7 +718,7 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
 /* Context teardown (all submissions retired). */
 void EgArraysRelease(struct MiniGLR200Context *context)
 {
-    ULONG i;
+    ULONG i, k2;
     dbg_puts("[egarrays] drawn=");
     dbg_u32(EgDrawn);
     dbg_puts(" cache hits=");
@@ -715,6 +755,41 @@ void EgArraysRelease(struct MiniGLR200Context *context)
         dbg_u32(CpBatches);
         dbg_puts(" ibdw=");
         dbg_u32(CpCopyDwords);
+        {
+            extern ULONG EgStatOldPrim[20], EgStatOldVerts[20];
+            ULONG k;
+            dbg_puts(" oldprims(tcl/screen):");
+            for (k = 0; k < 20UL; ++k)
+                if (EgStatOldPrim[k]) {
+                    dbg_puts(" ");
+                    dbg_u32(k);
+                    dbg_puts("=");
+                    dbg_u32(EgStatOldPrim[k]);
+                    dbg_puts("/");
+                    dbg_u32(EgStatOldVerts[k]);
+                }
+        }
+        dbg_puts(" T(ticks/n):");
+        for (k2 = 0; k2 < 16UL; ++k2) {
+            dbg_puts(" ");
+            dbg_u32(EgT[k2]);
+            dbg_puts("/");
+            dbg_u32(EgN[k2]);
+        }
+        {
+            extern ULONG EgBumpAt[16], EgBumpN[16];
+            dbg_puts(" bumps(at-Bump):");
+            for (k2 = 0; k2 < 16UL && EgBumpAt[k2]; ++k2) {
+                dbg_puts(" ");
+                dbg_hex32(EgBumpAt[k2]);
+                dbg_puts("=");
+                dbg_u32(EgBumpN[k2]);
+            }
+        }
+        dbg_puts(" submits tex/arrays=");
+        dbg_u32(EgSubmitWhy[0]);
+        dbg_puts("/");
+        dbg_u32(EgSubmitWhy[1]);
     }
     dbg_puts(" old path:");
     for (i = 0; i < 16UL && EgFailLine[i]; ++i) {
