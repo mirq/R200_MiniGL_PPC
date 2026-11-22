@@ -1311,6 +1311,24 @@ void EgArraysRelease(struct MiniGLR200Context *context)
             dbg_puts(" lm bytes/changed/samerows=");
             dbg_u32(EgLmBytes); dbg_puts("/"); dbg_u32(EgLmChanged); dbg_puts("/"); dbg_u32(EgLmRowsSame);
         }
+        {
+            extern ULONG EgFastDraws, EgFullDraws;
+            dbg_puts(" emit fast/full=");
+            dbg_u32(EgFastDraws); dbg_puts("/"); dbg_u32(EgFullDraws);
+        }
+#if R200_PERF_TIMING
+        {
+            extern ULONG EgBreakAt[32], EgBreakN[32];
+            ULONG k3;
+            dbg_puts(" breaks:");
+            for (k3 = 0; k3 < 32UL && EgBreakAt[k3]; ++k3) {
+                dbg_puts(" ");
+                dbg_hex32(EgBreakAt[k3]);
+                dbg_puts("=");
+                dbg_u32(EgBreakN[k3]);
+            }
+        }
+#endif
         dbg_puts(" copiedlongs=");
         dbg_u32(EgCopiedLongs);
         dbg_puts(" immlongs=");

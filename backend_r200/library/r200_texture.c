@@ -787,12 +787,19 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
                     /* only the bytes that differ from the shadow are new */
                     ULONG k = 0, lo, hi;
                     UWORD *sp = texture->rowSpan + (yoffset + row) * 2UL;
+                    /* longwords first (unaligned is fine on the 040/060) */
+                    while (k + 4UL <= width &&
+                           *(const ULONG *)(destination + k) == *(const ULONG *)(input + k))
+                        k += 4UL;
                     while (k < width && destination[k] == input[k])
                         ++k;
                     if (k == width)
                         continue;
                     lo = k;
                     hi = width;
+                    while (hi >= lo + 4UL &&
+                           *(const ULONG *)(destination + hi - 4UL) == *(const ULONG *)(input + hi - 4UL))
+                        hi -= 4UL;
                     while (hi > lo && destination[hi - 1UL] == input[hi - 1UL])
                         --hi;
                     CopyMem(input + lo, destination + lo, hi - lo);

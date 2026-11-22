@@ -233,6 +233,16 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
 
         state = &context->captureScratch;
         EgN[15]++;
+#if R200_PERF_TIMING
+        {
+            extern ULONG EgBreakRa, EgBreakAt[32], EgBreakN[32];
+            ULONG k;
+            for (k = 0; k < 32UL; ++k)
+                if (EgBreakAt[k] == EgBreakRa || !EgBreakAt[k]) {
+                    EgBreakAt[k] = EgBreakRa; EgBreakN[k]++; break;
+                }
+        }
+#endif
         if (context->captureCacheValid && context->r68kTexOnlySerial == context->semanticStateSerial)
             EgT[15]++;      /* the patch was possible but refused */
 #if R200_CPEMIT_68K

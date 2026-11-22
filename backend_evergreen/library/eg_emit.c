@@ -36,6 +36,7 @@
 /* --- the command buffer (an EgCp whose "ring" is the staging buffer) ----- */
 
 static BOOL PersistOk;          /* see EgEmitBatch */
+ULONG EgFastDraws, EgFullDraws;
 static struct EgHw EmitHw;
 static struct EgCp EmitCp;
 static RADEONInfoRec Xi;
@@ -1379,6 +1380,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
             }
             ArraysTail(g, g[EGA_COUNT], textured, textured1);
             memcpy(PrevHdr, r, sizeof(PrevHdr));
+            EgFastDraws++;
             return TRUE;
         }
     }
@@ -1580,6 +1582,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
             return FALSE;
     }
     if (ga) {
+        EgFullDraws++;
         ArraysTail(ga, count, textured, textured1);
         memcpy(PrevHdr, r, sizeof(PrevHdr));
         PrevFmt = ga[EGA_FORMATS];

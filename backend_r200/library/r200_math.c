@@ -232,7 +232,24 @@ void InvalidateNormalMatrix(struct MiniGLR200Context *context)
    }
    context->combinedMatrixValid = FALSE;
    context->inverseModelviewValid = FALSE;
+#if R200_CPEMIT_68K
+   {
+       /* patchable like a texture change (R68KPatchCaptureTexture: the
+        * MVP header dwords) when nothing else changed since the capture */
+       BOOL fresh = context->captureCacheValid &&
+                    context->captureCacheSerial == context->semanticStateSerial;
+       BOOL clean = context->captureCacheValid &&
+                    (fresh || context->r68kTexOnlySerial == context->semanticStateSerial);
+       BumpSemanticStateSerial(context);
+       if (clean) {
+           context->r68kTexOnlyUnits = (fresh ? 0UL : context->r68kTexOnlyUnits) | 4UL;
+           context->r68kTexOnlySerial = context->semanticStateSerial;
+       } else
+           context->r68kTexOnlySerial = 0;
+   }
+#else
    BumpSemanticStateSerial(context);
+#endif
    if (context->matrixMode == GL_MODELVIEW)
        context->normalMatrixValid = FALSE;
 #if R200_NORMAL_TRANSFORM_CACHE

@@ -245,6 +245,24 @@ BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
                                       ((texture->height - 1UL) << 16);
         state->header[stateAt[unit]] = TextureState(context, texture, unit);
     }
+    if (context->r68kTexOnlyUnits & 4UL) {
+        /* the transform: only the MVP in dwords 21..36 depends on it for
+         * an unlit, fog-free capture without texgen */
+        if (!state->hardwareTransform || state->normalVertex || state->lit ||
+            state->hardwareSphereMap || state->fog ||
+            context->textureGenS[0] || context->textureGenT[0] ||
+            context->textureGenS[1] || context->textureGenT[1] ||
+            state->headerDwords < 37UL)
+            return FALSE;
+        if (!context->combinedMatrixValid) {
+            MultiplyMatrix(context->combinedMatrix,
+                           context->projection[context->projectionDepth],
+                           context->modelview[context->modelviewDepth]);
+            context->combinedMatrixValid = TRUE;
+        }
+        for (unit = 0; unit < 16UL; ++unit)
+            state->header[21UL + unit] = FloatBits(context->combinedMatrix[unit]);
+    }
     context->r68kTexOnlyUnits = 0;
     return TRUE;
 }
@@ -852,15 +870,13 @@ void Lib_glPopMatrix(void)
     if (context->matrixMode == GL_PROJECTION) {
         if (!context->projectionDepth) { SetError(context, GL_STACK_UNDERFLOW); return; }
         --context->projectionDepth;
-        context->combinedMatrixValid = FALSE;
     } else {
         if (!context->modelviewDepth) { SetError(context, GL_STACK_UNDERFLOW); return; }
         --context->modelviewDepth;
-        context->normalMatrixValid = FALSE;
-        context->combinedMatrixValid = FALSE;
     }
-    /* The restored stack entry changes the baked hardware-TCL MVP header. */
-    BumpSemanticStateSerial(context);
+    /* The restored stack entry changes the baked hardware-TCL MVP header
+     * (patchable like any other matrix change). */
+    InvalidateNormalMatrix(context);
 }
 
 void Lib_glTranslatef(GLfloat x, GLfloat y, GLfloat z)
