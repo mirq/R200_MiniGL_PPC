@@ -680,7 +680,7 @@ void Lib_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         if (!FlushScreenVertices(context) || !SubmitAndWait(context)) {
             SetError(context,GL_INVALID_OPERATION); return;
         }
-        surface = shown ? &context->surfaces[context->displayedBuffer]
+        surface = shown ? &context->surfaces[context->egFlipBuffer]
                         : ReadSourceSurface(context);
     }
 #else
@@ -1548,22 +1548,30 @@ void Lib_mglSwitchDisplay(void)
     if (context && context->fullscreen && !context->singleBuffer &&
         context->screenBufferCount >= 3 && !context->insideBegin &&
         context->drawBuffer != GL_FRONT && !context->egFlipOff) {
-        /* three buffers: show the one just drawn from the next vertical
-         * blank on (EgFlip), draw into the one shown before it */
+        /* three buffers, one frame behind: this frame goes to the card, the
+         * previous one (normally finished by now) is shown from the next
+         * vertical blank on (EgFlip), and the next frame is drawn into the
+         * one on show until then (its commands wait for the latch) */
         ULONG drawn = context->drawingBuffer, handle;
         EGT_BEGIN();
         if (!Submit(context)) {
             SetError(context, GL_INVALID_OPERATION);
             return;
         }
-        if (!EgFlip(context->device, &context->surfaces[drawn])) {
+        if (context->egFlipQueued &&
+            !EgFlip(context->device, &context->surfaces[context->egFlipBuffer],
+                    context->egFlipFence)) {
             context->egFlipOff = TRUE;      /* copies from now on */
             if (!EgPresent(context->device, &context->surfaces[drawn],
                            &context->surfaces[0], context->width, context->height, TRUE))
                 SetError(context, GL_INVALID_OPERATION);
             return;
         }
-        context->displayedBuffer = drawn;
+        if (context->egFlipQueued)
+            context->displayedBuffer = context->egFlipBuffer;
+        context->egFlipQueued = TRUE;
+        context->egFlipBuffer = drawn;
+        context->egFlipFence = context->r68kLastFence;
         context->egFlipSerial = context->batchSerial;
         context->drawingBuffer = (drawn + 1UL) % 3UL;
         handle = (ULONG)context->surfaces[context->drawingBuffer].Handle;

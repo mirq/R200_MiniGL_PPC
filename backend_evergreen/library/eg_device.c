@@ -82,7 +82,7 @@ static void FillInfo(struct Radeon3DInfo *info)
     info->Caps = Caps();
     info->InstalledVram = Device.info.VramSize;
     info->Picasso96Vram = Device.info.ApertureSize;
-    info->MaxBatchDwords = RADEON3D_MAX_BATCH_DWORDS;
+    info->MaxBatchDwords = 24576UL;     /* minigl_r200_internal.h MAX_RECORD_DWORDS */
 }
 
 struct Radeon3DDevice *Radeon3DOpen(ULONG requestedVersion, struct Radeon3DInfo *info)
@@ -272,7 +272,23 @@ static ULONG FlipRestore;       /* the scanout address before the first flip */
  * anything draws into it again (at most one refresh, only when frames
  * come faster than the display). FALSE: flipping is not possible (the
  * caller copies instead). */
-BOOL EgFlip(struct Radeon3DDevice *device, const struct Radeon3DSurface *s)
+static BOOL FlipPending;          /* a flip written, maybe not latched yet */
+
+/* Before any command buffer runs that may draw into the surface a pending
+ * flip replaces: wait for the latch (at most one refresh; at game frame
+ * rates it happened long ago). */
+static void FlipLatched(void)
+{
+    ULONG i;
+
+    if (!FlipPending)
+        return;
+    for (i = 0; i < 40000UL && (CrtcRead(0x6844) & (1UL << 2)); ++i)
+        ;
+    FlipPending = FALSE;
+}
+
+BOOL EgFlip(struct Radeon3DDevice *device, const struct Radeon3DSurface *s, ULONG fence)
 {
     ULONG i, addr, pitch, bpp;
 
@@ -283,8 +299,8 @@ BOOL EgFlip(struct Radeon3DDevice *device, const struct Radeon3DSurface *s)
     pitch = (CrtcRead(0x6818) & 0x7fffUL) * bpp;
     if (pitch != s->Pitch || (s->GpuAddress & 0xffUL))
         return FALSE;
-    if (Device.lastFence)
-        (void)Eg3DWait(Device.lastFence);
+    if (fence)
+        (void)Eg3DWait(fence);
     for (i = 0; i < 40000UL && (CrtcRead(GRPH_UPDATE) & GRPH_SURFACE_UPDATE_PENDING); ++i)
         ;
     addr = s->GpuAddress;
@@ -296,6 +312,7 @@ BOOL EgFlip(struct Radeon3DDevice *device, const struct Radeon3DSurface *s)
     CrtcWrite(GRPH_PRIMARY_SURFACE_ADDRESS, addr);
     CrtcWrite(GRPH_SECONDARY_SURFACE_ADDRESS, addr);
     CrtcWrite(GRPH_UPDATE, CrtcRead(GRPH_UPDATE) & ~GRPH_UPDATE_LOCK);
+    FlipPending = TRUE;
     return TRUE;
 }
 
@@ -317,6 +334,7 @@ void EgFlipRestore(struct Radeon3DDevice *device)
     for (i = 0; i < 40000UL && (CrtcRead(GRPH_UPDATE) & GRPH_SURFACE_UPDATE_PENDING); ++i)
         ;
     FlipRestore = 0;
+    FlipPending = FALSE;
 }
 
 /* first fit over the scratch block above the emitter's regions */
@@ -489,6 +507,7 @@ BOOL Radeon3DDispatchIndirect(struct Radeon3DDevice *device,
     s = &Device.seg[indirect->SegmentId - 1];
     if (!s->used || indirect->ByteOffset + indirect->DwordCount * 4 > s->bytes)
         return FALSE;
+    FlipLatched();
     if (!Eg3DLock())
         return FALSE;
     fence = Eg3DSubmit(Device.info.ScratchOffset + s->off + indirect->ByteOffset,

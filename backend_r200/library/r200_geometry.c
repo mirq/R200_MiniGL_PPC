@@ -2293,11 +2293,20 @@ static BOOL EmitHardwarePolygonEdges(struct MiniGLR200Context *context,
     }
 }
 
+#if MGL_EVERGREEN
+static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vertex *v,
+                            ULONG count, GLenum mode);
+#endif
+
 static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
                                   const struct Vertex *vertices, ULONG count,
                                   GLenum primitive)
 {
     ULONG index, batch;
+#if MGL_EVERGREEN
+    if (EgImmediateDraw(context, vertices, count, primitive))
+        return TRUE;
+#endif
 
     if (primitive == MGL_FLATFAN || primitive == MGL_FLATSTRIP ||
         primitive == MGL_FLATTRIANGLES) {

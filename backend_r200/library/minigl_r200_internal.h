@@ -132,7 +132,14 @@ static __inline__ void MglCopyMem(const void *src, void *dst, ULONG n)
 ULONG DepthStorageWidth(ULONG width);
 /* Triangle lists may contain 255 vertices; quad batches are limited to 252. */
 #define SCREEN_VERTEX_CAPACITY MAX_SCREEN_VERTICES
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+/* Evergreen batches: a whole frame of records (every batch repeats the
+ * engine's default state, so fewer is cheaper); the command buffer of
+ * R200_CP_SLOT_DWORDS holds no vertices */
+#define MAX_RECORD_DWORDS 24576UL
+#else
 #define MAX_RECORD_DWORDS RADEON3D_MAX_BATCH_DWORDS
+#endif
 #define MAX_GENERATED_DWORDS RADEON3D_MAX_BATCH_DWORDS
 #ifndef R200_CPEMIT_68K
 /* 0 outside the minigl68k build (Makefile_dispatch_r68k.gcc): C code tests
@@ -738,6 +745,12 @@ struct MiniGLR200Context {
     BOOL egFlipOff;
     UWORD egFlipPad;
     ULONG egFlipSerial;     /* batchSerial at the last flip */
+    BOOL egFlipQueued;      /* egFlipBuffer drawn, shown at the next present */
+    BOOL egImmValid;        /* the last immediate draw, for EgImmediateDraw merges */
+    ULONG egImmSerial, egImmSlot, egImmRecords, egImmRecord, egImmRingEnd,
+          egImmPrim, egImmStride;
+    UWORD egFlipPad2;
+    ULONG egFlipBuffer, egFlipFence;
     /* the resident copies (RadeonGL's array hints) */
     struct BitMap *egCacheBitMap;
     struct Radeon3DSurface egCacheSurface;

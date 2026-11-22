@@ -715,6 +715,199 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
     return TRUE;
 }
 
+/* glBegin/glEnd draws with hardware transform: the vertices straight into
+ * the ring as interleaved records (x, y, z[, w], ARGB colour, s, t[, s1,
+ * t1]), one write each, drawn as an EG_EXEC_ARRAYS record. Fans, polygons
+ * and quads become triangle lists so the next draw with the same state
+ * extends the same record (GLQuake's per-polygon water and sky). FALSE:
+ * not covered, nothing touched (the caller takes the old path). */
+static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vertex *v,
+                            ULONG count, GLenum mode)
+{
+    struct PendingDrawState *state;
+    struct SubmitSlot *slot;
+    ULONG prim, n, i, posDw, strideDw, bytes, need, *record, *ga, slotIndex;
+    BOOL w4 = FALSE, tex1, merge;
+    volatile ULONG *cpu;
+
+    if (context->egArraysOff || !context->device || context->insideBegin ||
+        context->fogEnabled || context->lightingEnabled || context->paletteLookup ||
+        context->polygonMode != GL_FILL)
+        return FALSE;
+    switch (mode) {
+    case GL_TRIANGLES:
+        prim = RADEON3D_EXEC_DRAW_TRIANGLES;
+        n = count - count % 3UL;
+        break;
+    case GL_TRIANGLE_FAN:
+    case GL_POLYGON:
+        if (context->shadeModel == GL_FLAT)
+            return FALSE;
+        prim = RADEON3D_EXEC_DRAW_TRIANGLES;
+        n = count >= 3UL ? (count - 2UL) * 3UL : 0;
+        break;
+    case GL_QUADS:
+        if (context->shadeModel == GL_FLAT)
+            return FALSE;
+        prim = RADEON3D_EXEC_DRAW_TRIANGLES;
+        n = (count / 4UL) * 6UL;
+        break;
+    case GL_POINTS:
+        if (context->pointSize > 255.0f)
+            return FALSE;
+        prim = RADEON3D_EXEC_DRAW_POINTS;
+        n = count;
+        break;
+    default:
+        return FALSE;
+    }
+    {
+        ULONG hardwareSphereMap = HardwareSphereMapMask(context);
+        if (hardwareSphereMap || SoftwareSphereMapMask(context, hardwareSphereMap))
+            return FALSE;
+    }
+    if (!n)
+        return TRUE;
+    for (i = 0; i < count; ++i)
+        if (v[i].w != 1.0f) {
+            w4 = TRUE;
+            break;
+        }
+    if (!EgRingReady(context))
+        return FALSE;
+    if (context->screenVertexCount && !FlushScreenVertices(context))
+        return FALSE;
+    context->screenHardwareTransform = TRUE;
+    context->screenProjective = FALSE;
+    i = PrepareScreenAppend(context, prim);
+    context->screenHardwareTransform = FALSE;
+    if (!i)
+        return FALSE;
+    state = &context->pendingDraw;
+    context->pendingDrawValid = FALSE;
+    if (!state->drawEnabled || !state->drawRectangleValid)
+        return TRUE;
+    if (!state->hardwareTransform || state->normalVertex || state->lit || state->fog ||
+        state->hardwareSphereMap ||
+        state->headerDwords != RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS ||
+        (state->header[5] & (RADEON3D_DRAW_TEXGEN | RADEON3D_DRAW_LIGHTING |
+                             RADEON3D_DRAW_PALETTE | RADEON3D_DRAW_NORMALS)))
+        return FALSE;
+    tex1 = state->textured[1];
+    posDw = w4 ? 4UL : 3UL;
+    strideDw = posDw + 3UL + (tex1 ? 2UL : 0UL);
+    bytes = n * strideDw * 4UL;
+    if (bytes + 64UL > EG_RING_SLOT_BYTES)
+        return FALSE;
+    need = state->headerDwords + EG_ARRAYS_DWORDS;
+    slot = BuildSubmitSlot(context);
+    slotIndex = context->buildSlot;
+    (void)EgRingUsed(context);
+    /* the same state right after the previous immediate draw: extend it */
+    merge = context->egImmValid && context->egImmSerial == context->batchSerial &&
+            context->egImmSlot == slotIndex &&
+            context->egImmRecords == slot->recordCount &&
+            context->egImmRingEnd == context->egRingCursor[slotIndex] &&
+            context->egImmPrim == prim && context->egImmStride == strideDw &&
+            context->egRingCursor[slotIndex] + bytes <= EG_RING_SLOT_BYTES;
+    if (merge) {
+        record = slot->records + context->egImmRecord;
+        for (i = 2; i < state->headerDwords; ++i)
+            if (i != 10UL && record[i] != state->header[i]) {
+                merge = FALSE;
+                break;
+            }
+    }
+    if (!merge) {
+        if ((slot->commitMode && slot->drawCount) ||
+            slot->recordCount + need > context->batchDwords ||
+            slot->generatedDwordCount + EG_ARRAYS_GENERATED > R200_CP_SLOT_DWORDS - 1024UL ||
+            EgRingUsed(context) + bytes + 64UL > EG_RING_SLOT_BYTES) {
+            if (!Submit(context))
+                return FALSE;
+            slot = BuildSubmitSlot(context);
+            slotIndex = context->buildSlot;
+            if (slot->recordCount + need > context->batchDwords ||
+                EgRingUsed(context) + bytes + 64UL > EG_RING_SLOT_BYTES)
+                return FALSE;
+        }
+        record = slot->records + slot->recordCount;
+        for (i = 0; i < state->headerDwords; ++i)
+            record[i] = state->header[i];
+        record[0] = EG_EXEC_ARRAYS;
+        record[1] = need;
+        record[10] = 0;
+        ga = record + state->headerDwords;
+        for (i = 0; i < EG_ARRAYS_DWORDS; ++i)
+            ga[i] = 0;
+        ga[EGA_PRIM] = prim;
+        ga[EGA_FORMATS] = posDw | (EGA_COL_ARGB << EGA_COL_SHIFT) | EGA_INTERLEAVED |
+                          EGA_COL_ARRAY;
+        ga[EGA_OFFSETS] = (posDw * 4UL) | ((posDw * 4UL + 4UL) << 8) |
+                          ((posDw * 4UL + 12UL) << 16);
+        ga[EGA_POS_STRIDE] = strideDw * 4UL;
+        ga[EGA_POS_GPU] = EgRingAlloc(context, bytes, &cpu);
+        context->egImmRecord = slot->recordCount;
+        slot->recordCount += need;
+        slot->generatedDwordCount += EG_ARRAYS_GENERATED;
+        if (!slot->modeDecided) {
+            slot->commitMode = FALSE;
+            slot->modeDecided = TRUE;
+        }
+        slot->lastDrawValid = FALSE;
+    } else {
+        cpu = (volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
+                                 slotIndex * EG_RING_SLOT_BYTES +
+                                 context->egRingCursor[slotIndex]);
+        context->egRingCursor[slotIndex] += bytes;
+        ga = record + state->headerDwords;
+    }
+    ga[EGA_COUNT] += n;
+    ga[EGA_VERTS] += n;
+    record[10] += n;
+    /* the vertices, in list order */
+    {
+#define EG_PUT(vx) do { const struct Vertex *p_ = (vx); \
+        *cpu++ = *(const ULONG *)&p_->x; *cpu++ = *(const ULONG *)&p_->y; \
+        *cpu++ = *(const ULONG *)&p_->z; if (w4) *cpu++ = *(const ULONG *)&p_->w; \
+        *cpu++ = p_->color; *cpu++ = *(const ULONG *)&p_->s; *cpu++ = *(const ULONG *)&p_->t; \
+        if (tex1) { *cpu++ = *(const ULONG *)&p_->s1; *cpu++ = *(const ULONG *)&p_->t1; } } while (0)
+        if (mode == GL_TRIANGLE_FAN || mode == GL_POLYGON) {
+            for (i = 1; i + 1UL < count; ++i) {
+                EG_PUT(&v[0]);
+                EG_PUT(&v[i]);
+                EG_PUT(&v[i + 1UL]);
+            }
+        } else if (mode == GL_QUADS) {
+            for (i = 0; i + 3UL < count; i += 4UL) {
+                EG_PUT(&v[i]);
+                EG_PUT(&v[i + 1UL]);
+                EG_PUT(&v[i + 2UL]);
+                EG_PUT(&v[i]);
+                EG_PUT(&v[i + 2UL]);
+                EG_PUT(&v[i + 3UL]);
+            }
+        } else {
+            for (i = 0; i < n; ++i)
+                EG_PUT(&v[i]);
+        }
+#undef EG_PUT
+    }
+    context->egImmValid = TRUE;
+    context->egImmSerial = context->batchSerial;
+    context->egImmSlot = slotIndex;
+    context->egImmRecords = slot->recordCount;
+    context->egImmRingEnd = context->egRingCursor[slotIndex];
+    context->egImmPrim = prim;
+    context->egImmStride = strideDw;
+    if (state->textured[0])
+        MarkTextureQueued(context, state->textureName[0]);
+    if (tex1)
+        MarkTextureQueued(context, state->textureName[1]);
+    EgDrawn++;
+    return TRUE;
+}
+
 /* Context teardown (all submissions retired). */
 void EgArraysRelease(struct MiniGLR200Context *context)
 {
