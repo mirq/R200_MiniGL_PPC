@@ -2848,6 +2848,8 @@ static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
             *p++ = *(const ULONG *)&y;
             *p++ = *(const ULONG *)&z;
             *p++ = context->currentColor;
+            if (context->currentColor != context->egDirColor0)
+                context->egDirVaried = TRUE;
             if (context->egDirTexAny) {
                 *p++ = *(const ULONG *)&context->currentS[0];
                 *p++ = *(const ULONG *)&context->currentT[0];
@@ -2860,6 +2862,7 @@ static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
             context->vertexCount++;
             return;
         }
+        { extern ULONG EgDirRefuse[10]; EgDirRefuse[9]++; }
         EgDirectAbort(context);
     }
 #endif
@@ -2911,6 +2914,7 @@ void Lib_glEnd(void)
         if (EgDirectEnd(context))
             return;
         /* not drawn directly after all: the vertices back, the old way */
+        { extern ULONG EgDirRefuse[10]; EgDirRefuse[8]++; }
         context->egDirect = TRUE;
         EgDirectAbort(context);
     }

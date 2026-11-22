@@ -971,6 +971,8 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
  * extends the last one) as EgImmediateDraw does. Anything unusual (w != 1,
  * a full ring part, glArrayElement) reads the written vertices back and
  * continues the old way (EgDirectAbort). */
+ULONG EgDirRefuse[10];
+#define EG_DIR_REFUSE(n) do { EgDirRefuse[n]++; return FALSE; } while (0)
 static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
 {
     struct PendingDrawState *state;
@@ -982,33 +984,33 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
         context->textureMatrixActive[0] || context->textureMatrixActive[1] ||
         context->textureGenS[0] || context->textureGenT[0] ||
         context->textureGenS[1] || context->textureGenT[1])
-        return FALSE;
+        EG_DIR_REFUSE(0);
     switch (mode) {
     case GL_TRIANGLES:
         prim = RADEON3D_EXEC_DRAW_TRIANGLES;
         break;
     case GL_TRIANGLE_FAN:
     case GL_QUADS:
-        if (context->shadeModel == GL_FLAT)
-            return FALSE;
+        /* flat: the split moves the provoking vertex, which only matters
+         * when the colour varies (checked per vertex, EgDirectEnd) */
         prim = RADEON3D_EXEC_DRAW_TRIANGLES;
         break;
     case GL_POLYGON:
         /* not where glEnd may queue it for the two-pass multitexture */
-        if (context->shadeModel == GL_FLAT || context->textureEnabled[1])
-            return FALSE;
+        if (context->textureEnabled[1])
+            EG_DIR_REFUSE(2);
         prim = RADEON3D_EXEC_DRAW_TRIANGLES;
         break;
     case GL_POINTS:
         if (context->pointSize > 255.0f)
-            return FALSE;
+            EG_DIR_REFUSE(3);
         prim = RADEON3D_EXEC_DRAW_POINTS;
         break;
     default:
-        return FALSE;
+        EG_DIR_REFUSE(4);
     }
     if (!EgRingReady(context))
-        return FALSE;
+        EG_DIR_REFUSE(5);
     if (context->screenVertexCount && !FlushScreenVertices(context))
         return FALSE;
     context->insideBegin = FALSE;
@@ -1020,7 +1022,7 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
     context->screenHardwareTransform = FALSE;
     context->insideBegin = TRUE;
     if (!i)
-        return FALSE;
+        EG_DIR_REFUSE(6);
     state = context->egCaptured;
     if (!state->drawEnabled || !state->drawRectangleValid ||
         !state->hardwareTransform || state->normalVertex || state->lit || state->fog ||
@@ -1028,7 +1030,7 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
         state->headerDwords != RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS ||
         (state->header[5] & (RADEON3D_DRAW_TEXGEN | RADEON3D_DRAW_LIGHTING |
                              RADEON3D_DRAW_PALETTE | RADEON3D_DRAW_NORMALS)))
-        return FALSE;
+        EG_DIR_REFUSE(7);
     context->egDirTex1 = state->textured[1];
     context->egDirTexAny = state->textured[0] || state->textured[1];
     context->egDirStride = 4UL + (context->egDirTexAny ? 2UL : 0UL) +
@@ -1056,6 +1058,10 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
     context->egDirCap = room;
     context->egDirPrim = prim;
     context->egDirState = state;
+    context->egDirFlat = context->shadeModel == GL_FLAT &&
+                         (mode == GL_TRIANGLE_FAN || mode == GL_QUADS || mode == GL_POLYGON);
+    context->egDirColor0 = context->currentColor;
+    context->egDirVaried = FALSE;
     context->vertexCount = 0;
     context->egDirect = TRUE;
     return TRUE;
@@ -1112,6 +1118,8 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
     BOOL indexed = prim != RADEON3D_EXEC_DRAW_POINTS, merge;
 
     context->egDirect = FALSE;
+    if (context->egDirFlat && context->egDirVaried)
+        return FALSE;           /* flat with varying colour: the old way */
     switch (mode) {
     case GL_TRIANGLES:      vN = idxN = count - count % 3UL; break;
     case GL_QUADS:          vN = count & ~3UL; idxN = (count / 4UL) * 6UL; break;
@@ -1329,6 +1337,13 @@ void EgArraysRelease(struct MiniGLR200Context *context)
             }
         }
 #endif
+        {
+            ULONG k4;
+            dbg_puts(" dirrefuse:");
+            for (k4 = 0; k4 < 10UL; ++k4) { dbg_puts(" "); dbg_u32(EgDirRefuse[k4]); }
+            dbg_puts(" dirfail=");
+            dbg_u32(EgDirRefuse[8]);
+        }
         dbg_puts(" copiedlongs=");
         dbg_u32(EgCopiedLongs);
         dbg_puts(" immlongs=");

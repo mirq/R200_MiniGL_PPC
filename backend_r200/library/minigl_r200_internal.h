@@ -758,7 +758,8 @@ struct MiniGLR200Context {
     ULONG egImmIdxCursor[SUBMIT_SLOT_COUNT];
     ULONG egColor, egColorGpu, egColorSerial, egColorSlot;  /* constant colour word */
     /* direct immediate mode (EgDirectBegin) */
-    BOOL egDirect, egDirTexAny, egDirTex1, egDirPad;
+    BOOL egDirect, egDirTexAny, egDirTex1, egDirFlat, egDirVaried;
+    ULONG egDirColor0;
     volatile ULONG *egDirCpu;
     ULONG egDirStart, egDirSlot, egDirSerial, egDirCap, egDirPrim, egDirStride;
     struct PendingDrawState *egDirState;
