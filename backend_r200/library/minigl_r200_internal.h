@@ -773,6 +773,7 @@ struct MiniGLR200Context {
     /* bumped whenever the capture cache's header changes: a record written
      * at the same generation has the same header (no compare to merge) */
     ULONG egHdrGen, egImmHdrGen;
+    ULONG egDirOkSerial, egDirOkGen, egDirOkMode;   /* EgDirectBegin's last pass */
     volatile ULONG *egDirCpu;
     ULONG egDirStart, egDirSlot, egDirSerial, egDirCap, egDirPrim, egDirStride;
     struct PendingDrawState *egDirState;

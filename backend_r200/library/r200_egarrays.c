@@ -1014,6 +1014,16 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
     struct PendingDrawState *state;
     ULONG prim, i, slotIndex, room, start;
 
+    /* the state of the last direct glBegin, unchanged (water and sky:
+     * polygon after polygon): its checks and capture stand */
+    if (context->egDirOkSerial == context->semanticStateSerial &&
+        context->egDirOkGen == context->egHdrGen && context->egDirOkMode == mode &&
+        context->egDirOkSerial && !context->screenVertexCount && EgRingReady(context)) {
+        prim = context->egDirPrim;
+        state = context->egDirState;
+        goto ring;
+    }
+    context->egDirOkSerial = 0;
     if (context->egArraysOff || !context->device || context->fogEnabled ||
         context->lightingEnabled || context->paletteLookup ||
         context->polygonMode != GL_FILL || context->activeFastPath ||
@@ -1071,6 +1081,10 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
     context->egDirTexAny = state->textured[0] || state->textured[1];
     context->egDirStride = 4UL + (context->egDirTexAny ? 2UL : 0UL) +
                            (context->egDirTex1 ? 2UL : 0UL);
+    context->egDirOkSerial = context->semanticStateSerial;
+    context->egDirOkGen = context->egHdrGen;
+    context->egDirOkMode = mode;
+ring:
     (void)EgRingUsed(context);
     slotIndex = context->buildSlot;
     start = EgAlignFor(context->egRing.GpuAddress + slotIndex * EG_RING_SLOT_BYTES,
