@@ -66,6 +66,7 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
 #define EGA_POS_SIZE_MASK   0x7UL   /* 2, 3 or 4 floats */
 #define EGA_INTERLEAVED     0x100UL /* the arrays one buffer: EGA_POS_GPU, EGA_POS_STRIDE */
 #define EGA_COL_ARRAY       0x200UL /* the colour is an array in that buffer */
+#define EGA_RESTART         0x800UL /* indices 0xffff restart the primitive */
 #define EGA_COL_SHIFT       4
 #define EGA_COL_UBYTE4      0UL     /* R, G, B, A bytes */
 #define EGA_COL_FLOAT3      1UL

@@ -1033,6 +1033,20 @@ static void SetBaseVtx(ULONG base)
     }
 }
 
+/* VGT_MULTI_PRIM_IB_RESET_EN (index 0xffff): off at every buffer's start
+ * and end, as the present and the 2D driver expect it */
+static ULONG RestartShadow;
+
+static void SetRestart(ULONG on)
+{
+    if (RestartShadow != on) {
+        if (on)
+            Reg(VGT_MULTI_PRIM_IB_RESET_INDX, 0xffffUL);
+        Reg(VGT_MULTI_PRIM_IB_RESET_EN, on);
+        RestartShadow = on;
+    }
+}
+
 /* count big-endian 16- or 32-bit indices at gpu */
 static void EmitDrawIndexed(ULONG prim, ULONG count, ULONG gpu, BOOL index32)
 {
@@ -1426,6 +1440,7 @@ static void ArraysTail(const ULONG *ga, ULONG count, BOOL textured, BOOL texture
     } else {
         SetBaseVtx(window + ga[EGA_INDEX_OFFSET]);
         SetIndexOffset(0);
+        SetRestart((fmt & EGA_RESTART) ? 1UL : 0UL);
         EmitDrawIndexed(PrimType[ga[EGA_PRIM] % 10], count, ga[EGA_INDEX_GPU],
                         ga[EGA_INDEX_TYPE] == EGA_INDEX_32);
     }
@@ -1786,6 +1801,7 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
         walk += length;
     }
     SetBaseVtx(0);          /* as the present and the 2D driver expect it */
+    SetRestart(0);
     {
         ULONG n = EndBuffer(words);
         PersistOk = n != 0;
@@ -1850,6 +1866,7 @@ static void BeginBuffer(ULONG *words, ULONG capacity, BOOL persist)
     evergreen_set_default_state(&Xi);
     BaseVtx = ~0UL;
     SetBaseVtx(0);
+    RestartShadow = 0;      /* the default state */
     IndexOffset = 0;
     PrimShadow = IndexTypeShadow = ~0UL;
     PrevOk = FALSE;

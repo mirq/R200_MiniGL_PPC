@@ -1037,8 +1037,9 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
         break;
     case GL_TRIANGLE_FAN:
     case GL_QUADS:
-        /* flat: the split moves the provoking vertex, which only matters
-         * when the colour varies (checked per vertex, EgDirectEnd) */
+        /* flat: the hardware fan or quad takes another provoking vertex,
+         * which only matters when the colour varies (checked per vertex,
+         * EgDirectEnd) */
         prim = RADEON3D_EXEC_DRAW_TRIANGLES;
         break;
     case GL_POLYGON:
@@ -1109,7 +1110,11 @@ ring:
     context->egDirCpu = (volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
                                            slotIndex * EG_RING_SLOT_BYTES + context->egDirStart);
     context->egDirCap = room;
-    context->egDirPrim = prim;
+    /* the hardware's own fans (separated by the restart index) and quads:
+     * fewer indices than triangle lists */
+    context->egDirPrim = mode == GL_QUADS ? RADEON3D_EXEC_DRAW_QUADS :
+                         (mode == GL_TRIANGLE_FAN || mode == GL_POLYGON) ?
+                         RADEON3D_EXEC_DRAW_TRI_FAN : prim;
     context->egDirState = state;
     context->egDirFlat = context->shadeModel == GL_FLAT &&
                          (mode == GL_TRIANGLE_FAN || mode == GL_QUADS || mode == GL_POLYGON);
@@ -1168,22 +1173,23 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
     GLenum mode = context->primitive;
     ULONG count = context->vertexCount, vN, idxN, i, need, *record, *ga, ibytes, base;
     ULONG slotIndex = context->buildSlot, strideDw = context->egDirStride, prim = context->egDirPrim;
-    BOOL indexed = prim != RADEON3D_EXEC_DRAW_POINTS, merge;
+    BOOL indexed = prim != RADEON3D_EXEC_DRAW_POINTS, merge, fan;
 
     context->egDirect = FALSE;
     if (context->egDirFlat && context->egDirVaried)
         return FALSE;           /* flat with varying colour: the old way */
     switch (mode) {
     case GL_TRIANGLES:      vN = idxN = count - count % 3UL; break;
-    case GL_QUADS:          vN = count & ~3UL; idxN = (count / 4UL) * 6UL; break;
+    case GL_QUADS:          vN = idxN = count & ~3UL; break;
     case GL_POINTS:         vN = idxN = count; break;
-    default:                vN = count >= 3UL ? count : 0; idxN = vN ? (count - 2UL) * 3UL : 0; break;
+    default:                vN = idxN = count >= 3UL ? count : 0; break;
     }
+    fan = prim == RADEON3D_EXEC_DRAW_TRI_FAN;
     if (!vN)
         return TRUE;
     if (slotIndex != context->egDirSlot || context->batchSerial != context->egDirSerial)
         return FALSE;           /* cannot happen: no submit inside Begin/End */
-    ibytes = indexed ? idxN * 2UL : 0;
+    ibytes = indexed ? (idxN + 1UL) * 2UL : 0;     /* a fan's restart index */
     if (context->egImmIdxCursor[slotIndex] + ibytes + 8UL > EG_RING_INDEX_BYTES)
         return FALSE;
     need = state->headerDwords + EG_ARRAYS_DWORDS;
@@ -1192,7 +1198,7 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
             context->egImmRecords == slot->recordCount &&
             context->egImmRingEnd == context->egDirStart &&
             context->egImmPrim == prim && context->egImmStride == strideDw &&
-            context->egImmVerts + vN <= 65535UL;
+            context->egImmVerts + count < 65535UL;
     if (merge) {
         record = slot->records + context->egImmRecord;
         if (context->egImmHdrGen != context->egHdrGen)
@@ -1218,7 +1224,7 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
             ga[i] = 0;
         ga[EGA_PRIM] = prim;
         ga[EGA_FORMATS] = 3UL | (EGA_COL_ARGB << EGA_COL_SHIFT) | EGA_INTERLEAVED |
-                          EGA_COL_ARRAY;
+                          EGA_COL_ARRAY | (fan ? EGA_RESTART : 0UL);
         ga[EGA_OFFSETS] = 12UL | (16UL << 8) | (24UL << 16);
         ga[EGA_POS_STRIDE] = strideDw * 4UL;
         ga[EGA_POS_GPU] = context->egRing.GpuAddress + slotIndex * EG_RING_SLOT_BYTES +
@@ -1243,6 +1249,8 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
     /* the vertices are in place: the ring part ends behind them */
     context->egRingCursor[slotIndex] = context->egDirStart + count * strideDw * 4UL;
     base = context->egImmVerts;
+    if (fan && merge)
+        ++idxN;                 /* the restart before this polygon */
     ga[EGA_COUNT] += idxN;
     ga[EGA_VERTS] += count;
     record[10] += idxN;
@@ -1256,19 +1264,10 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
         else if (!havePending) { pending = v_; havePending = 1; } \
         else { *(volatile ULONG *)(lane + at) = (pending << 16) | v_; at += 4; havePending = 0; } \
         } while (0)
-        if (mode == GL_TRIANGLES) {
-            for (k = 0; k < idxN; ++k)
-                EG_IDX(k);
-        } else if (mode == GL_QUADS) {
-            for (k = 0; k < vN; k += 4UL) {
-                EG_IDX(k); EG_IDX(k + 1UL); EG_IDX(k + 2UL);
-                EG_IDX(k); EG_IDX(k + 2UL); EG_IDX(k + 3UL);
-            }
-        } else {
-            for (k = 1; k + 1UL < vN; ++k) {
-                EG_IDX(0UL); EG_IDX(k); EG_IDX(k + 1UL);
-            }
-        }
+        if (fan && merge)
+            EG_IDX(0xffffUL - base);    /* the restart index, 0xffff */
+        for (k = 0; k < vN; ++k)
+            EG_IDX(k);
         if (havePending) {
             *(volatile UWORD *)(lane + at) = (UWORD)pending;
             at += 2;
