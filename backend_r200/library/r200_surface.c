@@ -669,10 +669,26 @@ void Lib_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         (ULONG)y+(ULONG)height>context->height) {
         SetError(context,GL_INVALID_VALUE); return;
     }
+#if MGL_EVERGREEN
+    {
+        /* after a flip and before any new drawing, the back buffer reads
+         * as the frame just shown (what the copying present gave) */
+        BOOL shown = context->egFlipSerial && !context->egFlipOff &&
+                     context->batchSerial == context->egFlipSerial &&
+                     !context->screenVertexCount &&
+                     !BuildSubmitSlot(context)->recordCount;
+        if (!FlushScreenVertices(context) || !SubmitAndWait(context)) {
+            SetError(context,GL_INVALID_OPERATION); return;
+        }
+        surface = shown ? &context->surfaces[context->displayedBuffer]
+                        : ReadSourceSurface(context);
+    }
+#else
     if (!FlushScreenVertices(context) || !SubmitAndWait(context)) {
         SetError(context,GL_INVALID_OPERATION); return;
     }
     surface = ReadSourceSurface(context);
+#endif
     surfaceBytesPerPixel = SurfaceBytesPerPixel(surface->Format);
     destWidth = context->packRowLength ? context->packRowLength : (ULONG)width;
     destStride = destWidth*destBytes;
@@ -1163,6 +1179,19 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
                 LibraryBase->numberOfBuffers <= 3
             ? (ULONG)LibraryBase->numberOfBuffers
             : 3UL;
+#if MGL_EVERGREEN
+    /* double buffering is shown by flipping three buffers (EgFlip): the
+     * client sees two, the third is the one still on screen.
+     * MGLEgFlip=0: copy each frame onto the screen's own bitmap instead
+     * (for clients that read that bitmap, as the test suite does). */
+    {
+        TEXT v[4];
+        if (GetVar("MGLEgFlip", v, sizeof(v), 0) > 0 && v[0] == '0')
+            context->egFlipOff = TRUE;
+    }
+    if (context->screenBufferCount == 2UL && !context->egFlipOff)
+        context->screenBufferCount = 3UL;
+#endif
     if (context->screenBufferCount == 1UL)
         context->singleBuffer = TRUE;
     if (!context->singleBuffer) {
@@ -1517,9 +1546,37 @@ void Lib_mglSwitchDisplay(void)
      * the screen's own bitmap (the scanned-out one) with the 3D engine,
      * from the vertical blank on when sync is on (EgPresent). */
     if (context && context->fullscreen && !context->singleBuffer &&
+        context->screenBufferCount >= 3 && !context->insideBegin &&
+        context->drawBuffer != GL_FRONT && !context->egFlipOff) {
+        /* three buffers: show the one just drawn from the next vertical
+         * blank on (EgFlip), draw into the one shown before it */
+        ULONG drawn = context->drawingBuffer, handle;
+        if (!Submit(context)) {
+            SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        if (!EgFlip(context->device, &context->surfaces[drawn])) {
+            context->egFlipOff = TRUE;      /* copies from now on */
+            if (!EgPresent(context->device, &context->surfaces[drawn],
+                           &context->surfaces[0], context->width, context->height, TRUE))
+                SetError(context, GL_INVALID_OPERATION);
+            return;
+        }
+        context->displayedBuffer = drawn;
+        context->egFlipSerial = context->batchSerial;
+        context->drawingBuffer = (drawn + 1UL) % 3UL;
+        handle = (ULONG)context->surfaces[context->drawingBuffer].Handle;
+        if (context->captureCacheValid)
+            context->captureCache.header[2] = handle;
+        if (context->pendingDrawValid)
+            context->pendingDraw.header[2] = handle;
+        ReapDeferredSurfaces(context);
+        return;
+    }
+    if (context && context->fullscreen && !context->singleBuffer &&
         context->screenBufferCount >= 2 && !context->insideBegin &&
         context->drawBuffer != GL_FRONT) {
-        if (context->drawingBuffer == 0) {
+        if (context->drawingBuffer == 0 || context->drawingBuffer >= 2) {
             context->drawingBuffer = 1;
         }
         if (!Submit(context) ||

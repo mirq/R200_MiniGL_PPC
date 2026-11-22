@@ -734,6 +734,9 @@ struct MiniGLR200Context {
     ULONG egRingSerial[SUBMIT_SLOT_COUNT];
     BOOL egArraysOff;
     BOOL egCacheOff;
+    BOOL egFlipOff;
+    UWORD egFlipPad;
+    ULONG egFlipSerial;     /* batchSerial at the last flip */
     /* the resident copies (RadeonGL's array hints) */
     struct BitMap *egCacheBitMap;
     struct Radeon3DSurface egCacheSurface;

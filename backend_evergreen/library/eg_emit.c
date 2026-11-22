@@ -572,11 +572,14 @@ static void EmitTarget(const struct Target *t)
     case EG_FORMAT_A8R8G8B8:       fmt = COLOR_8_8_8_8; endian = ENDIAN_8IN32; break;
     default:                       fmt = COLOR_8_8_8_8; endian = ENDIAN_NONE; break;
     }
-    /* 565: R in the high bits (comp_swap 0); 8888: ARGB (comp_swap 1),
-     * as the 2D path (eg_draw.c Target) */
+    /* 565: the reversed standard order puts red in the high bits, the
+     * bytes the display and Picasso96 expect (MEASURED: the standard swap
+     * gave red/blue exchanged frames on a flip, the alternate one drops
+     * red); 8888: ARGB (alternate) as the 2D path (eg_draw.c Target) */
     info0 = (endian << ENDIAN_shift) | (fmt << CB_COLOR0_INFO__FORMAT_shift) |
             (ARRAY_LINEAR_GENERAL << CB_COLOR0_INFO__ARRAY_MODE_shift) |
-            ((bpp == 4 && t->format != EG_FORMAT_RAW32 ? 1UL : 0UL) << COMP_SWAP_shift) |
+            ((t->format == EG_FORMAT_RAW32 || t->format == EG_FORMAT_RAW16 ? 0UL :
+              bpp == 4 ? 1UL : 2UL) << COMP_SWAP_shift) |
             (EXPORT_4C_16BPC << SOURCE_FORMAT_shift) | BLEND_CLAMP_bit;
     BEGIN_BATCH(40);
     EREG(CB_COLOR0_BASE, t->gpu >> 8);

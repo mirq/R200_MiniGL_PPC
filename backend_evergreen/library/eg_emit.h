@@ -85,6 +85,9 @@ BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
                const struct Radeon3DSurface *dst, ULONG width, ULONG height,
                BOOL waitVblank);
 
+BOOL EgFlip(struct Radeon3DDevice *device, const struct Radeon3DSurface *s);
+void EgFlipRestore(struct Radeon3DDevice *device);
+
 extern ULONG EgEmitFailStage;
 extern ULONG EgEmitFace;
 

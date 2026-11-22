@@ -382,6 +382,11 @@ static void DestroyContext(struct MiniGLR200Context *context)
                     context->textures[index].levelCount *
                         sizeof(struct TextureDirtyRect));
     }
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN
+    /* the screen's own bitmap back on show before its buffers go */
+    if (context->device)
+        EgFlipRestore(context->device);
+#endif
     for (index = R200_SCREEN_BUFFERS; index-- > 0;) {
         if (context->screenBuffers[index]) {
             context->screenBuffers[index]->sb_DBufInfo

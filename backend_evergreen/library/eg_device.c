@@ -248,6 +248,77 @@ BOOL EgPresent(struct Radeon3DDevice *device, const struct Radeon3DSurface *src,
     return TRUE;
 }
 
+static void CrtcWrite(ULONG reg, ULONG v)
+{
+    *(volatile ULONG *)((UBYTE *)Device.info.Registers + reg) =
+        (v >> 24) | ((v >> 8) & 0xff00UL) | ((v << 8) & 0xff0000UL) | (v << 24);
+}
+
+#define GRPH_PRIMARY_SURFACE_ADDRESS        0x6810
+#define GRPH_SECONDARY_SURFACE_ADDRESS      0x6814
+#define GRPH_PRIMARY_SURFACE_ADDRESS_HIGH   0x681c
+#define GRPH_SECONDARY_SURFACE_ADDRESS_HIGH 0x6820
+#define GRPH_UPDATE                         0x6844
+#define GRPH_SURFACE_UPDATE_PENDING         (1UL << 2)
+#define GRPH_UPDATE_LOCK                    (1UL << 16)
+
+static ULONG FlipRestore;       /* the scanout address before the first flip */
+
+/* Show surface s from the next vertical blank on (CRTC 0 latches a new
+ * scanout address there: no tearing, no wait for the beam). Its frame
+ * must be drawn first: the last submitted fence is waited for (the
+ * engine is normally done by now). A previous flip still pending is
+ * waited out first, so the surface it replaced is off the screen before
+ * anything draws into it again (at most one refresh, only when frames
+ * come faster than the display). FALSE: flipping is not possible (the
+ * caller copies instead). */
+BOOL EgFlip(struct Radeon3DDevice *device, const struct Radeon3DSurface *s)
+{
+    ULONG i, addr, pitch, bpp;
+
+    if (device != &Device || !DeviceOpen || !s || !Device.info.Registers ||
+        !(CrtcRead(0x6e70) & 1) || !(CrtcRead(0x6800) & 1))
+        return FALSE;
+    bpp = (s->Format == RADEON3D_FORMAT_R5G6B5PC || s->Format == EG_FORMAT_R5G6B5) ? 2 : 4;
+    pitch = (CrtcRead(0x6818) & 0x7fffUL) * bpp;
+    if (pitch != s->Pitch || (s->GpuAddress & 0xffUL))
+        return FALSE;
+    if (Device.lastFence)
+        (void)Eg3DWait(Device.lastFence);
+    for (i = 0; i < 40000UL && (CrtcRead(GRPH_UPDATE) & GRPH_SURFACE_UPDATE_PENDING); ++i)
+        ;
+    addr = s->GpuAddress;
+    if (!FlipRestore)
+        FlipRestore = CrtcRead(GRPH_PRIMARY_SURFACE_ADDRESS) | 1UL;
+    CrtcWrite(GRPH_UPDATE, CrtcRead(GRPH_UPDATE) | GRPH_UPDATE_LOCK);
+    CrtcWrite(GRPH_PRIMARY_SURFACE_ADDRESS_HIGH, 0);
+    CrtcWrite(GRPH_SECONDARY_SURFACE_ADDRESS_HIGH, 0);
+    CrtcWrite(GRPH_PRIMARY_SURFACE_ADDRESS, addr);
+    CrtcWrite(GRPH_SECONDARY_SURFACE_ADDRESS, addr);
+    CrtcWrite(GRPH_UPDATE, CrtcRead(GRPH_UPDATE) & ~GRPH_UPDATE_LOCK);
+    return TRUE;
+}
+
+/* The scanout as it was before the first flip (context end). */
+void EgFlipRestore(struct Radeon3DDevice *device)
+{
+    ULONG addr = FlipRestore & ~0xffUL, i;
+
+    if (device != &Device || !FlipRestore || !Device.info.Registers)
+        return;
+    if (Device.lastFence)
+        (void)Eg3DWait(Device.lastFence);
+    for (i = 0; i < 40000UL && (CrtcRead(GRPH_UPDATE) & GRPH_SURFACE_UPDATE_PENDING); ++i)
+        ;
+    CrtcWrite(GRPH_UPDATE, CrtcRead(GRPH_UPDATE) | GRPH_UPDATE_LOCK);
+    CrtcWrite(GRPH_PRIMARY_SURFACE_ADDRESS, addr);
+    CrtcWrite(GRPH_SECONDARY_SURFACE_ADDRESS, addr);
+    CrtcWrite(GRPH_UPDATE, CrtcRead(GRPH_UPDATE) & ~GRPH_UPDATE_LOCK);
+    for (i = 0; i < 40000UL && (CrtcRead(GRPH_UPDATE) & GRPH_SURFACE_UPDATE_PENDING); ++i)
+        ;
+    FlipRestore = 0;
+}
+
 /* first fit over the scratch block above the emitter's regions */
 static BOOL ScratchAlloc(ULONG bytes, ULONG *offOut)
 {
