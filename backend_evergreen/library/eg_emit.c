@@ -1383,7 +1383,10 @@ static void ArraysTail(const ULONG *ga, ULONG count, BOOL textured, BOOL texture
          * its 16 MB block, the data's first record selected by
          * VGT_INDX_OFFSET -- draws of one stride share the resource. */
         ULONG st = ga[EGA_POS_STRIDE], gpu = ga[EGA_POS_GPU];
-        if (st >= 4UL && !(st & 3UL)) {
+        /* indexed draws only: with auto-generated indices the base did
+         * not take (MEASURED: raster.point-size, the first point drawn 4
+         * pixels wide) */
+        if (st >= 4UL && !(st & 3UL) && ga[EGA_INDEX_TYPE] != EGA_INDEX_NONE) {
             ULONG b0 = gpu & ~0xffffffUL;
             window = (gpu - b0) / st;
             VertexBufferOnce(0, gpu - window * st, 0x2000000UL, st);
