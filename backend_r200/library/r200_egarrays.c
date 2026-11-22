@@ -654,11 +654,21 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         ga[EGA_COL_GPU] = gpu[i];
         ga[EGA_COL_STRIDE] = stride[i++];
     } else {
-        /* the current colour, R, G, B, A bytes, for every vertex */
+        /* the current colour, R, G, B, A bytes, for every vertex: the same
+         * ring word as the last draw's while the colour stays (one vertex
+         * buffer resource less to send) */
         ULONG c = context->currentColor;
-        ga[EGA_COL_GPU] = EgRingAlloc(context, 4UL, &cpu);
-        cpu[0] = (((c >> 16) & 0xffUL) << 24) | (((c >> 8) & 0xffUL) << 16) |
-                 ((c & 0xffUL) << 8) | (c >> 24);
+        if (context->egColorSerial != context->batchSerial ||
+            context->egColorSlot != context->buildSlot || context->egColor != c ||
+            !context->egColorGpu) {
+            context->egColorGpu = EgRingAlloc(context, 4UL, &cpu);
+            cpu[0] = (((c >> 16) & 0xffUL) << 24) | (((c >> 8) & 0xffUL) << 16) |
+                     ((c & 0xffUL) << 8) | (c >> 24);
+            context->egColor = c;
+            context->egColorSerial = context->batchSerial;
+            context->egColorSlot = context->buildSlot;
+        }
+        ga[EGA_COL_GPU] = context->egColorGpu;
         ga[EGA_COL_STRIDE] = 0;
     }
     {

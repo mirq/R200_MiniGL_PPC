@@ -752,6 +752,7 @@ struct MiniGLR200Context {
     ULONG egImmSerial, egImmSlot, egImmRecords, egImmRecord, egImmRingEnd,
           egImmPrim, egImmStride, egImmVerts;
     ULONG egImmIdxCursor[SUBMIT_SLOT_COUNT];
+    ULONG egColor, egColorGpu, egColorSerial, egColorSlot;  /* constant colour word */
     UWORD egFlipPad2;
     ULONG egFlipBuffer, egFlipFence;
     /* the resident copies (RadeonGL's array hints) */

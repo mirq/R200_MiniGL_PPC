@@ -715,6 +715,8 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
 #define TEX_REPLAY 32
 static struct { ULONG key[4]; ULONG n; ULONG w[24]; } TexReplay[TEX_REPLAY];
 static ULONG TexReplayNext;
+/* the sampler words each unit has in this buffer (0: unknown) */
+static ULONG SampShadow[2][3];
 
 static void Replay(const ULONG *w, ULONG n)
 {
@@ -742,7 +744,21 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
     for (i = 0; i < TEX_REPLAY; ++i)
         if (TexReplay[i].n && TexReplay[i].key[0] == gpu && TexReplay[i].key[1] == k3 &&
             TexReplay[i].key[2] == key) {
-            Replay(TexReplay[i].w, TexReplay[i].n);
+            /* the resource (10 words), then the sampler (5) unless the unit
+             * has the same sampler already */
+            if (TexReplay[i].n == 15UL && SampShadow[unit][0] &&
+                SampShadow[unit][0] == TexReplay[i].w[12] &&
+                SampShadow[unit][1] == TexReplay[i].w[13] &&
+                SampShadow[unit][2] == TexReplay[i].w[14])
+                Replay(TexReplay[i].w, 10);
+            else {
+                Replay(TexReplay[i].w, TexReplay[i].n);
+                if (TexReplay[i].n == 15UL) {
+                    SampShadow[unit][0] = TexReplay[i].w[12];
+                    SampShadow[unit][1] = TexReplay[i].w[13];
+                    SampShadow[unit][2] = TexReplay[i].w[14];
+                }
+            }
             Sh.tex[unit][0] = gpu;
             Sh.tex[unit][1] = size;
             Sh.tex[unit][2] = key;
@@ -762,6 +778,12 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
         TexReplay[i].key[2] = key;
         TexReplay[i].key[3] = Sh.tex[unit][3];
         TexReplay[i].n = EmitCp.Wptr - start;
+        if (TexReplay[i].n == 15UL) {
+            SampShadow[unit][0] = TexReplay[i].w[12];
+            SampShadow[unit][1] = TexReplay[i].w[13];
+            SampShadow[unit][2] = TexReplay[i].w[14];
+        } else
+            SampShadow[unit][0] = 0;
     }
 }
 
@@ -1649,6 +1671,7 @@ static void BeginBuffer(ULONG *words, ULONG capacity)
     IndexOffset = 0;
     PrimShadow = IndexTypeShadow = ~0UL;
     PrevOk = FALSE;
+    memset(SampShadow, 0, sizeof(SampShadow));
     memset(VbufShadow, 0, sizeof(VbufShadow));
     /* everything the CPU wrote before this buffer: textures, vertices,
      * constants, shaders */
