@@ -35,6 +35,7 @@
 
 /* --- the command buffer (an EgCp whose "ring" is the staging buffer) ----- */
 
+static BOOL PersistOk;          /* see EgEmitBatch */
 static struct EgHw EmitHw;
 static struct EgCp EmitCp;
 static RADEONInfoRec Xi;
@@ -84,6 +85,7 @@ void EgEmitInit(APTR vramCpu, ULONG vramGpu, ULONG shaderOff, ULONG shaderSize,
     for (i = 0; i < EG_EMIT_SLOTS; ++i)
         StreamOff[i] = streamOff + i * streamSlotSize;
     StreamSize = streamSlotSize;
+    PersistOk = FALSE;
     EgEmitFlushShaders();
 }
 
@@ -1583,8 +1585,16 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
 
 /* --- one batch ----------------------------------------------------------- */
 
-static void BeginBuffer(ULONG *words, ULONG capacity);
+static void BeginBuffer(ULONG *words, ULONG capacity, BOOL persist);
 static ULONG EndBuffer(ULONG *words);
+
+/* The engine's state as the last buffer left it, if nothing else ran on the
+ * engine since (EgEngineOurs, eg_device.c): a buffer then starts without
+ * the default state and keeps the state shadows. EgEmitPersisted tells the
+ * dispatch to verify that (else the batch is emitted again in full). */
+ULONG EgEmitPersisted;
+BOOL EgEmitForceFull;
+BOOL EgEngineOurs(void);
 
 ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
                   const ULONG *records, ULONG recordDwords,
@@ -1593,9 +1603,12 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
     ULONG walk = 0;
 
     EgEmitFailStage = 0;
+    EgEmitPersisted = PersistOk && !EgEmitForceFull && EgEngineOurs();
+    EgEmitForceFull = FALSE;
+    PersistOk = FALSE;      /* until this buffer is complete */
     {
     EGE_BEGIN();
-    BeginBuffer(words, capacity);
+    BeginBuffer(words, capacity, EgEmitPersisted);
     EGE_END(14);
     }
     StreamSlot = slot % EG_EMIT_SLOTS;
@@ -1632,15 +1645,39 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
         }
         walk += length;
     }
-    return EndBuffer(words);
+    {
+        ULONG n = EndBuffer(words);
+        PersistOk = n != 0;
+        return n;
+    }
 }
 
 /* A fresh buffer: the engine's default state, then a flush of everything
  * the CPU wrote before it (textures, vertices, constants, shaders). */
-static void BeginBuffer(ULONG *words, ULONG capacity)
+static void BeginBuffer(ULONG *words, ULONG capacity, BOOL persist)
 {
     RADEONInfoPtr info = &Xi;
 
+    if (persist) {
+        /* the engine holds the last buffer's state: keep the shadows, but
+         * nothing that points into a stream or ring part (reused) */
+        EmitOverflow = FALSE;
+        EmitCp.Ring = (volatile ULONG *)words;
+        EmitCp.Wptr = 0;
+        EmitCapacity = capacity;
+        Sh.vsConstGpu = 0;
+        Sh.psConstGpu = 0;
+        PrevOk = FALSE;
+        memset(VbufShadow, 0, sizeof(VbufShadow));
+        BEGIN_BATCH(5);
+        PACK3(IT_SURFACE_SYNC, 4);
+        E32(TC_ACTION_ENA_bit | SH_ACTION_ENA_bit);
+        E32(0xffffffffUL);
+        E32(0);
+        E32(10);
+        END_BATCH();
+        return;
+    }
     EmitOverflow = FALSE;
     memset(&EmitHw, 0, sizeof(EmitHw));
     memset(&EmitCp, 0, sizeof(EmitCp));
@@ -1736,7 +1773,8 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
     volatile ULONG *dst = (volatile ULONG *)vertCpu;
 
     EgEmitFailStage = 0;
-    BeginBuffer(words, capacity);
+    BeginBuffer(words, capacity, FALSE);
+    PersistOk = FALSE;      /* the copy leaves its own state */
     StreamSlot = 0;
     StreamPos = StreamSize;                 /* no stream: the constants below need none */
     /* the frame must be in memory before it is read as a texture: its

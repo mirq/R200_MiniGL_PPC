@@ -48,6 +48,8 @@ struct Radeon3DDevice {
 static ULONG PresentWords[PRESENT_DWORDS];
 
 static struct Radeon3DDevice Device;
+static ULONG OwnWptr;           /* see EgEngineOurs */
+static BOOL OwnWptrValid;
 #if R200_PERF_TIMING
 ULONG PerfClock(void);
 ULONG EgStatPresentFenceTicks, EgStatVblankTicks, EgStatPresents;
@@ -108,6 +110,7 @@ struct Radeon3DDevice *Radeon3DOpen(ULONG requestedVersion, struct Radeon3DInfo 
         return NULL;
     }
     Device.gpuOnlyTop = Device.info.GpuOnlyOffset;
+    OwnWptrValid = FALSE;
     if (!ScratchAlloc(2 * PRESENT_HALF, &Device.presentOff)) {
         CloseLibrary(Eg3DBase);
         Eg3DBase = NULL;
@@ -262,7 +265,19 @@ static void CrtcWrite(ULONG reg, ULONG v)
 #define GRPH_SURFACE_UPDATE_PENDING         (1UL << 2)
 #define GRPH_UPDATE_LOCK                    (1UL << 16)
 
-static ULONG FlipRestore;       /* the scanout address before the first flip */
+static ULONG FlipRestore;
+
+/* The CP ring's write pointer right after our last submit: if it has not
+ * moved, nothing else ran on the engine since (the 2D driver submits
+ * through the same ring), and its state is the one we left. */
+#define CP_RB_WPTR 0xC114
+extern ULONG EgEmitPersisted;
+BOOL EgDispatchStale;
+
+BOOL EgEngineOurs(void)
+{
+    return OwnWptrValid && Device.info.Registers && CrtcRead(CP_RB_WPTR) == OwnWptr;
+}       /* the scanout address before the first flip */
 
 /* Show surface s from the next vertical blank on (CRTC 0 latches a new
  * scanout address there: no tearing, no wait for the beam). Its frame
@@ -508,10 +523,21 @@ BOOL Radeon3DDispatchIndirect(struct Radeon3DDevice *device,
     if (!s->used || indirect->ByteOffset + indirect->DwordCount * 4 > s->bytes)
         return FALSE;
     FlipLatched();
+    EgDispatchStale = FALSE;
     if (!Eg3DLock())
         return FALSE;
+    if (EgEmitPersisted && !EgEngineOurs()) {
+        /* someone used the engine after the buffer was built on its state */
+        Eg3DUnlock();
+        EgDispatchStale = TRUE;
+        return FALSE;
+    }
     fence = Eg3DSubmit(Device.info.ScratchOffset + s->off + indirect->ByteOffset,
                        indirect->DwordCount);
+    if (fence) {
+        OwnWptr = CrtcRead(CP_RB_WPTR);
+        OwnWptrValid = TRUE;
+    }
     Eg3DUnlock();
     if (!fence)
         return FALSE;

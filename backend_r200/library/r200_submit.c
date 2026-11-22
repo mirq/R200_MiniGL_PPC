@@ -502,8 +502,33 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
     indirect.SegmentId = context->cpSegment.Id;
     indirect.ByteOffset = byteOffset;
     indirect.DwordCount = count;
+#if MGL_EVERGREEN
+    if (!Radeon3DDispatchIndirect(context->device, &indirect, fenceOut)) {
+        /* built on the engine state of our last buffer, but something else
+         * ran meanwhile: once more with the full state */
+        extern BOOL EgDispatchStale, EgEmitForceFull;
+        if (EgDispatchStale) {
+            EgEmitForceFull = TRUE;
+            count = EgEmitBatch(staging, R200_CP_SLOT_DWORDS, context->buildSlot,
+                                slot->records, slot->recordCount,
+                                CpResolveSurface, context);
+            if (count && count <= R200_CP_SLOT_DWORDS - 1UL) {
+                if (count & 1UL)
+                    staging[count++] = 0x80000000UL;
+                for (index = 0; index < count; ++index)
+                    destination[index] = staging[index];
+                (void)destination[count - 1UL];
+                indirect.DwordCount = count;
+                CpSlotDwords[context->buildSlot] = count;
+                (void)Radeon3DDispatchIndirect(context->device, &indirect, fenceOut);
+            }
+        }
+    }
+    if (!*fenceOut) {
+#else
     if (!Radeon3DDispatchIndirect(context->device, &indirect, fenceOut) ||
         !*fenceOut) {
+#endif
         if (failReports < 16UL) {
             ++failReports;
             dbg_puts("[minigl] cp dispatch fail fence=");
