@@ -524,16 +524,17 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         EG_FAIL();
     context->screenHardwareTransform = TRUE;
     context->screenProjective = FALSE;
+    context->egCaptureOnly = TRUE;
     {
     EGT_BEGIN();
     i = PrepareScreenAppend(context, prim);
     EGT_END(8);
     }
+    context->egCaptureOnly = FALSE;
     context->screenHardwareTransform = FALSE;
     if (!i)
         EG_FAIL();
-    state = &context->pendingDraw;
-    context->pendingDrawValid = FALSE;
+    state = context->egCaptured;
     if (!state->drawEnabled || !state->drawRectangleValid)
         return TRUE;                /* drawn as nothing, as the old path does */
     if (!state->hardwareTransform || state->normalVertex || state->lit || state->fog ||
@@ -785,12 +786,13 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
         return FALSE;
     context->screenHardwareTransform = TRUE;
     context->screenProjective = FALSE;
+    context->egCaptureOnly = TRUE;
     i = PrepareScreenAppend(context, prim);
+    context->egCaptureOnly = FALSE;
     context->screenHardwareTransform = FALSE;
     if (!i)
         return FALSE;
-    state = &context->pendingDraw;
-    context->pendingDrawValid = FALSE;
+    state = context->egCaptured;
     if (!state->drawEnabled || !state->drawRectangleValid)
         return TRUE;
     if (!state->hardwareTransform || state->normalVertex || state->lit || state->fog ||

@@ -747,6 +747,8 @@ struct MiniGLR200Context {
     ULONG egFlipSerial;     /* batchSerial at the last flip */
     BOOL egFlipQueued;      /* egFlipBuffer drawn, shown at the next present */
     BOOL egImmValid;        /* the last immediate draw, for EgImmediateDraw merges */
+    BOOL egCaptureOnly;     /* PrepareScreenAppend: capture only, into egCaptured */
+    struct PendingDrawState *egCaptured;
     ULONG egImmSerial, egImmSlot, egImmRecords, egImmRecord, egImmRingEnd,
           egImmPrim, egImmStride, egImmVerts;
     ULONG egImmIdxCursor[SUBMIT_SLOT_COUNT];

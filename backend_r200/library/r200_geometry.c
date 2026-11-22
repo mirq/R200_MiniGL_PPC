@@ -256,6 +256,14 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
         context->captureCacheProjective = context->screenProjective;
         context->captureCacheValid = TRUE;
     }
+#if MGL_EVERGREEN
+    if (context->egCaptureOnly) {
+        /* r200_egarrays.c: the captured state is all it needs (nothing is
+         * staged: the caller flushed the screen vertices first) */
+        context->egCaptured = state;
+        return TRUE;
+    }
+#endif
     if (context->screenVertexCount &&
         (!context->pendingDrawValid ||
          context->screenCommand != normalizedCommand ||
