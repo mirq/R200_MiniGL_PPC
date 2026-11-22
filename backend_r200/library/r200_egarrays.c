@@ -422,7 +422,8 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         (context->normalArray.enabled && context->normalArray.pointer) ||
         !va->enabled || !va->pointer || !EgArrayUsable(va, 2, 4))
         EG_FAIL();
-    {
+    if (context->textureGenS[0] || context->textureGenT[0] ||
+        context->textureGenS[1] || context->textureGenT[1]) {
         ULONG hardwareSphereMap = HardwareSphereMapMask(context);
         if (hardwareSphereMap || SoftwareSphereMapMask(context, hardwareSphereMap))
             EG_FAIL();
@@ -768,7 +769,8 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
     default:
         return FALSE;
     }
-    {
+    if (context->textureGenS[0] || context->textureGenT[0] ||
+        context->textureGenS[1] || context->textureGenT[1]) {
         ULONG hardwareSphereMap = HardwareSphereMapMask(context);
         if (hardwareSphereMap || SoftwareSphereMapMask(context, hardwareSphereMap))
             return FALSE;

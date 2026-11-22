@@ -1356,6 +1356,12 @@ BOOL R200PPCPlatformCpEmitting(void);
 #define R200ExtendedFragmentState() FALSE
 #endif
 BOOL StateChangeAllowed(struct MiniGLR200Context *context);
+/* every GL call checks these: the common case inline, the rest (errors,
+ * counters) in the function */
+#define StateChangeAllowed(c) \
+    (((c) && !(c)->insideBegin && !(c)->perfEnabled) ? TRUE : (StateChangeAllowed)(c))
+#define OutsideBeginAllowed(c) \
+    (((c) && !(c)->insideBegin) ? TRUE : (OutsideBeginAllowed)(c))
 BOOL ValidPrimitive(GLenum primitive);
 struct Radeon3DSurface *TargetSurface(struct MiniGLR200Context *context);
 struct Radeon3DSurface *ReadSourceSurface(struct MiniGLR200Context *context);

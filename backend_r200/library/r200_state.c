@@ -722,7 +722,7 @@ void Lib_glHint(GLenum target, GLenum mode)
     (void)mode;
 }
 
-BOOL StateChangeAllowed(struct MiniGLR200Context *context)
+BOOL (StateChangeAllowed)(struct MiniGLR200Context *context)
 {
     if (!context)
         return FALSE;
@@ -735,7 +735,7 @@ BOOL StateChangeAllowed(struct MiniGLR200Context *context)
     return TRUE;
 }
 
-BOOL OutsideBeginAllowed(struct MiniGLR200Context *context)
+BOOL (OutsideBeginAllowed)(struct MiniGLR200Context *context)
 {
     if (!context)
         return FALSE;
