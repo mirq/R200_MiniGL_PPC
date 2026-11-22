@@ -53,14 +53,25 @@ void StreamDiagEvent(struct MiniGLR200Context *context, ULONG event,
 #ifndef LIBNAME
 #define LIBNAME "minigl.library"
 #endif
-#ifdef MINIGL_LIB_VERSION
+#if defined(MGL_EVERGREEN) && MGL_EVERGREEN && defined(MINIGL_LIB_VERSION)
+/* Evergreen MiniGL release (Radeon HD 5450) */
+#define MINIGL_VER_STRING "29.1"
+#define MINIGL_VER_DATE "22.11.2026"
+#define VERSION MINIGL_LIB_VERSION
+#define REVISION 1
+#elif defined(MINIGL_LIB_VERSION)
 #define MINIGL_VER_STRING "29.0"
 #define VERSION MINIGL_LIB_VERSION
 #else
 #define VERSION 12
 #define MINIGL_VER_STRING "12.0"
 #endif
+#ifndef REVISION
 #define REVISION 0
+#endif
+#ifndef MINIGL_VER_DATE
+#define MINIGL_VER_DATE "21.11.2026"
+#endif
 
 static const char LibName[] = LIBNAME;
 #define MINIGL_CONTEXT_ID "single-context direct"
@@ -78,7 +89,7 @@ static const char LibName[] = LIBNAME;
 #endif
 
 static const char LibId[] =
-    "$VER: " LIBNAME " " MINIGL_VER_STRING " (21.11.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID "\r\n";
+    "$VER: " LIBNAME " " MINIGL_VER_STRING " (" MINIGL_VER_DATE ") " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID "\r\n";
 
 /* Library bases used by the AmigaOS NDK proto headers. */
 struct ExecBase *SysBase = 0;
