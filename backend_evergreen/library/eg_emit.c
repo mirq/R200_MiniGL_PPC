@@ -559,6 +559,7 @@ static struct {
 } Sh;
 
 static void Replay(const ULONG *w, ULONG n);
+static ULONG CaptureNoSync(ULONG *dst, ULONG start, ULONG end);
 /* Draw's fast path: the last array draw's header and descriptors */
 static ULONG PrevHdr[44], PrevFmt, PrevOffs;
 static BOOL PrevOk;
@@ -670,9 +671,8 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
             c.num_gprs = vs->gprs;
             evergreen_vs_setup(&Xi, &c, RADEON_GEM_DOMAIN_VRAM);
             if (!EmitOverflow && EmitCp.Wptr - start <= 40UL) {
-                for (k = 0; k < EmitCp.Wptr - start; ++k)
-                    vs->setup[k] = EmitCp.Ring[start + k];
-                vs->setupN = (UWORD)(EmitCp.Wptr - start);
+                vs->setupN = (UWORD)CaptureNoSync(vs->setup, start, EmitCp.Wptr);
+                (void)k;
             }
         }
     }
@@ -688,9 +688,8 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
             c.export_mode = 2;
             evergreen_ps_setup(&Xi, &c, RADEON_GEM_DOMAIN_VRAM);
             if (!EmitOverflow && EmitCp.Wptr - start <= 40UL) {
-                for (k = 0; k < EmitCp.Wptr - start; ++k)
-                    ps->setup[k] = EmitCp.Ring[start + k];
-                ps->setupN = (UWORD)(EmitCp.Wptr - start);
+                ps->setupN = (UWORD)CaptureNoSync(ps->setup, start, EmitCp.Wptr);
+                (void)k;
             }
         }
     }
@@ -719,6 +718,28 @@ static struct { ULONG key[4]; ULONG n; ULONG w[24]; } TexReplay[TEX_REPLAY];
 static ULONG TexReplayNext;
 /* the sampler words each unit has in this buffer (0: unknown) */
 static ULONG SampShadow[2][3];
+
+/* Captured command words without SURFACE_SYNC packets (the shader
+ * setups flush the shader cache, which every buffer start already does);
+ * the number of words kept. */
+static ULONG CaptureNoSync(ULONG *dst, ULONG start, ULONG end)
+{
+    ULONG i = start, n = 0;
+
+    while (i < end) {
+        ULONG h = EmitCp.Ring[i], len = 1;
+        if ((h >> 30) == 3UL) {
+            len = ((h >> 16) & 0x3fffUL) + 2UL;
+            if (((h >> 8) & 0xffUL) == IT_SURFACE_SYNC) {
+                i += len;
+                continue;
+            }
+        }
+        while (len-- && i < end)
+            dst[n++] = EmitCp.Ring[i++];
+    }
+    return n;
+}
 
 static void Replay(const ULONG *w, ULONG n)
 {

@@ -446,6 +446,28 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
     /* Classic CP indirect dispatch needs an even dword count. */
     if (count & 1UL)
         staging[count++] = 0x80000000UL;
+#if MGL_EVERGREEN
+    {
+        /* MGLEgDump=n: the n-th command buffer to PI0:mgldiag/ib.bin */
+        static LONG dumpAt = -1;
+        static ULONG seen;
+        if (dumpAt < 0) {
+            char v[12];
+            LONG k = 0;
+            dumpAt = 0;
+            if (GetVar("MGLEgDump", v, sizeof(v), 0) > 0)
+                while (v[k] >= '0' && v[k] <= '9')
+                    dumpAt = dumpAt * 10 + (v[k++] - '0');
+        }
+        if (dumpAt > 0 && ++seen == (ULONG)dumpAt) {
+            BPTR f = Open("PI0:mgldiag/ib.bin", MODE_NEWFILE);
+            if (f) {
+                Write(f, staging, count * 4);
+                Close(f);
+            }
+        }
+    }
+#endif
     byteOffset = context->buildSlot * R200_CP_SLOT_DWORDS * sizeof(ULONG);
     destination = (volatile ULONG *)((UBYTE *)context->cpSegment.CpuAddress +
                                      byteOffset);
