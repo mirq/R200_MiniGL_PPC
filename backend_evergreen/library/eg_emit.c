@@ -1490,11 +1490,27 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
         BOOL same = g[EGA_FORMATS] == PrevFmt && g[EGA_OFFSETS] == PrevOffs &&
                     !((r[13] ^ PrevHdr[13]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK)) &&
                     !((r[18] ^ PrevHdr[18]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK));
+        BOOL mvp = FALSE;
         if (!DrawTexOnly)
             for (i = 2; same && i < 44UL; ++i)
-                if (!TexWord[i] && r[i] != PrevHdr[i])
-                    same = FALSE;
+                if (!TexWord[i] && r[i] != PrevHdr[i]) {
+                    if (i >= 21UL && i <= 36UL && tcl)
+                        mvp = TRUE;     /* the transform: its constants alone */
+                    else
+                        same = FALSE;
+                }
         if (same) {
+            if (mvp) {
+                ULONG mr[16];
+                for (i = 0; i < 4UL; ++i) {
+                    mr[i * 4 + 0] = r[21 + i];
+                    mr[i * 4 + 1] = r[25 + i];
+                    mr[i * 4 + 2] = r[29 + i];
+                    mr[i * 4 + 3] = r[33 + i];
+                }
+                if (!BindVsConst(mr))
+                    return FALSE;
+            }
             if (textured) {
                 if (!r[4] || !Resolve(resolve, user, r[4], &t0s)) {
                     EgEmitFailStage = 0x2104;
