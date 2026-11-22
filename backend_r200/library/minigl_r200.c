@@ -208,8 +208,12 @@ void ZeroMemory(APTR memory, ULONG bytes)
         *output++ = 0;
 }
 
+ULONG EgCalls;
 struct MiniGLR200Context *CurrentContext(void)
 {
+#if R200_PERF_TIMING
+    EgCalls++;
+#endif
 #if R200_PPC_FRONTEND
     return R200PPCContext;
 #else

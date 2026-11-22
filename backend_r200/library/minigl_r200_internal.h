@@ -493,6 +493,10 @@ struct TextureObject {
      * texels) and EG_TEX_FORMAT_* (eg_emit.h) */
     UBYTE texelBytes;
     UBYTE texelFormat;
+    /* 8-bit textures: per level-0 row the changed column span not yet in
+     * VRAM (lo, hi; lo >= hi: none), so updates copy only what changed */
+    UWORD *rowSpan;
+    ULONG rowSpanRows;
     /* PPC-frontend only: retained canonical BGRA8888 shadow of the
      * level-0 image of a direct-fill texture. Letting a TexSubImage
      * patch this shadow and re-commit the full image through the direct

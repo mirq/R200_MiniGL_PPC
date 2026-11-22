@@ -564,6 +564,24 @@ static BOOL SyncTextureDirty2(struct MiniGLR200Context *context,
         dirty = &texture->dirtyRects[level];
         TextureLevelLayout(texture, level, &levelOffset, &levelStride,
                            &levelWidth, &levelHeight);
+        if (level == 0 && texture->rowSpan) {
+            /* the changed spans, longword aligned */
+            for (row = dirty->top; row < dirty->bottom; ++row) {
+                UWORD *sp = texture->rowSpan + row * 2UL;
+                ULONG lo, hi, offset;
+                if (sp[0] >= sp[1])
+                    continue;
+                lo = sp[0] & ~3UL;
+                hi = ((ULONG)sp[1] + 3UL) & ~3UL;
+                if (hi > levelStride)
+                    hi = levelStride;
+                offset = levelOffset + row * levelStride + lo;
+                CopyMem(texture->image + offset, output + offset, hi - lo);
+                copied += hi - lo;
+                sp[0] = sp[1] = 0;
+            }
+            continue;
+        }
         rowBytes = ((ULONG)dirty->right - (ULONG)dirty->left) * texture->texelBytes;
         for (row = dirty->top; row < dirty->bottom; ++row) {
             ULONG offset = levelOffset + row * levelStride +
@@ -650,6 +668,10 @@ BOOL ReleaseTextureStorage(struct MiniGLR200Context *context,
     if (texture->dirtyRects)
         FreeMem(texture->dirtyRects,
                 texture->levelCount * sizeof(struct TextureDirtyRect));
+    if (texture->rowSpan)
+        FreeMem(texture->rowSpan, texture->rowSpanRows * 4UL);
+    texture->rowSpan = NULL;
+    texture->rowSpanRows = 0;
     texture->image=NULL; texture->imageBytes=0; texture->width=0;
     texture->height=0; texture->definedLevels=0; texture->levelCount=0;
     texture->dirtyRects=NULL; texture->dirtyLevelMask=0;
@@ -756,11 +778,38 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
 #if MGL_EVERGREEN
     if (texture->texelBytes == 1) {
         /* luminance bytes: as they are, or the converted texel's red */
+        BOOL rowsChanged = FALSE;
         for (row=0; row<height; ++row) {
             UBYTE *destination=texture->image+levelOffset+(yoffset+row)*levelStride+xoffset;
             const UBYTE *input=source+row*sourceStride;
             if (format==GL_LUMINANCE && type==GL_UNSIGNED_BYTE) {
+                if (texture->rowSpan && level == 0) {
+                    /* only the bytes that differ from the shadow are new */
+                    ULONG k = 0, lo, hi;
+                    UWORD *sp = texture->rowSpan + (yoffset + row) * 2UL;
+                    while (k < width && destination[k] == input[k])
+                        ++k;
+                    if (k == width)
+                        continue;
+                    lo = k;
+                    hi = width;
+                    while (hi > lo && destination[hi - 1UL] == input[hi - 1UL])
+                        --hi;
+                    CopyMem(input + lo, destination + lo, hi - lo);
+                    lo += xoffset;
+                    hi += xoffset;
+                    if (sp[0] >= sp[1]) {
+                        sp[0] = (UWORD)lo;
+                        sp[1] = (UWORD)hi;
+                    } else {
+                        if (lo < sp[0]) sp[0] = (UWORD)lo;
+                        if (hi > sp[1]) sp[1] = (UWORD)hi;
+                    }
+                    rowsChanged = TRUE;
+                    continue;
+                }
                 CopyMem(input,destination,width);
+                rowsChanged = TRUE;
                 continue;
             }
             for (column=0; column<width; ++column) {
@@ -768,9 +817,16 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
                 ConvertPixel(context,input+column*sourceBytes,format,type,p);
                 destination[column]=p[2];
             }
+            rowsChanged = TRUE;
+            if (texture->rowSpan && level == 0) {
+                UWORD *sp = texture->rowSpan + (yoffset + row) * 2UL;
+                sp[0] = (UWORD)xoffset;
+                sp[1] = (UWORD)(xoffset + width);
+            }
         }
         texture->definedLevels |= 1UL<<level;
-        MarkTextureDirty(context, texture, level, xoffset, yoffset, width, height);
+        if (rowsChanged || !(texture->definedLevels & (1UL << level)))
+            MarkTextureDirty(context, texture, level, xoffset, yoffset, width, height);
         return TRUE;
     }
     if (texture->texelBytes == 2) {
@@ -1017,6 +1073,8 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                         internalFormat==1)) {
                 texture->texelBytes = 1;
                 texture->texelFormat = EG_TEX_FORMAT_L8;
+                texture->rowSpan = AllocMem((ULONG)height * 4UL, MEMF_PUBLIC | MEMF_CLEAR);
+                texture->rowSpanRows = texture->rowSpan ? (ULONG)height : 0;
             }
 #else
             (void)t;

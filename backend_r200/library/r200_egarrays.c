@@ -369,6 +369,7 @@ static BOOL EgArrayUsable(const struct ArrayState *a, ULONG minSize, ULONG maxSi
 
 /* why draws took the old path: (source line, count) */
 ULONG EgSubmitWhy[4];
+ULONG EgLmBytes, EgLmChanged, EgLmRowsSame;
 static ULONG EgFailLine[16], EgFailCount[16], EgDrawn;
 static void EgFailNote(ULONG line)
 {
@@ -1299,6 +1300,16 @@ void EgArraysRelease(struct MiniGLR200Context *context)
                 dbg_puts("=");
                 dbg_u32(EgBumpN[k2]);
             }
+        }
+        {
+            extern ULONG EgCalls;
+            dbg_puts(" calls=");
+            dbg_u32(EgCalls);
+        }
+        {
+            extern ULONG EgLmBytes, EgLmChanged, EgLmRowsSame;
+            dbg_puts(" lm bytes/changed/samerows=");
+            dbg_u32(EgLmBytes); dbg_puts("/"); dbg_u32(EgLmChanged); dbg_puts("/"); dbg_u32(EgLmRowsSame);
         }
         dbg_puts(" copiedlongs=");
         dbg_u32(EgCopiedLongs);
