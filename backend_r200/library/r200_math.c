@@ -148,16 +148,20 @@ void CopyMatrix(GLfloat *destination, const GLfloat *source)
 void MultiplyMatrix(GLfloat *output, const GLfloat *left,
                           const GLfloat *right)
 {
+   /* unrolled: column c of the result is left times column c of right */
    GLfloat result[16];
-   ULONG column, row, index;
-   for (column = 0; column < 4; ++column) {
-       for (row = 0; row < 4; ++row) {
-           GLfloat value = 0.0f;
-           for (index = 0; index < 4; ++index)
-               value += left[index * 4 + row] *
-                        right[column * 4 + index];
-           result[column * 4 + row] = value;
-       }
+   ULONG column;
+   GLfloat l0 = left[0], l1 = left[1], l2 = left[2], l3 = left[3];
+   GLfloat l4 = left[4], l5 = left[5], l6 = left[6], l7 = left[7];
+   GLfloat l8 = left[8], l9 = left[9], l10 = left[10], l11 = left[11];
+   GLfloat l12 = left[12], l13 = left[13], l14 = left[14], l15 = left[15];
+   for (column = 0; column < 16; column += 4) {
+       GLfloat r0 = right[column], r1 = right[column + 1];
+       GLfloat r2 = right[column + 2], r3 = right[column + 3];
+       result[column]     = l0 * r0 + l4 * r1 + l8 * r2 + l12 * r3;
+       result[column + 1] = l1 * r0 + l5 * r1 + l9 * r2 + l13 * r3;
+       result[column + 2] = l2 * r0 + l6 * r1 + l10 * r2 + l14 * r3;
+       result[column + 3] = l3 * r0 + l7 * r1 + l11 * r2 + l15 * r3;
    }
    CopyMatrix(output, result);
 }

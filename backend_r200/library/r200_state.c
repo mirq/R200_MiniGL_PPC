@@ -866,10 +866,14 @@ void Lib_glPopMatrix(void)
 void Lib_glTranslatef(GLfloat x, GLfloat y, GLfloat z)
 {
     struct MiniGLR200Context *context = CurrentContext();
-    GLfloat matrix[16];
+    GLfloat *m;
+    ULONG r;
     if (!StateChangeAllowed(context)) return;
-    Identity(matrix); matrix[12] = x; matrix[13] = y; matrix[14] = z;
-    MultCurrentMatrix(context, matrix);
+    /* M * T: only the last column changes */
+    m = CurrentMatrix(context);
+    for (r = 0; r < 4UL; ++r)
+        m[12 + r] += m[r] * x + m[4 + r] * y + m[8 + r] * z;
+    InvalidateNormalMatrix(context);
 }
 void Lib_glTranslated(GLdouble x, GLdouble y, GLdouble z)
 { Lib_glTranslatef((GLfloat)x, (GLfloat)y, (GLfloat)z); }
@@ -877,10 +881,17 @@ void Lib_glTranslated(GLdouble x, GLdouble y, GLdouble z)
 void Lib_glScalef(GLfloat x, GLfloat y, GLfloat z)
 {
     struct MiniGLR200Context *context = CurrentContext();
-    GLfloat matrix[16];
+    GLfloat *m;
+    ULONG r;
     if (!StateChangeAllowed(context)) return;
-    Identity(matrix); matrix[0] = x; matrix[5] = y; matrix[10] = z;
-    MultCurrentMatrix(context, matrix);
+    /* M * S: the first three columns scaled */
+    m = CurrentMatrix(context);
+    for (r = 0; r < 4UL; ++r) {
+        m[r] *= x;
+        m[4 + r] *= y;
+        m[8 + r] *= z;
+    }
+    InvalidateNormalMatrix(context);
 }
 void Lib_glScaled(GLdouble x, GLdouble y, GLdouble z)
 { Lib_glScalef((GLfloat)x, (GLfloat)y, (GLfloat)z); }
