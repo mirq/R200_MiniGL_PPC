@@ -252,6 +252,13 @@ static BOOL EgCacheReady(struct MiniGLR200Context *context)
 
 static ULONG EgMissBytes[2], EgMissCount[2], EgHitCount[2];
 
+/* element ranges of static index lists (GL_NICEST index hint), by address */
+#define EG_RANGES 128UL
+static struct EgRange {
+    const UBYTE *indices;
+    ULONG count, type, gen, lo, hi;
+} EgRanges[EG_RANGES];
+
 static ULONG EgCacheHash(const UBYTE *start, ULONG bytes, ULONG tag, ULONG gen)
 {
     ULONG h = (ULONG)start * 2654435761UL;
@@ -506,15 +513,43 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
             lo = context->lockedFirst;
             hi = lo + context->lockedCount;
         } else {
+            /* static lists do not change: their range is remembered */
+            struct EgRange *r = NULL;
+            if (context->egStaticIndices) {
+                r = &EgRanges[(((ULONG)indices >> 1) ^ ((ULONG)indices >> 9) ^ count) &
+                              (EG_RANGES - 1UL)];
+                if (r->indices == indices && r->count == count && r->type == type &&
+                    r->gen == context->egCacheGen) {
+                    lo = r->lo;
+                    hi = r->hi;
+                    goto ranged;
+                }
+            }
             lo = 0xffffffffUL;
             hi = 0;
-            for (i = 0; i < count; ++i) {
-                ULONG v = type == GL_UNSIGNED_SHORT ? ((const UWORD *)indices)[i]
-                        : type == GL_UNSIGNED_BYTE ? indices[i]
-                        : ((const ULONG *)indices)[i];
-                if (v < lo) lo = v;
-                if (v >= hi) hi = v + 1UL;
+            if (type == GL_UNSIGNED_SHORT) {
+                const UWORD *p = (const UWORD *)indices, *e = p + count;
+                while (p < e) {
+                    ULONG v = *p++;
+                    if (v < lo) lo = v;
+                    if (v >= hi) hi = v + 1UL;
+                }
+            } else
+                for (i = 0; i < count; ++i) {
+                    ULONG v = type == GL_UNSIGNED_BYTE ? indices[i]
+                            : ((const ULONG *)indices)[i];
+                    if (v < lo) lo = v;
+                    if (v >= hi) hi = v + 1UL;
+                }
+            if (r) {
+                r->indices = indices;
+                r->count = count;
+                r->type = type;
+                r->gen = context->egCacheGen;
+                r->lo = lo;
+                r->hi = hi;
             }
+        ranged:;
         }
         indexType = type == GL_UNSIGNED_INT ? EGA_INDEX_32 : EGA_INDEX_16;
         indexBytes = type == GL_UNSIGNED_INT ? count * 4UL : ((count + 1UL) & ~1UL) * 2UL;

@@ -596,6 +596,7 @@ static struct {
     ULONG psInputs, flat;
     ULONG vsConst[16], vsConstGpu;
     ULONG psConst[4], psConstGpu;
+    ULONG constSize;        /* 1: VS, 2: PS constant buffer size (always 1) set */
     ULONG tex[2][4];        /* gpu, size, state, pitch */
 } Sh;
 
@@ -846,6 +847,13 @@ static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG off
         TexReplay[i].key[3] = Sh.tex[unit][3];
         TexReplay[i].n = EmitCp.Wptr - start;
         if (TexReplay[i].n == 15UL) {
+            /* the record keeps the sampler; the buffer drops it when the
+             * unit has the same one already */
+            if (SampShadow[unit][0] &&
+                SampShadow[unit][0] == TexReplay[i].w[12] &&
+                SampShadow[unit][1] == TexReplay[i].w[13] &&
+                SampShadow[unit][2] == TexReplay[i].w[14])
+                EmitCp.Wptr -= 5;
             SampShadow[unit][0] = TexReplay[i].w[12];
             SampShadow[unit][1] = TexReplay[i].w[13];
             SampShadow[unit][2] = TexReplay[i].w[14];
@@ -1291,7 +1299,9 @@ static BOOL BindVsConst(const ULONG *rows)
     if (!gpu)
         return FALSE;
     BEGIN_BATCH(6);
-    EREG(SQ_ALU_CONST_BUFFER_SIZE_VS_0, 1);
+    if (!(Sh.constSize & 1UL))
+        EREG(SQ_ALU_CONST_BUFFER_SIZE_VS_0, 1);
+    Sh.constSize |= 1UL;
     EREG(SQ_ALU_CONST_CACHE_VS_0, gpu >> 8);
     END_BATCH();
     memcpy(Sh.vsConst, rows, 64);
@@ -1310,7 +1320,9 @@ static BOOL BindPsConst(const ULONG *c)
     if (!gpu)
         return FALSE;
     BEGIN_BATCH(6);
-    EREG(SQ_ALU_CONST_BUFFER_SIZE_PS_0, 1);
+    if (!(Sh.constSize & 2UL))
+        EREG(SQ_ALU_CONST_BUFFER_SIZE_PS_0, 1);
+    Sh.constSize |= 2UL;
     EREG(SQ_ALU_CONST_CACHE_PS_0, gpu >> 8);
     END_BATCH();
     memcpy(Sh.psConst, c, 16);
