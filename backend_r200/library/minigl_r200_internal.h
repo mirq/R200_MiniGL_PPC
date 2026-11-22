@@ -753,6 +753,11 @@ struct MiniGLR200Context {
           egImmPrim, egImmStride, egImmVerts;
     ULONG egImmIdxCursor[SUBMIT_SLOT_COUNT];
     ULONG egColor, egColorGpu, egColorSerial, egColorSlot;  /* constant colour word */
+    /* direct immediate mode (EgDirectBegin) */
+    BOOL egDirect, egDirTexAny, egDirTex1, egDirPad;
+    volatile ULONG *egDirCpu;
+    ULONG egDirStart, egDirSlot, egDirSerial, egDirCap, egDirPrim, egDirStride;
+    struct PendingDrawState *egDirState;
     UWORD egFlipPad2;
     ULONG egFlipBuffer, egFlipFence;
     /* the resident copies (RadeonGL's array hints) */

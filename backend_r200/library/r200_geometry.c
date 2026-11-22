@@ -2304,6 +2304,9 @@ static BOOL EmitHardwarePolygonEdges(struct MiniGLR200Context *context,
 #if MGL_EVERGREEN
 static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vertex *v,
                             ULONG count, GLenum mode);
+static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode);
+static void EgDirectAbort(struct MiniGLR200Context *context);
+static BOOL EgDirectEnd(struct MiniGLR200Context *context);
 #endif
 
 static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
@@ -2812,6 +2815,10 @@ void Lib_glBegin(GLenum primitive)
     context->primitive = primitive;
     context->vertexCount = 0;
     context->texCoordFeedMask = 0;
+#if MGL_EVERGREEN
+    context->egDirect = FALSE;
+    (void)EgDirectBegin(context, primitive);
+#endif
 }
 
 static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
@@ -2823,6 +2830,29 @@ static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
+#if MGL_EVERGREEN
+    if (context->egDirect) {
+        if (w == 1.0f && context->vertexCount < context->egDirCap) {
+            volatile ULONG *p = context->egDirCpu;
+            *p++ = *(const ULONG *)&x;
+            *p++ = *(const ULONG *)&y;
+            *p++ = *(const ULONG *)&z;
+            *p++ = context->currentColor;
+            if (context->egDirTexAny) {
+                *p++ = *(const ULONG *)&context->currentS[0];
+                *p++ = *(const ULONG *)&context->currentT[0];
+            }
+            if (context->egDirTex1) {
+                *p++ = *(const ULONG *)&context->currentS[1];
+                *p++ = *(const ULONG *)&context->currentT[1];
+            }
+            context->egDirCpu = p;
+            context->vertexCount++;
+            return;
+        }
+        EgDirectAbort(context);
+    }
+#endif
     if (context->vertexCount >= MAX_VERTICES) {
         SetError(context, GL_OUT_OF_MEMORY);
         return;
@@ -2866,6 +2896,15 @@ void Lib_glEnd(void)
         return;
     }
     context->insideBegin = FALSE;
+#if MGL_EVERGREEN
+    if (context->egDirect) {
+        if (EgDirectEnd(context))
+            return;
+        /* not drawn directly after all: the vertices back, the old way */
+        context->egDirect = TRUE;
+        EgDirectAbort(context);
+    }
+#endif
     {
     EGTX_BEGIN();
     /* V19 parity: GL_POLYGON with texture unit 1 enabled goes to the
@@ -3435,6 +3474,10 @@ void Lib_glArrayElement(GLint index)
     if (!context || !context->insideBegin || context->activeFastPath) {
         SetError(context, GL_INVALID_OPERATION); return;
     }
+#if MGL_EVERGREEN
+    if (context->egDirect)
+        EgDirectAbort(context);
+#endif
     if (index < 0) { SetError(context, GL_INVALID_VALUE); return; }
     if (!FetchDrawVertex(context, (ULONG)index, &vertex)) {
         SetError(context, GL_INVALID_OPERATION); return;

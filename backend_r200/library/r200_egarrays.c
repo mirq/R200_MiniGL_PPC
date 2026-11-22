@@ -964,6 +964,271 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
     return TRUE;
 }
 
+/* Direct immediate mode: glBegin captures the state and picks the record
+ * layout (x, y, z, ARGB colour[, s, t[, s1, t1]]), glVertex writes each
+ * vertex straight into the ring, glEnd adds the indices and the record (or
+ * extends the last one) as EgImmediateDraw does. Anything unusual (w != 1,
+ * a full ring part, glArrayElement) reads the written vertices back and
+ * continues the old way (EgDirectAbort). */
+static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
+{
+    struct PendingDrawState *state;
+    ULONG prim, i, slotIndex, room;
+
+    if (context->egArraysOff || !context->device || context->fogEnabled ||
+        context->lightingEnabled || context->paletteLookup ||
+        context->polygonMode != GL_FILL || context->activeFastPath ||
+        context->textureMatrixActive[0] || context->textureMatrixActive[1] ||
+        context->textureGenS[0] || context->textureGenT[0] ||
+        context->textureGenS[1] || context->textureGenT[1])
+        return FALSE;
+    switch (mode) {
+    case GL_TRIANGLES:
+        prim = RADEON3D_EXEC_DRAW_TRIANGLES;
+        break;
+    case GL_TRIANGLE_FAN:
+    case GL_QUADS:
+        if (context->shadeModel == GL_FLAT)
+            return FALSE;
+        prim = RADEON3D_EXEC_DRAW_TRIANGLES;
+        break;
+    case GL_POLYGON:
+        /* not where glEnd may queue it for the two-pass multitexture */
+        if (context->shadeModel == GL_FLAT || context->textureEnabled[1])
+            return FALSE;
+        prim = RADEON3D_EXEC_DRAW_TRIANGLES;
+        break;
+    case GL_POINTS:
+        if (context->pointSize > 255.0f)
+            return FALSE;
+        prim = RADEON3D_EXEC_DRAW_POINTS;
+        break;
+    default:
+        return FALSE;
+    }
+    if (!EgRingReady(context))
+        return FALSE;
+    if (context->screenVertexCount && !FlushScreenVertices(context))
+        return FALSE;
+    context->insideBegin = FALSE;
+    context->screenHardwareTransform = TRUE;
+    context->screenProjective = FALSE;
+    context->egCaptureOnly = TRUE;
+    i = PrepareScreenAppend(context, prim);
+    context->egCaptureOnly = FALSE;
+    context->screenHardwareTransform = FALSE;
+    context->insideBegin = TRUE;
+    if (!i)
+        return FALSE;
+    state = context->egCaptured;
+    if (!state->drawEnabled || !state->drawRectangleValid ||
+        !state->hardwareTransform || state->normalVertex || state->lit || state->fog ||
+        state->hardwareSphereMap ||
+        state->headerDwords != RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS ||
+        (state->header[5] & (RADEON3D_DRAW_TEXGEN | RADEON3D_DRAW_LIGHTING |
+                             RADEON3D_DRAW_PALETTE | RADEON3D_DRAW_NORMALS)))
+        return FALSE;
+    context->egDirTex1 = state->textured[1];
+    context->egDirTexAny = state->textured[0] || state->textured[1];
+    context->egDirStride = 4UL + (context->egDirTexAny ? 2UL : 0UL) +
+                           (context->egDirTex1 ? 2UL : 0UL);
+    (void)EgRingUsed(context);
+    slotIndex = context->buildSlot;
+    room = (EG_RING_DATA_BYTES - 64UL - context->egRingCursor[slotIndex]) /
+           (context->egDirStride * 4UL);
+    if (room < 64UL) {
+        /* a fresh slot for it (allowed: nothing staged yet) */
+        if (!Submit(context))
+            return FALSE;
+        (void)EgRingUsed(context);
+        slotIndex = context->buildSlot;
+        room = (EG_RING_DATA_BYTES - 64UL - context->egRingCursor[slotIndex]) /
+               (context->egDirStride * 4UL);
+    }
+    if (room > 4096UL)
+        room = 4096UL;
+    context->egDirStart = context->egRingCursor[slotIndex];
+    context->egDirSlot = slotIndex;
+    context->egDirSerial = context->batchSerial;
+    context->egDirCpu = (volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
+                                           slotIndex * EG_RING_SLOT_BYTES + context->egDirStart);
+    context->egDirCap = room;
+    context->egDirPrim = prim;
+    context->egDirState = state;
+    context->vertexCount = 0;
+    context->egDirect = TRUE;
+    return TRUE;
+}
+
+/* The vertices written so far back into context->vertices; the old way
+ * from here on. */
+static void EgDirectAbort(struct MiniGLR200Context *context)
+{
+    volatile ULONG *p = (volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
+                                           context->egDirSlot * EG_RING_SLOT_BYTES +
+                                           context->egDirStart);
+    ULONG i;
+
+    for (i = 0; i < context->vertexCount; ++i) {
+        struct Vertex *v = &context->vertices[i];
+        ULONG *f = (ULONG *)v;
+        f[0] = p[0];                    /* x */
+        f[1] = p[1];                    /* y */
+        f[2] = p[2];                    /* z */
+        v->w = 1.0f;
+        v->color = p[3];
+        v->nx = context->currentNormalX;
+        v->ny = context->currentNormalY;
+        v->nz = context->currentNormalZ;
+        v->s = context->currentS[0];
+        v->t = context->currentT[0];
+        v->s1 = context->currentS[1];
+        v->t1 = context->currentT[1];
+        v->fog = 0.0f;
+        p += 4;
+        if (context->egDirTexAny) {
+            *(ULONG *)&v->s = p[0];
+            *(ULONG *)&v->t = p[1];
+            p += 2;
+        }
+        if (context->egDirTex1) {
+            *(ULONG *)&v->s1 = p[0];
+            *(ULONG *)&v->t1 = p[1];
+            p += 2;
+        }
+    }
+    context->egDirect = FALSE;
+}
+
+/* glEnd in direct mode: the indices and the record. */
+static BOOL EgDirectEnd(struct MiniGLR200Context *context)
+{
+    struct PendingDrawState *state = context->egDirState;
+    struct SubmitSlot *slot = BuildSubmitSlot(context);
+    GLenum mode = context->primitive;
+    ULONG count = context->vertexCount, vN, idxN, i, need, *record, *ga, ibytes, base;
+    ULONG slotIndex = context->buildSlot, strideDw = context->egDirStride, prim = context->egDirPrim;
+    BOOL indexed = prim != RADEON3D_EXEC_DRAW_POINTS, merge;
+
+    context->egDirect = FALSE;
+    switch (mode) {
+    case GL_TRIANGLES:      vN = idxN = count - count % 3UL; break;
+    case GL_QUADS:          vN = count & ~3UL; idxN = (count / 4UL) * 6UL; break;
+    case GL_POINTS:         vN = idxN = count; break;
+    default:                vN = count >= 3UL ? count : 0; idxN = vN ? (count - 2UL) * 3UL : 0; break;
+    }
+    if (!vN)
+        return TRUE;
+    if (slotIndex != context->egDirSlot || context->batchSerial != context->egDirSerial)
+        return FALSE;           /* cannot happen: no submit inside Begin/End */
+    ibytes = indexed ? idxN * 2UL : 0;
+    if (context->egImmIdxCursor[slotIndex] + ibytes + 8UL > EG_RING_INDEX_BYTES)
+        return FALSE;
+    need = state->headerDwords + EG_ARRAYS_DWORDS;
+    merge = context->egImmValid && context->egImmSerial == context->batchSerial &&
+            context->egImmSlot == slotIndex &&
+            context->egImmRecords == slot->recordCount &&
+            context->egImmRingEnd == context->egDirStart &&
+            context->egImmPrim == prim && context->egImmStride == strideDw &&
+            context->egImmVerts + vN <= 65535UL;
+    if (merge) {
+        record = slot->records + context->egImmRecord;
+        for (i = 2; i < state->headerDwords; ++i)
+            if (i != 10UL && record[i] != state->header[i]) {
+                merge = FALSE;
+                break;
+            }
+    }
+    if (!merge) {
+        if ((slot->commitMode && slot->drawCount) ||
+            slot->recordCount + need > context->batchDwords ||
+            slot->generatedDwordCount + EG_ARRAYS_GENERATED > R200_CP_SLOT_DWORDS - 1024UL)
+            return FALSE;       /* the old way: it submits as it needs */
+        record = slot->records + slot->recordCount;
+        for (i = 0; i < state->headerDwords; ++i)
+            record[i] = state->header[i];
+        record[0] = EG_EXEC_ARRAYS;
+        record[1] = need;
+        record[10] = 0;
+        ga = record + state->headerDwords;
+        for (i = 0; i < EG_ARRAYS_DWORDS; ++i)
+            ga[i] = 0;
+        ga[EGA_PRIM] = prim;
+        ga[EGA_FORMATS] = 3UL | (EGA_COL_ARGB << EGA_COL_SHIFT) | EGA_INTERLEAVED |
+                          EGA_COL_ARRAY;
+        ga[EGA_OFFSETS] = 12UL | (16UL << 8) | (24UL << 16);
+        ga[EGA_POS_STRIDE] = strideDw * 4UL;
+        ga[EGA_POS_GPU] = context->egRing.GpuAddress + slotIndex * EG_RING_SLOT_BYTES +
+                          context->egDirStart;
+        if (indexed) {
+            context->egImmIdxCursor[slotIndex] = (context->egImmIdxCursor[slotIndex] + 3UL) & ~3UL;
+            ga[EGA_INDEX_TYPE] = EGA_INDEX_16;
+            ga[EGA_INDEX_GPU] = context->egRing.GpuAddress + slotIndex * EG_RING_SLOT_BYTES +
+                                EG_RING_DATA_BYTES + context->egImmIdxCursor[slotIndex];
+        }
+        context->egImmRecord = slot->recordCount;
+        context->egImmVerts = 0;
+        slot->recordCount += need;
+        slot->generatedDwordCount += EG_ARRAYS_GENERATED;
+        if (!slot->modeDecided) {
+            slot->commitMode = FALSE;
+            slot->modeDecided = TRUE;
+        }
+        slot->lastDrawValid = FALSE;
+    } else
+        ga = record + state->headerDwords;
+    /* the vertices are in place: the ring part ends behind them */
+    context->egRingCursor[slotIndex] = context->egDirStart + count * strideDw * 4UL;
+    base = context->egImmVerts;
+    ga[EGA_COUNT] += idxN;
+    ga[EGA_VERTS] += count;
+    record[10] += idxN;
+    EgImmLongs += count * strideDw + (ibytes >> 2);
+    if (indexed) {
+        UBYTE *lane = (UBYTE *)context->egRing.CpuAddress + slotIndex * EG_RING_SLOT_BYTES +
+                      EG_RING_DATA_BYTES;
+        ULONG at = context->egImmIdxCursor[slotIndex], pending = 0, havePending = 0, k;
+#define EG_IDX(val) do { ULONG v_ = (val) + base; \
+        if (!havePending && (at & 2UL)) { *(volatile UWORD *)(lane + at) = (UWORD)v_; at += 2; } \
+        else if (!havePending) { pending = v_; havePending = 1; } \
+        else { *(volatile ULONG *)(lane + at) = (pending << 16) | v_; at += 4; havePending = 0; } \
+        } while (0)
+        if (mode == GL_TRIANGLES) {
+            for (k = 0; k < idxN; ++k)
+                EG_IDX(k);
+        } else if (mode == GL_QUADS) {
+            for (k = 0; k < vN; k += 4UL) {
+                EG_IDX(k); EG_IDX(k + 1UL); EG_IDX(k + 2UL);
+                EG_IDX(k); EG_IDX(k + 2UL); EG_IDX(k + 3UL);
+            }
+        } else {
+            for (k = 1; k + 1UL < vN; ++k) {
+                EG_IDX(0UL); EG_IDX(k); EG_IDX(k + 1UL);
+            }
+        }
+        if (havePending) {
+            *(volatile UWORD *)(lane + at) = (UWORD)pending;
+            at += 2;
+        }
+#undef EG_IDX
+        context->egImmIdxCursor[slotIndex] = at;
+    }
+    context->egImmVerts += count;
+    context->egImmValid = TRUE;
+    context->egImmSerial = context->batchSerial;
+    context->egImmSlot = slotIndex;
+    context->egImmRecords = slot->recordCount;
+    context->egImmRingEnd = context->egRingCursor[slotIndex];
+    context->egImmPrim = prim;
+    context->egImmStride = strideDw;
+    if (state->textured[0])
+        MarkTextureQueued(context, state->textureName[0]);
+    if (state->textured[1])
+        MarkTextureQueued(context, state->textureName[1]);
+    EgDrawn++;
+    return TRUE;
+}
+
 /* Context teardown (all submissions retired). */
 void EgArraysRelease(struct MiniGLR200Context *context)
 {
