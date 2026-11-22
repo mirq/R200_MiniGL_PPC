@@ -55,6 +55,45 @@ static void R68KDropSpare(struct MiniGLR200Context *context,
     texture->spareEpoch = 0;
 }
 
+/* Into VRAM with plain stores only (no CopyMem: it may use MOVE16, which
+ * the bridge does not take). src and dst share their alignment mod 4 here
+ * (the same offset into a RAM image and its VRAM surface). */
+static void TexToVram(UBYTE *dst, const UBYTE *src, ULONG bytes)
+{
+    volatile UBYTE *d = (volatile UBYTE *)dst;
+    volatile ULONG *dl;
+    const ULONG *sl;
+
+    if ((((ULONG)dst ^ (ULONG)src) & 3UL) != 0) {
+        while (bytes--)
+            *d++ = *src++;
+        return;
+    }
+    while (bytes && ((ULONG)d & 3UL)) {
+        *d++ = *src++;
+        --bytes;
+    }
+    dl = (volatile ULONG *)d;
+    sl = (const ULONG *)src;
+    while (bytes >= 16UL) {
+        dl[0] = sl[0];
+        dl[1] = sl[1];
+        dl[2] = sl[2];
+        dl[3] = sl[3];
+        dl += 4;
+        sl += 4;
+        bytes -= 16UL;
+    }
+    while (bytes >= 4UL) {
+        *dl++ = *sl++;
+        bytes -= 4UL;
+    }
+    d = (volatile UBYTE *)dl;
+    src = (const UBYTE *)sl;
+    while (bytes--)
+        *d++ = *src++;
+}
+
 static void R68KCopyRows(struct TextureObject *texture,
                          const struct TextureDirtyRect *rect, UBYTE *output)
 {
@@ -67,7 +106,7 @@ static void R68KCopyRows(struct TextureObject *texture,
     for (row = rect->top; row < rect->bottom; ++row) {
         ULONG offset = levelOffset + row * levelStride +
                        (ULONG)rect->left * texture->texelBytes;
-        CopyMem(texture->image + offset, output + offset, rowBytes);
+        TexToVram(output + offset, texture->image + offset, rowBytes);
     }
 }
 
@@ -349,7 +388,9 @@ BOOL EnsureTextureResident(struct MiniGLR200Context *context,
         }
     }
 #endif
-    CopyMem(texture->image, output, texture->imageBytes);
+    TexToVram(output, texture->image, texture->imageBytes);
+    if (texture->rowSpan)       /* every row is over: no span pending */
+        memset(texture->rowSpan, 0, texture->rowSpanRows * 4UL);
     (void)output[texture->imageBytes - 1UL];
     texture->resident = TRUE;
 #if R200_CPEMIT_68K
@@ -576,7 +617,7 @@ static BOOL SyncTextureDirty2(struct MiniGLR200Context *context,
                 if (hi > levelStride)
                     hi = levelStride;
                 offset = levelOffset + row * levelStride + lo;
-                CopyMem(texture->image + offset, output + offset, hi - lo);
+                TexToVram(output + offset, texture->image + offset, hi - lo);
                 copied += hi - lo;
                 sp[0] = sp[1] = 0;
             }
@@ -586,7 +627,7 @@ static BOOL SyncTextureDirty2(struct MiniGLR200Context *context,
         for (row = dirty->top; row < dirty->bottom; ++row) {
             ULONG offset = levelOffset + row * levelStride +
                            (ULONG)dirty->left * texture->texelBytes;
-            CopyMem(texture->image + offset, output + offset, rowBytes);
+            TexToVram(output + offset, texture->image + offset, rowBytes);
             copied += rowBytes;
         }
     }
@@ -840,10 +881,50 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
         /* 16-bit storage: the client's texels as they are, or converted */
         ULONG want = texture->texelFormat == EG_TEX_FORMAT_4444 ? MGL_UNSIGNED_SHORT_4_4_4_4
                                                                 : MGL_UNSIGNED_SHORT_5_6_5;
+        BOOL spans = texture->rowSpan && level == 0, rowsChanged = FALSE;
+        BOOL wasDefined = (texture->definedLevels & (1UL << level)) != 0;
         for (row=0; row<height; ++row) {
             UBYTE *destination=texture->image+levelOffset+
                 (yoffset+row)*levelStride+xoffset*2UL;
             const UBYTE *input=source+row*sourceStride;
+            if (type == want && spans) {
+                /* lightmap rows: only the bytes that differ from the RAM
+                 * image go over the bus (SyncTextureDirty2) */
+                ULONG n = width * 2UL, k = 0, lo, hi;
+                UWORD *sp = texture->rowSpan + (yoffset + row) * 2UL;
+                while (k + 4UL <= n &&
+                       *(const ULONG *)(destination + k) == *(const ULONG *)(input + k))
+                    k += 4UL;
+                while (k < n && destination[k] == input[k])
+                    ++k;
+                if (k == n)
+                    continue;
+                lo = k;
+                hi = n;
+                while (hi >= lo + 4UL &&
+                       *(const ULONG *)(destination + hi - 4UL) == *(const ULONG *)(input + hi - 4UL))
+                    hi -= 4UL;
+                while (hi > lo && destination[hi - 1UL] == input[hi - 1UL])
+                    --hi;
+                CopyMem(input + lo, destination + lo, hi - lo);
+                lo += xoffset * 2UL;
+                hi += xoffset * 2UL;
+                if (sp[0] >= sp[1]) {
+                    sp[0] = (UWORD)lo;
+                    sp[1] = (UWORD)hi;
+                } else {
+                    if (lo < sp[0]) sp[0] = (UWORD)lo;
+                    if (hi > sp[1]) sp[1] = (UWORD)hi;
+                }
+                rowsChanged = TRUE;
+                continue;
+            }
+            rowsChanged = TRUE;
+            if (spans) {
+                UWORD *sp = texture->rowSpan + (yoffset + row) * 2UL;
+                sp[0] = (UWORD)(xoffset * 2UL);
+                sp[1] = (UWORD)((xoffset + width) * 2UL);
+            }
             if (type == want) {
                 CopyMem(input,destination,width*2UL);
                 continue;
@@ -862,7 +943,8 @@ BOOL UploadTextureRegion(struct MiniGLR200Context *context,
             }
         }
         texture->definedLevels |= 1UL<<level;
-        MarkTextureDirty(context, texture, level, xoffset, yoffset, width, height);
+        if (rowsChanged || !wasDefined)
+            MarkTextureDirty(context, texture, level, xoffset, yoffset, width, height);
         return TRUE;
     }
 #endif
@@ -1080,6 +1162,10 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                         internalFormat==1)) {
                 texture->texelBytes = 1;
                 texture->texelFormat = EG_TEX_FORMAT_L8;
+            }
+            /* changed spans per row (bytes) for sub-image updates:
+             * luminance and 16-bit lightmaps */
+            if (texture->texelBytes <= 2) {
                 texture->rowSpan = AllocMem((ULONG)height * 4UL, MEMF_PUBLIC | MEMF_CLEAR);
                 texture->rowSpanRows = texture->rowSpan ? (ULONG)height : 0;
             }
