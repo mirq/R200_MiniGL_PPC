@@ -246,8 +246,16 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
                 }
         }
 #endif
-        if (context->captureCacheValid && context->r68kTexOnlySerial == context->semanticStateSerial)
+        if (context->captureCacheValid && context->r68kTexOnlySerial == context->semanticStateSerial) {
+            extern ULONG EgPatchWhy[8];
             EgT[15]++;      /* the patch was possible but refused */
+            if (context->captureCacheCommand != normalizedCommand)
+                EgPatchWhy[5]++;
+            else if (context->captureCacheHardwareTransform != context->screenHardwareTransform)
+                EgPatchWhy[6]++;
+            else if (context->captureCacheProjective != context->screenProjective)
+                EgPatchWhy[7]++;
+        }
 #if R200_CPEMIT_68K
         { extern ULONG R68KStatCaptures; R68KStatCaptures++; }
 #endif

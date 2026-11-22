@@ -452,7 +452,11 @@ ULONG TextureState(const struct MiniGLR200Context *context,
     case GL_LINEAR_MIPMAP_LINEAR: minFilter=RADEON3D_TEX_MIN_LINEAR_MIPMAP_LINEAR; break;
     default: minFilter=RADEON3D_TEX_MIN_NEAREST; break;
     }
-    if (IsMipFilter(filter))
+    /* An incomplete chain (GLQuake's charset: level 0 only under
+     * GL_LINEAR_MIPMAP_NEAREST, gl_draw.c Draw_Init) samples level 0, as
+     * classic MiniGL did, instead of dropping the draw. */
+    if (IsMipFilter(filter) &&
+        texture->definedLevels == ((1UL << texture->levelCount) - 1UL))
         levels = texture->levelCount;
     /* A one-level texture (e.g. 1x1 after Quake 3 r_picmip) is mipmap
      * complete in GL and samples level 0; the emitter rejects a mip filter

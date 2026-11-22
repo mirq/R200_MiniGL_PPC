@@ -1467,6 +1467,11 @@ void EgArraysRelease(struct MiniGLR200Context *context)
             for (k4 = 0; k4 < 10UL; ++k4) { dbg_puts(" "); dbg_u32(EgDirRefuse[k4]); }
             dbg_puts(" dirfail=");
             dbg_u32(EgDirRefuse[8]);
+            {
+                extern ULONG EgPatchWhy[8];
+                dbg_puts(" patchwhy:");
+                for (k4 = 0; k4 < 8UL; ++k4) { dbg_puts(" "); dbg_u32(EgPatchWhy[k4]); }
+            }
         }
         dbg_puts(" copiedlongs=");
         dbg_u32(EgCopiedLongs);

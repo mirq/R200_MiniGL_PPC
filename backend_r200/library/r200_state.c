@@ -211,6 +211,7 @@ void CopyPendingDrawState(struct PendingDrawState *destination,
 }
 
 #if R200_CPEMIT_68K
+ULONG EgPatchWhy[8];        /* refused texture/matrix patches, by reason */
 /* The capture cache with only unit 0's texture replaced (the state since
  * the capture changed by binds alone). FALSE: capture in full. */
 BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
@@ -224,22 +225,26 @@ BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
     /* the units must be on or off as in the capture (a disable and an
      * enable between two draws come out even) */
     for (unit = 0; unit < 2UL; ++unit)
-        if (!context->textureEnabled[unit] != !state->textured[unit])
+        if (!context->textureEnabled[unit] != !state->textured[unit]) {
+            EgPatchWhy[unit]++;
             return FALSE;
+        }
     for (unit = 0; unit < 2UL; ++unit) {
         if (!(context->r68kTexOnlyUnits & (1UL << unit)) || !context->textureEnabled[unit])
             continue;
         if (!context->textureEnabled[unit] || !state->textured[unit] ||
-            context->boundTexture[unit] >= MAX_TEXTURES)
+            context->boundTexture[unit] >= MAX_TEXTURES) {
+            EgPatchWhy[2]++;
             return FALSE;
+        }
         texture = &context->textures[context->boundTexture[unit]];
         if (!EnsureTextureResident(context, texture) ||
-            (IsMipFilter(texture->minFilter) &&
-             texture->definedLevels != ((1UL << texture->levelCount) - 1UL)) ||
             !SyncTextureDirty(context, texture) ||
             !texture->surface.Handle ||
-            context->semanticStateSerial != serial)
+            context->semanticStateSerial != serial) {
+            EgPatchWhy[3]++;
             return FALSE;
+        }
         state->textureName[unit] = context->boundTexture[unit];
         state->header[handleAt[unit]] = (ULONG)texture->surface.Handle;
         state->header[sizeAt[unit]] = (texture->width - 1UL) |
@@ -253,8 +258,10 @@ BOOL R68KPatchCaptureTexture(struct MiniGLR200Context *context,
             state->hardwareSphereMap || state->fog ||
             context->textureGenS[0] || context->textureGenT[0] ||
             context->textureGenS[1] || context->textureGenT[1] ||
-            state->headerDwords < 37UL)
+            state->headerDwords < 37UL) {
+            EgPatchWhy[4]++;
             return FALSE;
+        }
         if (!context->combinedMatrixValid) {
             MultiplyMatrix(context->combinedMatrix,
                            context->projection[context->projectionDepth],
@@ -382,12 +389,6 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
             if (context->perfEnabled) context->perf.dropTexture0++;
             return FALSE;
         }
-        if (IsMipFilter(texture->minFilter) &&
-            texture->definedLevels !=
-                ((1UL << texture->levelCount) - 1UL)) {
-            if (context->perfEnabled) context->perf.dropTexture0Mips++;
-            return FALSE;
-        }
         if (!SyncTextureDirty(context, texture)) {
             if (context->perfEnabled) context->perf.dropTexture0++;
             return FALSE;
@@ -415,12 +416,6 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
         texture1 = &context->textures[context->boundTexture[1]];
         if (!EnsureTextureResident(context, texture1)) {
             if (context->perfEnabled) context->perf.dropTexture1++;
-            return FALSE;
-        }
-        if (IsMipFilter(texture1->minFilter) &&
-            texture1->definedLevels !=
-                ((1UL << texture1->levelCount) - 1UL)) {
-            if (context->perfEnabled) context->perf.dropTexture1Mips++;
             return FALSE;
         }
         if (!SyncTextureDirty(context, texture1)) {
