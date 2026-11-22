@@ -1146,6 +1146,15 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
     windowTags[0].ti_Data = (ULONG)context->screen;
     windowTags[3].ti_Data = context->width;
     windowTags[4].ti_Data = context->height;
+    /* A size with no exact mode (512x320 on a monitor that offers
+     * 640x480 next): the drawable is the size asked for, at the screen's
+     * top left, so a client's viewport, scissor and read-back see the
+     * size it set up for; the rest of the screen stays black. */
+    if (!modeSpecified && requestedWidth >= 64UL && requestedHeight >= 64UL &&
+        requestedWidth <= context->width && requestedHeight <= context->height) {
+        context->width = requestedWidth;
+        context->height = requestedHeight;
+    }
     context->window = OpenWindowTagList(NULL, windowTags);
     context->safePort = CreateMsgPort();
     context->displayPort = CreateMsgPort();
@@ -1228,10 +1237,11 @@ BOOL CreateFullscreenTarget(struct MiniGLR200Context *context,
          * pixel P96 pads rows from 800 to 832, so accept any surface at
          * least as wide as the drawable (the display fetch uses the
          * bitmap's own pitch, and the emitter clamps drawing to the
-         * context size). Height has no padding and must match exactly. */
+         * context size). The height may exceed the drawable's too: a
+         * size without its own mode draws at the screen's top left. */
         if (context->surfaces[index].Format != context->colorFormat ||
             context->surfaces[index].Width < context->width ||
-            context->surfaces[index].Height != context->height) {
+            context->surfaces[index].Height < context->height) {
             dbg_puts("[mgl] fsfail=importshape idx=");
             dbg_u32(index);
             dbg_puts(" fmt=");
