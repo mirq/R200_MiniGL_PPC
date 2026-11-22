@@ -45,6 +45,36 @@ static struct radeon_accel_state Accel;
 static ULONG EmitCapacity;
 static BOOL EmitOverflow;
 
+/* Context registers: a write to the register after the one the previous
+ * SET_CONTEXT_REG packet ended with, right behind it, extends that packet
+ * (runs of 3-dword packets otherwise). Forgotten at every buffer start. */
+static ULONG CoalHdr = ~0UL, CoalEnd, CoalReg;
+
+static void EgCtxReg(ULONG reg, ULONG val)
+{
+    if (reg >= SET_CONTEXT_REG_offset && reg < SET_CONTEXT_REG_end) {
+        if (CoalHdr != ~0UL && EmitCp.Wptr == CoalEnd && reg == CoalReg + 4UL &&
+            !EmitOverflow) {
+            EmitCp.Ring[CoalHdr] += 1UL << 16;
+        } else {
+            CoalHdr = EmitCp.Wptr;
+            eg_cp_out(&EmitCp, RADEON_CP_PACKET3 | (IT_SET_CONTEXT_REG << 8) | (1UL << 16));
+            eg_cp_out(&EmitCp, (reg - SET_CONTEXT_REG_offset) >> 2);
+        }
+        eg_cp_out(&EmitCp, val);
+        CoalEnd = EmitCp.Wptr;
+        CoalReg = reg;
+        return;
+    }
+    {
+        RADEONInfoPtr info = &Xi;
+        PACK0(reg, 1);
+        E32(val);
+    }
+}
+#undef EREG
+#define EREG(reg, val) EgCtxReg((reg), (val))
+
 /* eg_cp.c is the chip's; the library only needs the buffer bound check */
 BOOL eg_cp_begin(struct EgCp *cp, ULONG n)
 {
@@ -1208,9 +1238,14 @@ static BOOL SetTargets(ULONG colorHandle, ULONG depthHandle, ULONG depthControl,
         z.height = d.height;
         z.control = depthControl;
     }
-    if (!Sh.valid || !SameLongs(&Sh.depth, &z, sizeof(z) / 4)) {
+    if (!Sh.valid || !SameLongs(&Sh.depth, &z, 3)) {
         EmitDepth(&z);
         Sh.depth = z;
+    } else if (Sh.depth.control != z.control) {
+        /* the same surface: the control alone */
+        if (z.gpu)
+            Reg(DB_DEPTH_CONTROL, z.control);
+        Sh.depth.control = z.control;
     }
     return TRUE;
 }
@@ -1750,6 +1785,8 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
 static void BeginBuffer(ULONG *words, ULONG capacity, BOOL persist)
 {
     RADEONInfoPtr info = &Xi;
+
+    CoalHdr = ~0UL;         /* no packet to extend in a new buffer */
 
     if (persist) {
         /* the engine holds the last buffer's state: keep the shadows, but
