@@ -2332,9 +2332,10 @@ static BOOL EmitPrimitiveInternal(struct MiniGLR200Context *context,
     }
     switch (primitive) {
     case GL_POINTS:
-#if defined(R68K_SPRITES) && R68K_SPRITES
-        /* the emitter draws sized TCL points as hardware point sprites */
-        if (0)
+#if (defined(R68K_SPRITES) && R68K_SPRITES) || MGL_EVERGREEN
+        /* the emitter draws sized TCL points natively (PA_SU_POINT_SIZE,
+         * up to 255 pixels): no CPU-built quads */
+        if (context->pointSize > 255.0f)
 #else
         if (context->pointSize > 1.5f)
 #endif

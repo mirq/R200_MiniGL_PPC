@@ -1024,8 +1024,21 @@ void Lib_glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                        &expectedWidth,&expectedHeight);
     if ((ULONG)width!=expectedWidth || (ULONG)height!=expectedHeight ||
         !UploadTextureRegion(context,texture,(ULONG)level,0,0,(ULONG)width,
-                             (ULONG)height,format,type,pixels))
+                             (ULONG)height,format,type,pixels)) {
         SetError(context,GL_INVALID_VALUE);
+        return;
+    }
+#if MGL_EVERGREEN
+    /* Into VRAM now, while the program loads, not at the first draw that
+     * samples it (in the middle of a game's timed frames). A failure here
+     * is not an error: the draw tries again. */
+    if (context->device && pixels) {
+        if (!texture->resident)
+            (void)EnsureTextureResident(context, texture);
+        else
+            (void)SyncTextureDirty(context, texture);
+    }
+#endif
 }
 
 /*

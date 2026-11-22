@@ -705,6 +705,17 @@ void EgArraysRelease(struct MiniGLR200Context *context)
             dbg_u32(UpStatTexels[i]);
         }
     }
+    {
+        extern ULONG EgStatDraws, EgStatVtxDwords, CpBatches, CpCopyDwords, EgStatClears;
+        dbg_puts(" emitted draws=");
+        dbg_u32(EgStatDraws);
+        dbg_puts(" oldvtxdw=");
+        dbg_u32(EgStatVtxDwords);
+        dbg_puts(" batches=");
+        dbg_u32(CpBatches);
+        dbg_puts(" ibdw=");
+        dbg_u32(CpCopyDwords);
+    }
     dbg_puts(" old path:");
     for (i = 0; i < 16UL && EgFailLine[i]; ++i) {
         dbg_puts(" L");

@@ -464,12 +464,12 @@ static BOOL CpSubmitSlot(struct MiniGLR200Context *context,
     /* The next build slot was retired by the caller (WaitSubmitSlot):
      * its half of the index ring is free again. */
     context->indexCursor[(context->buildSlot + 1UL) % SUBMIT_SLOT_COUNT] = 0;
+    CpCopyDwords += count;
+    CpBatches++;
     if (t0) {
         t1 = PerfClock();
         CpCopyTicks += t1 - t0;
         t0 = t1;
-        CpCopyDwords += count;
-        CpBatches++;
     }
     ZeroMemory(&indirect, sizeof(indirect));
     indirect.Size = sizeof(indirect);
