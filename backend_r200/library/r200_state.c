@@ -912,16 +912,61 @@ void Lib_glScalef(GLfloat x, GLfloat y, GLfloat z)
 void Lib_glScaled(GLdouble x, GLdouble y, GLdouble z)
 { Lib_glScalef((GLfloat)x, (GLfloat)y, (GLfloat)z); }
 
+/* sin and cos of an angle in degrees: quadrant reduction and Taylor
+ * polynomials on [-pi/4, pi/4] (error below 1e-9) -- the 68060 has no
+ * FSIN/FCOS, the math library's go through the FPU emulation. */
+static void SinCosDeg(GLfloat degrees, GLfloat *sine, GLfloat *cosine)
+{
+    double x = (double)degrees * 0.017453292519943295, q = x * 0.6366197723675814, r, r2, sn, cs;
+    LONG k = (LONG)(q >= 0.0 ? q + 0.5 : q - 0.5);
+
+    r = x - (double)k * 1.5707963267948966;
+    r2 = r * r;
+    sn = r * (1.0 - r2 * (1.0 / 6.0 - r2 * (1.0 / 120.0 - r2 * (1.0 / 5040.0))));
+    cs = 1.0 - r2 * (0.5 - r2 * (1.0 / 24.0 - r2 * (1.0 / 720.0 - r2 * (1.0 / 40320.0))));
+    switch (k & 3) {
+    case 0: *sine = (GLfloat)sn; *cosine = (GLfloat)cs; break;
+    case 1: *sine = (GLfloat)cs; *cosine = (GLfloat)-sn; break;
+    case 2: *sine = (GLfloat)-sn; *cosine = (GLfloat)-cs; break;
+    default: *sine = (GLfloat)-cs; *cosine = (GLfloat)sn; break;
+    }
+}
+
+/* M * R for a rotation about one principal axis (0 x, 1 y, 2 z): only two
+ * columns change. */
+static void RotateAxis(struct MiniGLR200Context *context, ULONG axis, GLfloat s, GLfloat c)
+{
+    GLfloat *m = CurrentMatrix(context);
+    ULONG a = axis == 0 ? 1UL : axis == 1 ? 2UL : 0UL;     /* columns a, b */
+    ULONG b = axis == 0 ? 2UL : axis == 1 ? 0UL : 1UL;
+    ULONG r;
+
+    /* x: (c1, c2), y: (c2, c0), z: (c0, c1) -- cyclic, the same formula */
+    for (r = 0; r < 4UL; ++r) {
+        GLfloat ma = m[a * 4UL + r], mb = m[b * 4UL + r];
+        m[a * 4UL + r] = ma * c + mb * s;
+        m[b * 4UL + r] = mb * c - ma * s;
+    }
+    InvalidateNormalMatrix(context);
+}
+
 void Lib_glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z)
 {
     struct MiniGLR200Context *context = CurrentContext();
     GLfloat matrix[16], length, sine, cosine, oneMinus;
     if (!StateChangeAllowed(context)) return;
+    /* one principal axis (GLQuake's every rotation): two columns */
+    if ((y == 0.0f && z == 0.0f && x != 0.0f) || (x == 0.0f && z == 0.0f && y != 0.0f) ||
+        (x == 0.0f && y == 0.0f && z != 0.0f)) {
+        GLfloat d = x != 0.0f ? x : y != 0.0f ? y : z;
+        SinCosDeg(d < 0.0f ? -angle : angle, &sine, &cosine);
+        RotateAxis(context, x != 0.0f ? 0UL : y != 0.0f ? 1UL : 2UL, sine, cosine);
+        return;
+    }
     length = (GLfloat)sqrt((double)(x*x + y*y + z*z));
     if (length == 0.0f) return;
     x /= length; y /= length; z /= length;
-    sine = (GLfloat)sin((double)angle * 0.017453292519943295);
-    cosine = (GLfloat)cos((double)angle * 0.017453292519943295);
+    SinCosDeg(angle, &sine, &cosine);
     oneMinus = 1.0f - cosine;
     Identity(matrix);
     matrix[0] = x*x*oneMinus + cosine;
@@ -964,6 +1009,11 @@ void Lib_glRotatefEXTs(GLfloat sin_an, GLfloat cos_an, const GLint xyz)
     struct MiniGLR200Context *context = CurrentContext();
     GLfloat matrix[16], x, y, z, length, oneMinus;
     if (!StateChangeAllowed(context)) return;
+    if (xyz == GLROT_100 || xyz == GLROT_010 || xyz == GLROT_001) {
+        RotateAxis(context, xyz == GLROT_100 ? 0UL : xyz == GLROT_010 ? 1UL : 2UL,
+                   sin_an, cos_an);
+        return;
+    }
     DecodeRotatefEXTAxis(xyz, &x, &y, &z);
     length = (GLfloat)sqrt((double)(x*x + y*y + z*z));
     if (length == 0.0f) return;
