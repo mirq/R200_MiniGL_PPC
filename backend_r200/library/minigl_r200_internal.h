@@ -748,7 +748,8 @@ struct MiniGLR200Context {
     BOOL egFlipQueued;      /* egFlipBuffer drawn, shown at the next present */
     BOOL egImmValid;        /* the last immediate draw, for EgImmediateDraw merges */
     ULONG egImmSerial, egImmSlot, egImmRecords, egImmRecord, egImmRingEnd,
-          egImmPrim, egImmStride;
+          egImmPrim, egImmStride, egImmVerts;
+    ULONG egImmIdxCursor[SUBMIT_SLOT_COUNT];
     UWORD egFlipPad2;
     ULONG egFlipBuffer, egFlipFence;
     /* the resident copies (RadeonGL's array hints) */
