@@ -150,6 +150,8 @@ struct Shader {
     ULONG gpu;
     ULONG gprs;
     BOOL used;
+    UWORD setupN;           /* the setup's command words, once emitted */
+    ULONG setup[40];
 };
 
 #define MAX_SHADERS 96
@@ -528,6 +530,7 @@ static struct Shader *GetShader(ULONG k0, ULONG k1, ULONG k2, BOOL pixel)
     ToVram(ShaderOff + off, Prog, n);
     ShaderUsed = off + n * 4;
     s->key[0] = k0; s->key[1] = k1; s->key[2] = k2;
+    s->setupN = 0;
     s->gpu = VramGpu + ShaderOff + off;
     s->gprs = gprs;
     s->used = TRUE;
@@ -552,6 +555,11 @@ static struct {
     ULONG psConst[4], psConstGpu;
     ULONG tex[2][4];        /* gpu, size, state, pitch */
 } Sh;
+
+static void Replay(const ULONG *w, ULONG n);
+/* Draw's fast path: the last array draw's header and descriptors */
+static ULONG PrevHdr[44], PrevFmt, PrevOffs;
+static BOOL PrevOk;
 
 static void Reg(ULONG reg, ULONG value)
 {
@@ -650,19 +658,39 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
         return;
     ++EgStatShaderBinds;
     if (!Sh.valid || Sh.vs != vs) {
-        CLEAR(c);
-        c.shader_addr = vs->gpu;
-        c.shader_size = 512;
-        c.num_gprs = vs->gprs;
-        evergreen_vs_setup(&Xi, &c, RADEON_GEM_DOMAIN_VRAM);
+        if (vs->setupN)
+            Replay(vs->setup, vs->setupN);
+        else {
+            ULONG start = EmitCp.Wptr, k;
+            CLEAR(c);
+            c.shader_addr = vs->gpu;
+            c.shader_size = 512;
+            c.num_gprs = vs->gprs;
+            evergreen_vs_setup(&Xi, &c, RADEON_GEM_DOMAIN_VRAM);
+            if (!EmitOverflow && EmitCp.Wptr - start <= 40UL) {
+                for (k = 0; k < EmitCp.Wptr - start; ++k)
+                    vs->setup[k] = EmitCp.Ring[start + k];
+                vs->setupN = (UWORD)(EmitCp.Wptr - start);
+            }
+        }
     }
     if (!Sh.valid || Sh.ps != ps) {
-        CLEAR(c);
-        c.shader_addr = ps->gpu;
-        c.shader_size = 512;
-        c.num_gprs = ps->gprs;
-        c.export_mode = 2;
-        evergreen_ps_setup(&Xi, &c, RADEON_GEM_DOMAIN_VRAM);
+        if (ps->setupN)
+            Replay(ps->setup, ps->setupN);
+        else {
+            ULONG start = EmitCp.Wptr, k;
+            CLEAR(c);
+            c.shader_addr = ps->gpu;
+            c.shader_size = 512;
+            c.num_gprs = ps->gprs;
+            c.export_mode = 2;
+            evergreen_ps_setup(&Xi, &c, RADEON_GEM_DOMAIN_VRAM);
+            if (!EmitOverflow && EmitCp.Wptr - start <= 40UL) {
+                for (k = 0; k < EmitCp.Wptr - start; ++k)
+                    ps->setup[k] = EmitCp.Ring[start + k];
+                ps->setupN = (UWORD)(EmitCp.Wptr - start);
+            }
+        }
     }
     BEGIN_BATCH(40);
     EREG(SPI_VS_OUT_CONFIG, (inputs - 1) << VS_EXPORT_COUNT_shift);
@@ -682,8 +710,71 @@ static void BindShaders(struct Shader *vs, struct Shader *ps, ULONG inputs, BOOL
     Sh.flat = flat;
 }
 
+/* Command words emitted once and replayed: a texture unit's resource and
+ * sampler for (unit, address, size, state). */
+#define TEX_REPLAY 32
+static struct { ULONG key[4]; ULONG n; ULONG w[24]; } TexReplay[TEX_REPLAY];
+static ULONG TexReplayNext;
+
+static void Replay(const ULONG *w, ULONG n)
+{
+    RADEONInfoPtr info = &Xi;
+    ULONG i;
+
+    BEGIN_BATCH(n);
+    for (i = 0; i < n; ++i)
+        E32(w[i]);
+    END_BATCH();
+}
+
+static void EmitTexture2(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG offset,
+                         ULONG size, ULONG state);
+
 static void EmitTexture(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG offset,
                         ULONG size, ULONG state)
+{
+    ULONG gpu = s->gpuAddress + offset, k3 = (unit << 30) ^ size, i, start;
+    ULONG key = state & (RADEON3D_TEX_STATE_MASK | EG_TEX_FORMAT_MASK);
+
+    if (Sh.valid && Sh.tex[unit][0] == gpu && Sh.tex[unit][1] == size &&
+        Sh.tex[unit][2] == key)
+        return;
+    for (i = 0; i < TEX_REPLAY; ++i)
+        if (TexReplay[i].n && TexReplay[i].key[0] == gpu && TexReplay[i].key[1] == k3 &&
+            TexReplay[i].key[2] == key) {
+            Replay(TexReplay[i].w, TexReplay[i].n);
+            Sh.tex[unit][0] = gpu;
+            Sh.tex[unit][1] = size;
+            Sh.tex[unit][2] = key;
+            Sh.tex[unit][3] = TexReplay[i].key[3];
+            return;
+        }
+    start = EmitCp.Wptr;
+    EmitTexture2(unit, s, offset, size, state);
+    i = TexReplayNext++ % TEX_REPLAY;
+    TexReplay[i].n = 0;
+    if (!EmitOverflow && EmitCp.Wptr > start && EmitCp.Wptr - start <= 24UL) {
+        ULONG k;
+        for (k = 0; k < EmitCp.Wptr - start; ++k)
+            TexReplay[i].w[k] = EmitCp.Ring[start + k];
+        TexReplay[i].key[0] = gpu;
+        TexReplay[i].key[1] = k3;
+        TexReplay[i].key[2] = key;
+        TexReplay[i].key[3] = Sh.tex[unit][3];
+        TexReplay[i].n = EmitCp.Wptr - start;
+    }
+}
+
+/* the texture replays name addresses: forgotten when a texture may move */
+void EgEmitForgetTextures(void)
+{
+    ULONG i;
+    for (i = 0; i < TEX_REPLAY; ++i)
+        TexReplay[i].n = 0;
+}
+
+static void EmitTexture2(ULONG unit, const struct MGLPPCEmitSurface *s, ULONG offset,
+                         ULONG size, ULONG state)
 {
     tex_resource_t tex;
     tex_sampler_t samp;
@@ -1101,6 +1192,7 @@ static BOOL Clear(const ULONG *r, MGLPPCEmitResolve resolve, void *user)
     ULONG psc[4] = {0, 0, 0, 0};
 
     ++EgStatClears;
+    PrevOk = FALSE;
     if (!SetTargets(r[2], depthHandle,
                     depthHandle ? (Z_ENABLE_bit | Z_WRITE_ENABLE_bit | (FRAG_ALWAYS << ZFUNC_shift)) : 0,
                     resolve, user, &c))
@@ -1143,6 +1235,52 @@ static BOOL Clear(const ULONG *r, MGLPPCEmitResolve resolve, void *user)
     return TRUE;
 }
 
+/* An EG_EXEC_ARRAYS draw's vertex buffers and the draw itself. */
+static void ArraysTail(const ULONG *ga, ULONG count, BOOL textured, BOOL textured1)
+{
+        ULONG n = ga[EGA_VERTS], fmt = ga[EGA_FORMATS], col = fmt >> EGA_COL_SHIFT;
+    ULONG posBytes = (fmt & EGA_POS_SIZE_MASK) * 4;
+    ULONG colBytes = (col & 3) == EGA_COL_FLOAT4 ? 16 : (col & 3) == EGA_COL_FLOAT3 ? 12 : 4;
+#define EGA_BYTES(st, elem) ((st) ? (st) * n : (elem))
+    if (fmt & EGA_INTERLEAVED) {
+        /* one buffer, the attributes at their offsets: n whole records
+         * from the position on */
+        VertexBufferOnce(0, ga[EGA_POS_GPU], ga[EGA_POS_STRIDE] * n, ga[EGA_POS_STRIDE]);
+        if (!(fmt & EGA_COL_ARRAY))
+            VertexBufferOnce(1, ga[EGA_COL_GPU], colBytes, 0);
+    } else {
+        VertexBufferOnce(0, ga[EGA_POS_GPU], EGA_BYTES(ga[EGA_POS_STRIDE], posBytes),
+                         ga[EGA_POS_STRIDE]);
+        VertexBufferOnce(1, ga[EGA_COL_GPU], EGA_BYTES(ga[EGA_COL_STRIDE], colBytes),
+                         ga[EGA_COL_STRIDE]);
+        if (textured)
+            VertexBufferOnce(2, ga[EGA_TEX0_GPU], EGA_BYTES(ga[EGA_TEX0_STRIDE], 8),
+                             ga[EGA_TEX0_STRIDE]);
+        if (textured1)
+            VertexBufferOnce(3, ga[EGA_TEX1_GPU], EGA_BYTES(ga[EGA_TEX1_STRIDE], 8),
+                             ga[EGA_TEX1_STRIDE]);
+    }
+#undef EGA_BYTES
+    ++EgStatDraws;
+    if (ga[EGA_INDEX_TYPE] == EGA_INDEX_NONE)
+        EmitDraw(PrimType[ga[EGA_PRIM] % 10], count);
+    else {
+        SetIndexOffset(ga[EGA_INDEX_OFFSET]);
+        EmitDrawIndexed(PrimType[ga[EGA_PRIM] % 10], count, ga[EGA_INDEX_GPU],
+                        ga[EGA_INDEX_TYPE] == EGA_INDEX_32);
+    }
+}
+
+/* The last array draw's header (dwords 2..43) and descriptors, to skip
+ * every state group but the textures when only they changed (consecutive
+ * world chunks). Cleared at every buffer start and by any other record. */
+/* header dwords a texture-only change touches (bindings, sizes, offsets,
+ * count): compared apart */
+static const UBYTE TexWord[44] = {
+    0,0,0,0,1,0,0,0,0,0,1,1,1,1,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+#define PS_TEX_BITS (RADEON3D_TEX_MODULATE | RADEON3D_TEX_SCALE_2X | RADEON3D_TEX_ALPHA_SCALE_2X)
+
 static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
                  MGLPPCEmitResolve resolve, void *user, const ULONG *ga)
 {
@@ -1168,6 +1306,36 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     if (options & (RADEON3D_DRAW_TEXGEN | RADEON3D_DRAW_LIGHTING | RADEON3D_DRAW_PALETTE)) {
         EgEmitFailStage = 0x2101;   /* not yet: lighting, texgen, palette */
         return FALSE;
+    }
+    if (ga && PrevOk && Sh.valid && length >= RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS + EG_ARRAYS_DWORDS) {
+        /* the previous array draw's state but for the textures */
+        const ULONG *g = r + RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS;
+        ULONG i;
+        BOOL same = g[EGA_FORMATS] == PrevFmt && g[EGA_OFFSETS] == PrevOffs &&
+                    !((r[13] ^ PrevHdr[13]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK)) &&
+                    !((r[18] ^ PrevHdr[18]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK));
+        for (i = 2; same && i < 44UL; ++i)
+            if (!TexWord[i] && r[i] != PrevHdr[i])
+                same = FALSE;
+        if (same) {
+            if (textured) {
+                if (!r[4] || !resolve(user, r[4], &t0s)) {
+                    EgEmitFailStage = 0x2104;
+                    return FALSE;
+                }
+                EmitTexture(0, &t0s, r[11], r[12], r[13]);
+            }
+            if (textured1) {
+                if (!r[15] || !resolve(user, r[15], &t1s)) {
+                    EgEmitFailStage = 0x2105;
+                    return FALSE;
+                }
+                EmitTexture(1, &t1s, r[16], r[17], r[18]);
+            }
+            ArraysTail(g, g[EGA_COUNT], textured, textured1);
+            memcpy(PrevHdr, r, sizeof(PrevHdr));
+            return TRUE;
+        }
     }
     headerDwords = tcl ? RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS
                  : extended ? RADEON3D_EXEC_DRAW_EXTENDED_HEADER_DWORDS
@@ -1367,40 +1535,15 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
             return FALSE;
     }
     if (ga) {
-        ULONG n = ga[EGA_VERTS], fmt = ga[EGA_FORMATS], col = fmt >> EGA_COL_SHIFT;
-        ULONG posBytes = (fmt & EGA_POS_SIZE_MASK) * 4;
-        ULONG colBytes = (col & 3) == EGA_COL_FLOAT4 ? 16 : (col & 3) == EGA_COL_FLOAT3 ? 12 : 4;
-#define EGA_BYTES(st, elem) ((st) ? (st) * n : (elem))
-        if (fmt & EGA_INTERLEAVED) {
-            /* one buffer, the attributes at their offsets: n whole records
-             * from the position on */
-            VertexBufferOnce(0, ga[EGA_POS_GPU], ga[EGA_POS_STRIDE] * n, ga[EGA_POS_STRIDE]);
-            if (!(fmt & EGA_COL_ARRAY))
-                VertexBufferOnce(1, ga[EGA_COL_GPU], colBytes, 0);
-        } else {
-            VertexBufferOnce(0, ga[EGA_POS_GPU], EGA_BYTES(ga[EGA_POS_STRIDE], posBytes),
-                             ga[EGA_POS_STRIDE]);
-            VertexBufferOnce(1, ga[EGA_COL_GPU], EGA_BYTES(ga[EGA_COL_STRIDE], colBytes),
-                             ga[EGA_COL_STRIDE]);
-            if (textured)
-                VertexBufferOnce(2, ga[EGA_TEX0_GPU], EGA_BYTES(ga[EGA_TEX0_STRIDE], 8),
-                                 ga[EGA_TEX0_STRIDE]);
-            if (textured1)
-                VertexBufferOnce(3, ga[EGA_TEX1_GPU], EGA_BYTES(ga[EGA_TEX1_STRIDE], 8),
-                                 ga[EGA_TEX1_STRIDE]);
-        }
-#undef EGA_BYTES
-        ++EgStatDraws;
-        if (ga[EGA_INDEX_TYPE] == EGA_INDEX_NONE)
-            EmitDraw(PrimType[ga[EGA_PRIM] % 10], count);
-        else {
-            SetIndexOffset(ga[EGA_INDEX_OFFSET]);
-            EmitDrawIndexed(PrimType[ga[EGA_PRIM] % 10], count, ga[EGA_INDEX_GPU],
-                            ga[EGA_INDEX_TYPE] == EGA_INDEX_32);
-        }
+        ArraysTail(ga, count, textured, textured1);
+        memcpy(PrevHdr, r, sizeof(PrevHdr));
+        PrevFmt = ga[EGA_FORMATS];
+        PrevOffs = ga[EGA_OFFSETS];
+        PrevOk = TRUE;
         Sh.valid = TRUE;
         return TRUE;
     }
+    PrevOk = FALSE;
     gpu = UploadVertices(vertices, count * stride);
     if (!gpu)
         return FALSE;
@@ -1505,6 +1648,7 @@ static void BeginBuffer(ULONG *words, ULONG capacity)
     evergreen_set_default_state(&Xi);
     IndexOffset = 0;
     PrimShadow = IndexTypeShadow = ~0UL;
+    PrevOk = FALSE;
     memset(VbufShadow, 0, sizeof(VbufShadow));
     /* everything the CPU wrote before this buffer: textures, vertices,
      * constants, shaders */
