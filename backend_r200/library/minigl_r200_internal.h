@@ -58,6 +58,16 @@
 /* Radeon HD 5450 (Evergreen.chip): native emitter, device service on the
  * chip's 3D hand-off API (backend_evergreen/library). */
 #include "eg_emit.h"
+
+/* small fixed-size copies and clears inline (the build has -fno-builtin;
+ * the shim's memcpy/memset take the rest) */
+#ifdef __m68k__
+#include <stddef.h>
+void *memcpy(void *, const void *, size_t);
+void *memset(void *, int, size_t);
+#define memcpy(d, s, n) __builtin_memcpy((d), (s), (n))
+#define memset(d, v, n) __builtin_memset((d), (v), (n))
+#endif
 BOOL BoardBigEndian(void);
 /* Never MOVE16 into VRAM (the bridges corrupt line bursts), and exec's
  * CopyMem may use it: plain long or byte stores. */

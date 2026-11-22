@@ -28,6 +28,16 @@
 #include "radeon3d_records.h"
 #include "eg_emit.h"
 
+/* small fixed-size copies and clears inline (the build has -fno-builtin;
+ * the shim's memcpy/memset take the rest) */
+#ifdef __m68k__
+#include <stddef.h>
+void *memcpy(void *, const void *, size_t);
+void *memset(void *, int, size_t);
+#define memcpy(d, s, n) __builtin_memcpy((d), (s), (n))
+#define memset(d, v, n) __builtin_memset((d), (v), (n))
+#endif
+
 /* draw-record option (radeon3d_emit.h): a depth-only pass, no colour */
 #ifndef RADEON3D_EXEC_SUPPRESS_COLOR_WRITE
 #define RADEON3D_EXEC_SUPPRESS_COLOR_WRITE 0x80000000UL
