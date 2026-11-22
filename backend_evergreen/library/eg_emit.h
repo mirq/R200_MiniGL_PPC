@@ -46,6 +46,10 @@ ULONG EgEmitPresent(ULONG *words, ULONG capacity, APTR vertCpu, ULONG vertGpu,
 /* EG_EXEC_ARRAYS_TEXONLY: an EG_EXEC_ARRAYS record whose header equals the
  * record right before it but for the texture words (the frontend knows) */
 #define EG_EXEC_ARRAYS_TEXONLY 0x42UL
+/* EG_EXEC_ARRAYS_TEXW: the same, the header as its texture words only
+ * (dwords 4, 10..13, 15..18 in that order), then the descriptors */
+#define EG_EXEC_ARRAYS_TEXW 0x43UL
+#define EG_TEXWORDS         9UL
 #define EGA_PRIM            0   /* RADEON3D_EXEC_DRAW_* */
 #define EGA_COUNT           1   /* indices (or vertices without indices) */
 #define EGA_INDEX_GPU       2

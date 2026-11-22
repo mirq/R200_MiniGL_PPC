@@ -604,7 +604,8 @@ static ULONG CaptureNoSync(ULONG *dst, ULONG start, ULONG end);
 /* Draw's fast path: the last array draw's header and descriptors */
 static __inline__ BOOL SameLongs(const void *a, const void *b, ULONG longs);
 static const ULONG *PrevHdr;
-static BOOL DrawTexOnly;        /* the walker: an EG_EXEC_ARRAYS_TEXONLY record */     /* the record itself (valid for the walk) */
+static BOOL DrawTexOnly;        /* the walker: an EG_EXEC_ARRAYS_TEXONLY record */
+static ULONG CurHdr[44];        /* EG_EXEC_ARRAYS_TEXW: the header it stands for */     /* the record itself (valid for the walk) */
 static ULONG PrevFmt, PrevOffs;
 static BOOL PrevOk;
 
@@ -1484,7 +1485,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     }
     if (ga && PrevOk && Sh.valid && length >= RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS + EG_ARRAYS_DWORDS) {
         /* the previous array draw's state but for the textures */
-        const ULONG *g = r + RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS;
+        const ULONG *g = ga;
         ULONG i;
         BOOL same = g[EGA_FORMATS] == PrevFmt && g[EGA_OFFSETS] == PrevOffs &&
                     !((r[13] ^ PrevHdr[13]) & (PS_TEX_BITS | EG_TEX_FORMAT_MASK)) &&
@@ -1565,7 +1566,6 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
             EgEmitFailStage = 0x2107;
             return FALSE;
         }
-        ga = r + headerDwords;
         count = ga[EGA_COUNT];
         memset(&k, 0, sizeof(k));
         k.flags = VS_STREAMS | (textured ? VS_TEX0 : 0) | (textured1 ? VS_TEX1 : 0);
@@ -1785,14 +1785,32 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
         else if (op == EG_EXEC_ARRAYS || op == EG_EXEC_ARRAYS_TEXONLY) {
             DrawTexOnly = op == EG_EXEC_ARRAYS_TEXONLY;
             ok = Draw(records + walk, length, RADEON3D_EXEC_DRAW_TRIANGLES, resolve, user,
-                      records + walk);
+                      records + walk + RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS);
             DrawTexOnly = FALSE;
+        } else if (op == EG_EXEC_ARRAYS_TEXW) {
+            /* the previous array draw's header, its texture words replaced */
+            static const UBYTE texWord[EG_TEXWORDS] = { 4, 10, 11, 12, 13, 15, 16, 17, 18 };
+            const ULONG *w = records + walk + 2;
+            ULONG k;
+            if (!PrevOk || !PrevHdr || length != 2UL + EG_TEXWORDS + EG_ARRAYS_DWORDS) {
+                EgEmitFailStage = 0x2205;
+                ok = FALSE;
+            } else {
+                if (PrevHdr != CurHdr)
+                    memcpy(CurHdr, PrevHdr, sizeof(CurHdr));
+                for (k = 0; k < EG_TEXWORDS; ++k)
+                    CurHdr[texWord[k]] = w[k];
+                DrawTexOnly = TRUE;
+                ok = Draw(CurHdr, RADEON3D_EXEC_DRAW_HW_TCL_HEADER_DWORDS + EG_ARRAYS_DWORDS,
+                          RADEON3D_EXEC_DRAW_TRIANGLES, resolve, user, w + EG_TEXWORDS);
+                DrawTexOnly = FALSE;
+            }
         }
         else {
             EgEmitFailStage = 0x2202;   /* REUSE_* records: commit mode only */
             ok = FALSE;
         }
-        EGE_END(op == EG_EXEC_ARRAYS || op == EG_EXEC_ARRAYS_TEXONLY ? 12 : 13);
+        EGE_END(op >= EG_EXEC_ARRAYS && op <= EG_EXEC_ARRAYS_TEXW ? 12 : 13);
         if (!ok) {
             if (!EgEmitFailStage)
                 EgEmitFailStage = 0x2203;

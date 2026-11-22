@@ -663,12 +663,27 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
         stride[i] = regionArray[i]->stride;
     }
     record = slot->records + slot->recordCount;
-    for (i = 0; i < state->headerDwords; ++i)
-        record[i] = state->header[i];
-    record[0] = EgArraysOp(context, slot, need);
-    record[1] = need;
-    record[10] = count;
-    ga = record + state->headerDwords;
+    if (EgArraysOp(context, slot, 2UL + EG_TEXWORDS + EG_ARRAYS_DWORDS) ==
+        EG_EXEC_ARRAYS_TEXONLY) {
+        /* the texture words alone (eg_emit.h) */
+        static const UBYTE texWord[EG_TEXWORDS] = { 4, 10, 11, 12, 13, 15, 16, 17, 18 };
+        need = 2UL + EG_TEXWORDS + EG_ARRAYS_DWORDS;
+        record[0] = EG_EXEC_ARRAYS_TEXW;
+        record[1] = need;
+        for (i = 0; i < EG_TEXWORDS; ++i)
+            record[2 + i] = state->header[texWord[i]];
+        record[3] = count;      /* word 10 */
+        ga = record + 2 + EG_TEXWORDS;
+    } else {
+        /* (EgArraysOp remembered the short size: correct it) */
+        context->egRecEnd = slot->recordCount + need;
+        for (i = 0; i < state->headerDwords; ++i)
+            record[i] = state->header[i];
+        record[0] = EG_EXEC_ARRAYS;
+        record[1] = need;
+        record[10] = count;
+        ga = record + state->headerDwords;
+    }
     for (i = 0; i < EG_ARRAYS_DWORDS; ++i)
         ga[i] = 0;
     ga[EGA_PRIM] = prim;
