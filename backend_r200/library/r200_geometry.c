@@ -222,6 +222,7 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
                R68KPatchCaptureTexture(context, &context->captureCache)) {
         state = &context->captureCache;
         EgN[2]++;
+        context->egHdrGen++;
         context->captureCacheSerial = context->semanticStateSerial;
 #endif
     } else {
@@ -259,6 +260,7 @@ static BOOL PrepareScreenAppend(struct MiniGLR200Context *context,
          * the serial (fresh surface handles); key the cache on the value
          * as of now, after the capture completed. */
         CopyPendingDrawState(&context->captureCache, state);
+        context->egHdrGen++;
         context->captureCacheSerial = context->semanticStateSerial;
         context->captureCacheCommand = normalizedCommand;
         context->captureCacheHardwareTransform =

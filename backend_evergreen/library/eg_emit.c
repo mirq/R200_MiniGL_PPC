@@ -562,7 +562,9 @@ static struct {
 static void Replay(const ULONG *w, ULONG n);
 static ULONG CaptureNoSync(ULONG *dst, ULONG start, ULONG end);
 /* Draw's fast path: the last array draw's header and descriptors */
-static ULONG PrevHdr[44], PrevFmt, PrevOffs;
+static __inline__ BOOL SameLongs(const void *a, const void *b, ULONG longs);
+static const ULONG *PrevHdr;     /* the record itself (valid for the walk) */
+static ULONG PrevFmt, PrevOffs;
 static BOOL PrevOk;
 
 static void Reg(ULONG reg, ULONG value)
@@ -978,6 +980,19 @@ static void SetIndexOffset(ULONG offset)
     }
 }
 
+/* SQ_VTX_BASE_VTX_LOC: added to the index of every VERTEX_DATA fetch (the
+ * shared vertex buffer window, ArraysTail). 0 at every buffer's start and
+ * end: the copying present and the 2D driver fetch with it 0. ~0: unknown. */
+static ULONG BaseVtx;
+
+static void SetBaseVtx(ULONG base)
+{
+    if (BaseVtx != base) {
+        Reg(SQ_VTX_BASE_VTX_LOC, base);
+        BaseVtx = base;
+    }
+}
+
 /* count big-endian 16- or 32-bit indices at gpu */
 static void EmitDrawIndexed(ULONG prim, ULONG count, ULONG gpu, BOOL index32)
 {
@@ -1007,11 +1022,11 @@ static void EmitDrawIndexed(ULONG prim, ULONG count, ULONG gpu, BOOL index32)
     END_BATCH();
 }
 
-static void EmitDraw(ULONG prim, ULONG count)
+static void EmitDrawOffset(ULONG prim, ULONG count, ULONG offset)
 {
     draw_config_t d;
 
-    SetIndexOffset(0);
+    SetIndexOffset(offset);
     CLEAR(d);
     d.prim_type = prim;
     d.vgt_draw_initiator = DI_SRC_SEL_AUTO_INDEX;
@@ -1021,6 +1036,11 @@ static void EmitDraw(ULONG prim, ULONG count)
     evergreen_draw_auto(&Xi, &d);
     PrimShadow = prim;
     IndexTypeShadow = DI_INDEX_SIZE_16_BIT;
+}
+
+static void EmitDraw(ULONG prim, ULONG count)
+{
+    EmitDrawOffset(prim, count, 0);
 }
 
 static void EmitScissor(ULONG l, ULONG t, ULONG r, ULONG b)
@@ -1048,7 +1068,7 @@ static void EmitRaster(ULONG suMode, ULONG clipCntl, ULONG vte, const ULONG *vpo
         END_BATCH();
         Sh.suMode = suMode; Sh.clipCntl = clipCntl; Sh.vteCntl = vte;
     }
-    if (vport && (!Sh.valid || memcmp(Sh.vport, vport, sizeof(Sh.vport)))) {
+    if (vport && (!Sh.valid || !SameLongs(Sh.vport, vport, sizeof(Sh.vport) / 4))) {
         BEGIN_BATCH(8);
         PACK0(PA_CL_VPORT_XSCALE_0, 6);
         for (i = 0; i < 6; ++i)
@@ -1122,6 +1142,39 @@ static void EmitFragment(ULONG cbMask, ULONG blend, ULONG alphaCtl, ULONG alphaR
     }
 }
 
+/* longword compare (the inlined memcmp goes byte by byte) */
+static __inline__ BOOL SameLongs(const void *a, const void *b, ULONG longs)
+{
+    const ULONG *x = (const ULONG *)a, *y = (const ULONG *)b;
+
+    while (longs--)
+        if (*x++ != *y++)
+            return FALSE;
+    return TRUE;
+}
+
+/* Handle to surface, remembered for one batch (EgEmitBatch clears it):
+ * every draw resolves its target, depth and textures. */
+#define RC_SLOTS 8
+static ULONG RcHandle[RC_SLOTS];
+static struct MGLPPCEmitSurface RcSurf[RC_SLOTS];
+
+static BOOL Resolve(MGLPPCEmitResolve resolve, void *user, ULONG handle,
+                    struct MGLPPCEmitSurface *out)
+{
+    ULONG i = (handle ^ (handle >> 7)) & (RC_SLOTS - 1UL);
+
+    if (handle && RcHandle[i] == handle) {
+        *out = RcSurf[i];
+        return TRUE;
+    }
+    if (!resolve(user, handle, out))
+        return FALSE;
+    RcHandle[i] = handle;
+    RcSurf[i] = *out;
+    return TRUE;
+}
+
 static BOOL SetTargets(ULONG colorHandle, ULONG depthHandle, ULONG depthControl,
                        MGLPPCEmitResolve resolve, void *user,
                        struct MGLPPCEmitSurface *colorOut)
@@ -1130,7 +1183,7 @@ static BOOL SetTargets(ULONG colorHandle, ULONG depthHandle, ULONG depthControl,
     struct Target t;
     struct Depth z;
 
-    if (!colorHandle || !resolve(user, colorHandle, &c) || !c.pitch) {
+    if (!colorHandle || !Resolve(resolve, user, colorHandle, &c) || !c.pitch) {
         EgEmitFailStage = 0x2001;
         return FALSE;
     }
@@ -1140,13 +1193,13 @@ static BOOL SetTargets(ULONG colorHandle, ULONG depthHandle, ULONG depthControl,
     t.pitch = c.pitch;
     t.height = c.height;
     t.format = c.format & 0xffUL;
-    if (!Sh.valid || memcmp(&Sh.target, &t, sizeof(t))) {
+    if (!Sh.valid || !SameLongs(&Sh.target, &t, sizeof(t) / 4)) {
         EmitTarget(&t);
         Sh.target = t;
     }
     memset(&z, 0, sizeof(z));
     if (depthHandle) {
-        if (!resolve(user, depthHandle, &d)) {
+        if (!Resolve(resolve, user, depthHandle, &d)) {
             EgEmitFailStage = 0x2002;
             return FALSE;
         }
@@ -1155,7 +1208,7 @@ static BOOL SetTargets(ULONG colorHandle, ULONG depthHandle, ULONG depthControl,
         z.height = d.height;
         z.control = depthControl;
     }
-    if (!Sh.valid || memcmp(&Sh.depth, &z, sizeof(z))) {
+    if (!Sh.valid || !SameLongs(&Sh.depth, &z, sizeof(z) / 4)) {
         EmitDepth(&z);
         Sh.depth = z;
     }
@@ -1172,7 +1225,7 @@ static BOOL BindVsConst(const ULONG *rows)
     RADEONInfoPtr info = &Xi;
     ULONG gpu;
 
-    if (Sh.valid && Sh.vsConstGpu && !memcmp(Sh.vsConst, rows, 64))
+    if (Sh.valid && Sh.vsConstGpu && SameLongs(Sh.vsConst, rows, 16))
         return TRUE;
     gpu = ConstUpload(rows, 16);
     if (!gpu)
@@ -1191,7 +1244,7 @@ static BOOL BindPsConst(const ULONG *c)
     RADEONInfoPtr info = &Xi;
     ULONG gpu;
 
-    if (Sh.valid && Sh.psConstGpu && !memcmp(Sh.psConst, c, 16))
+    if (Sh.valid && Sh.psConstGpu && SameLongs(Sh.psConst, c, 4))
         return TRUE;
     gpu = ConstUpload(c, 4);
     if (!gpu)
@@ -1287,11 +1340,20 @@ static void ArraysTail(const ULONG *ga, ULONG count, BOOL textured, BOOL texture
         ULONG n = ga[EGA_VERTS], fmt = ga[EGA_FORMATS], col = fmt >> EGA_COL_SHIFT;
     ULONG posBytes = (fmt & EGA_POS_SIZE_MASK) * 4;
     ULONG colBytes = (col & 3) == EGA_COL_FLOAT4 ? 16 : (col & 3) == EGA_COL_FLOAT3 ? 12 : 4;
+    ULONG window = 0;
 #define EGA_BYTES(st, elem) ((st) ? (st) * n : (elem))
     if (fmt & EGA_INTERLEAVED) {
-        /* one buffer, the attributes at their offsets: n whole records
-         * from the position on */
-        VertexBufferOnce(0, ga[EGA_POS_GPU], ga[EGA_POS_STRIDE] * n, ga[EGA_POS_STRIDE]);
+        /* one buffer, the attributes at their offsets. Its base: the
+         * address congruent to the data's modulo the stride at the start of
+         * its 16 MB block, the data's first record selected by
+         * VGT_INDX_OFFSET -- draws of one stride share the resource. */
+        ULONG st = ga[EGA_POS_STRIDE], gpu = ga[EGA_POS_GPU];
+        if (st >= 4UL && !(st & 3UL)) {
+            ULONG b0 = gpu & ~0xffffffUL;
+            window = (gpu - b0) / st;
+            VertexBufferOnce(0, gpu - window * st, 0x2000000UL, st);
+        } else
+            VertexBufferOnce(0, gpu, st * n, st);
         if (!(fmt & EGA_COL_ARRAY))
             VertexBufferOnce(1, ga[EGA_COL_GPU], colBytes, 0);
     } else {
@@ -1308,10 +1370,14 @@ static void ArraysTail(const ULONG *ga, ULONG count, BOOL textured, BOOL texture
     }
 #undef EGA_BYTES
     ++EgStatDraws;
-    if (ga[EGA_INDEX_TYPE] == EGA_INDEX_NONE)
+    /* the indices' rebase too: VGT_INDX_OFFSET does not reach the vertex
+     * fetch (MEASURED: a windowed draw through it fetched nothing) */
+    if (ga[EGA_INDEX_TYPE] == EGA_INDEX_NONE) {
+        SetBaseVtx(window);
         EmitDraw(PrimType[ga[EGA_PRIM] % 10], count);
-    else {
-        SetIndexOffset(ga[EGA_INDEX_OFFSET]);
+    } else {
+        SetBaseVtx(window + ga[EGA_INDEX_OFFSET]);
+        SetIndexOffset(0);
         EmitDrawIndexed(PrimType[ga[EGA_PRIM] % 10], count, ga[EGA_INDEX_GPU],
                         ga[EGA_INDEX_TYPE] == EGA_INDEX_32);
     }
@@ -1365,21 +1431,21 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
                 same = FALSE;
         if (same) {
             if (textured) {
-                if (!r[4] || !resolve(user, r[4], &t0s)) {
+                if (!r[4] || !Resolve(resolve, user, r[4], &t0s)) {
                     EgEmitFailStage = 0x2104;
                     return FALSE;
                 }
                 EmitTexture(0, &t0s, r[11], r[12], r[13]);
             }
             if (textured1) {
-                if (!r[15] || !resolve(user, r[15], &t1s)) {
+                if (!r[15] || !Resolve(resolve, user, r[15], &t1s)) {
                     EgEmitFailStage = 0x2105;
                     return FALSE;
                 }
                 EmitTexture(1, &t1s, r[16], r[17], r[18]);
             }
             ArraysTail(g, g[EGA_COUNT], textured, textured1);
-            memcpy(PrevHdr, r, sizeof(PrevHdr));
+            PrevHdr = r;
             EgFastDraws++;
             return TRUE;
         }
@@ -1491,7 +1557,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
         ULONG state = fragment ? r[13] : (RADEON3D_TEX_MODULATE |
                       ((options & RADEON3D_DRAW_BILINEAR) ? (RADEON3D_TEX_MAG_LINEAR |
                        (RADEON3D_TEX_MIN_LINEAR << RADEON3D_TEX_MIN_SHIFT)) : 0));
-        if (!r[4] || !resolve(user, r[4], &t0s)) {
+        if (!r[4] || !Resolve(resolve, user, r[4], &t0s)) {
             EgEmitFailStage = 0x2104;
             return FALSE;
         }
@@ -1504,7 +1570,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     }
     if (textured1) {
         ULONG state = r[18];
-        if (!r[15] || !resolve(user, r[15], &t1s)) {
+        if (!r[15] || !Resolve(resolve, user, r[15], &t1s)) {
             EgEmitFailStage = 0x2105;
             return FALSE;
         }
@@ -1584,7 +1650,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     if (ga) {
         EgFullDraws++;
         ArraysTail(ga, count, textured, textured1);
-        memcpy(PrevHdr, r, sizeof(PrevHdr));
+        PrevHdr = r;
         PrevFmt = ga[EGA_FORMATS];
         PrevOffs = ga[EGA_OFFSETS];
         PrevOk = TRUE;
@@ -1601,6 +1667,7 @@ static BOOL Draw(const ULONG *r, ULONG length, ULONG primitive,
     EgStatVtxDwords += count * stride;
     ++EgStatStride[stride > 16 ? 16 : stride];
     if (tcl) ++EgStatTcl;
+    SetBaseVtx(0);
     EmitVertexBuffer(gpu, count * stride * 4, stride * 4);
     EmitDraw(PrimType[primitive], count);
     Sh.valid = TRUE;
@@ -1627,6 +1694,7 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
     ULONG walk = 0;
 
     EgEmitFailStage = 0;
+    memset(RcHandle, 0, sizeof(RcHandle));
     EgEmitPersisted = PersistOk && !EgEmitForceFull && EgEngineOurs();
     EgEmitForceFull = FALSE;
     PersistOk = FALSE;      /* until this buffer is complete */
@@ -1669,6 +1737,7 @@ ULONG EgEmitBatch(ULONG *words, ULONG capacity, ULONG slot,
         }
         walk += length;
     }
+    SetBaseVtx(0);          /* as the present and the 2D driver expect it */
     {
         ULONG n = EndBuffer(words);
         PersistOk = n != 0;
@@ -1729,6 +1798,8 @@ static void BeginBuffer(ULONG *words, ULONG capacity, BOOL persist)
     EREG(WAIT_UNTIL, WAIT_3D_IDLE_bit | WAIT_3D_IDLECLEAN_bit);
     END_BATCH();
     evergreen_set_default_state(&Xi);
+    BaseVtx = ~0UL;
+    SetBaseVtx(0);
     IndexOffset = 0;
     PrimShadow = IndexTypeShadow = ~0UL;
     PrevOk = FALSE;

@@ -1576,7 +1576,7 @@ void Lib_mglSwitchDisplay(void)
         context->drawingBuffer = (drawn + 1UL) % 3UL;
         handle = (ULONG)context->surfaces[context->drawingBuffer].Handle;
         if (context->captureCacheValid)
-            context->captureCache.header[2] = handle;
+            { context->captureCache.header[2] = handle; context->egHdrGen++; }
         if (context->pendingDrawValid)
             context->pendingDraw.header[2] = handle;
         ReapDeferredSurfaces(context);
@@ -1795,7 +1795,7 @@ void Lib_mglSwitchDisplay(void)
             ULONG handle = (ULONG)
                 context->surfaces[context->drawingBuffer].Handle;
             if (context->captureCacheValid)
-                context->captureCache.header[2] = handle;
+                { context->captureCache.header[2] = handle; context->egHdrGen++; }
             if (context->pendingDrawValid)
                 context->pendingDraw.header[2] = handle;
         }
@@ -1956,7 +1956,7 @@ void Lib_mglSwitchDisplay(void)
                     ULONG handle = (ULONG)
                         context->surfaces[context->drawingBuffer].Handle;
                     if (context->captureCacheValid)
-                        context->captureCache.header[2] = handle;
+                        { context->captureCache.header[2] = handle; context->egHdrGen++; }
                     if (context->pendingDrawValid)
                         context->pendingDraw.header[2] = handle;
                 }

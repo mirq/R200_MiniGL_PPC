@@ -760,6 +760,9 @@ struct MiniGLR200Context {
     /* direct immediate mode (EgDirectBegin) */
     BOOL egDirect, egDirTexAny, egDirTex1, egDirFlat, egDirVaried;
     ULONG egDirColor0;
+    /* bumped whenever the capture cache's header changes: a record written
+     * at the same generation has the same header (no compare to merge) */
+    ULONG egHdrGen, egImmHdrGen;
     volatile ULONG *egDirCpu;
     ULONG egDirStart, egDirSlot, egDirSerial, egDirCap, egDirPrim, egDirStride;
     struct PendingDrawState *egDirState;

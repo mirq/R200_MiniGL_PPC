@@ -262,8 +262,24 @@ static ULONG EgCacheHash(const UBYTE *start, ULONG bytes, ULONG tag, ULONG gen)
 /* The GPU address of a resident copy of bytes at start, copied in on a
  * miss; 0: not cacheable now (the caller streams it). A full cache is
  * emptied once every batch that may read it has retired. */
+/* A place for interleaved records from off on (4-aligned) where the first
+ * record (delta bytes in) lies a whole number of records from the start of
+ * its 16 MB block: the emitter then shares one vertex buffer resource among
+ * all draws of that stride (ArraysTail, eg_emit.c). */
+static ULONG EgAlignFor(ULONG gpuBase, ULONG off, ULONG delta, ULONG stride)
+{
+    ULONG k;
+
+    off = (off + 3UL) & ~3UL;
+    if (stride < 8UL || (stride & 3UL) || (delta & 3UL))
+        return off;
+    for (k = 0; k < stride && ((gpuBase + off + delta) & 0xffffffUL) % stride; k += 4UL)
+        off += 4UL;
+    return off;
+}
+
 static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, ULONG bytes,
-                        BOOL tagged)
+                        BOOL tagged, ULONG delta, ULONG stride)
 {
     struct EgCacheEntry *e, *free = NULL;
     ULONG tag = tagged ? context->egTag : 0, gen = context->egCacheGen, h, probe, off;
@@ -286,7 +302,7 @@ static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, U
         if (!free && e->gen != gen)
             free = e;               /* a forgotten key's slot */
     }
-    off = (context->egCacheTop + 31UL) & ~31UL;
+    off = EgAlignFor(context->egCacheSurface.GpuAddress, context->egCacheTop, delta, stride);
     if (!free || off + bytes > EG_CACHE_BYTES) {
         /* full: empty it behind every batch that may read it */
         if (!Submit(context) || !WaitAllSubmissions(context))
@@ -294,7 +310,7 @@ static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, U
         EgCacheClear(context);
         context->egCacheFlushes++;
         free = &context->egCache[h];
-        off = 0;
+        off = EgAlignFor(context->egCacheSurface.GpuAddress, 0, delta, stride);
     }
     EgCopyLongs((volatile ULONG *)((UBYTE *)context->egCacheSurface.CpuAddress + off),
                 (const ULONG *)start, (bytes + 3UL) >> 2);
@@ -309,6 +325,9 @@ static ULONG EgCacheGet(struct MiniGLR200Context *context, const UBYTE *start, U
     EgMissCount[tag ? 1 : 0]++;
     return context->egCacheSurface.GpuAddress + off;
 }
+
+static ULONG EgRingAllocFor(struct MiniGLR200Context *context, ULONG bytes,
+                            volatile ULONG **cpu, ULONG delta, ULONG stride);
 
 /* The build slot's ring part starts empty once per batch. */
 static ULONG EgRingUsed(struct MiniGLR200Context *context)
@@ -328,8 +347,16 @@ static ULONG EgRingUsed(struct MiniGLR200Context *context)
 static ULONG EgRingAlloc(struct MiniGLR200Context *context, ULONG bytes,
                          volatile ULONG **cpu)
 {
+    return EgRingAllocFor(context, bytes, cpu, 0, 0);
+}
+
+static ULONG EgRingAllocFor(struct MiniGLR200Context *context, ULONG bytes,
+                            volatile ULONG **cpu, ULONG delta, ULONG stride)
+{
     ULONG slot = context->buildSlot;
-    ULONG pos = (EgRingUsed(context) + 31UL) & ~31UL;
+    ULONG pos = stride ? EgAlignFor(context->egRing.GpuAddress + slot * EG_RING_SLOT_BYTES,
+                                    EgRingUsed(context), delta, stride)
+                       : (EgRingUsed(context) + 31UL) & ~31UL;
     ULONG off = slot * EG_RING_SLOT_BYTES + pos;
 
     context->egRingCursor[slot] = pos + bytes;
@@ -395,7 +422,7 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
     const struct ArrayState *regionArray[4];
     ULONG regions = 0, prim, lo, hi, n, i, colFormat = EGA_COL_UBYTE4, need, ringBytes;
     ULONG indexBytes = 0, indexType = EGA_INDEX_NONE, gpu[4], stride[4], *record, *ga;
-    ULONG cached[4], indexCached = 0;
+    ULONG cached[4], indexCached = 0, alignDelta = 0, alignStride = 0;
     BOOL haveColor, haveTex[2], merged;
     volatile ULONG *cpu;
 
@@ -546,6 +573,12 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
                              RADEON3D_DRAW_PALETTE | RADEON3D_DRAW_NORMALS)))
         EG_FAIL();
 
+    /* interleaved: where the first record lies in the region */
+    if (merged) {
+        alignStride = regionArray[0]->stride;
+        alignDelta = (ULONG)((regionArray[0]->pointer + lo * regionArray[0]->stride) -
+                             region[0].start);
+    }
     /* resident copies under the static hints (before the room check:
      * a full cache is emptied behind a submit) */
     {
@@ -560,10 +593,11 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
                 for (i = 0; i < (merged ? 1UL : regions); ++i)
                     /* the tag keys the model format (with colours) only */
                     cached[i] = EgCacheGet(context, region[i].start, region[i].bytes,
-                                           haveColor);
+                                           haveColor, merged ? alignDelta : 0,
+                                           merged ? alignStride : 0);
             /* 2-byte aligned lists too: the 68060 reads misaligned longs */
             if (indices && context->egStaticIndices && type == GL_UNSIGNED_SHORT)
-                indexCached = EgCacheGet(context, indices, indexBytes, FALSE);
+                indexCached = EgCacheGet(context, indices, indexBytes, FALSE, 0, 0);
             if (flushes == context->egCacheFlushes)
                 break;
         }
@@ -596,7 +630,8 @@ static BOOL EgArraysDraw(struct MiniGLR200Context *context, GLenum mode,
             region[i].gpu = cached[i];
             continue;
         }
-        region[i].gpu = EgRingAlloc(context, region[i].bytes, &cpu);
+        region[i].gpu = EgRingAllocFor(context, region[i].bytes, &cpu,
+                                       merged ? alignDelta : 0, merged ? alignStride : 0);
         EgCopyLongs(cpu, (const ULONG *)region[i].start, region[i].bytes >> 2);
     }
     EGT_END(10);
@@ -953,6 +988,7 @@ static BOOL EgImmediateDraw(struct MiniGLR200Context *context, const struct Vert
     context->egImmValid = TRUE;
     context->egImmSerial = context->batchSerial;
     context->egImmSlot = slotIndex;
+    context->egImmHdrGen = context->egHdrGen - 1UL;     /* compared before a merge */
     context->egImmRecords = slot->recordCount;
     context->egImmRingEnd = context->egRingCursor[slotIndex];
     context->egImmPrim = prim;
@@ -976,7 +1012,7 @@ ULONG EgDirRefuse[10];
 static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
 {
     struct PendingDrawState *state;
-    ULONG prim, i, slotIndex, room;
+    ULONG prim, i, slotIndex, room, start;
 
     if (context->egArraysOff || !context->device || context->fogEnabled ||
         context->lightingEnabled || context->paletteLookup ||
@@ -1037,20 +1073,23 @@ static BOOL EgDirectBegin(struct MiniGLR200Context *context, GLenum mode)
                            (context->egDirTex1 ? 2UL : 0UL);
     (void)EgRingUsed(context);
     slotIndex = context->buildSlot;
-    room = (EG_RING_DATA_BYTES - 64UL - context->egRingCursor[slotIndex]) /
-           (context->egDirStride * 4UL);
+    start = EgAlignFor(context->egRing.GpuAddress + slotIndex * EG_RING_SLOT_BYTES,
+                       context->egRingCursor[slotIndex], 0, context->egDirStride * 4UL);
+    room = start + 64UL < EG_RING_DATA_BYTES ?
+           (EG_RING_DATA_BYTES - 64UL - start) / (context->egDirStride * 4UL) : 0;
     if (room < 64UL) {
         /* a fresh slot for it (allowed: nothing staged yet) */
         if (!Submit(context))
             return FALSE;
         (void)EgRingUsed(context);
         slotIndex = context->buildSlot;
-        room = (EG_RING_DATA_BYTES - 64UL - context->egRingCursor[slotIndex]) /
-               (context->egDirStride * 4UL);
+        start = EgAlignFor(context->egRing.GpuAddress + slotIndex * EG_RING_SLOT_BYTES,
+                           context->egRingCursor[slotIndex], 0, context->egDirStride * 4UL);
+        room = (EG_RING_DATA_BYTES - 64UL - start) / (context->egDirStride * 4UL);
     }
     if (room > 4096UL)
         room = 4096UL;
-    context->egDirStart = context->egRingCursor[slotIndex];
+    context->egDirStart = start;
     context->egDirSlot = slotIndex;
     context->egDirSerial = context->batchSerial;
     context->egDirCpu = (volatile ULONG *)((UBYTE *)context->egRing.CpuAddress +
@@ -1142,11 +1181,12 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
             context->egImmVerts + vN <= 65535UL;
     if (merge) {
         record = slot->records + context->egImmRecord;
-        for (i = 2; i < state->headerDwords; ++i)
-            if (i != 10UL && record[i] != state->header[i]) {
-                merge = FALSE;
-                break;
-            }
+        if (context->egImmHdrGen != context->egHdrGen)
+            for (i = 2; i < state->headerDwords; ++i)
+                if (i != 10UL && record[i] != state->header[i]) {
+                    merge = FALSE;
+                    break;
+                }
     }
     if (!merge) {
         if ((slot->commitMode && slot->drawCount) ||
@@ -1230,6 +1270,7 @@ static BOOL EgDirectEnd(struct MiniGLR200Context *context)
     context->egImmRingEnd = context->egRingCursor[slotIndex];
     context->egImmPrim = prim;
     context->egImmStride = strideDw;
+    context->egImmHdrGen = context->egHdrGen;
     if (state->textured[0])
         MarkTextureQueued(context, state->textureName[0]);
     if (state->textured[1])
