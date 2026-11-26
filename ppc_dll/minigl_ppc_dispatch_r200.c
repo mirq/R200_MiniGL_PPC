@@ -3,6 +3,7 @@
 #ifdef WARPUP
 #pragma pack(push,2)
 #endif
+#include <stddef.h>
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <proto/exec.h>
@@ -106,11 +107,54 @@ extern void R200PowerTexSubImage2D(void);
 #define R200_TABLE_GLTexImage2D R200PowerTexImage2D
 #define R200_TABLE_GLTexSubImage2D R200PowerTexSubImage2D
 
+/* The exported object is upstream 29.1's table (840 bytes, as MiniGLWOS's)
+ * followed by the three FastPath slots that the pre-alignment R200 header
+ * had at its end. Its structSize, 852, is what a client built on that header
+ * checks for (MiniGLOpen refuses a table smaller than its own), so those
+ * binaries keep loading this DLL; a client built on the current header only
+ * needs 840. The slots report FastPath as unavailable, and the one client
+ * that used it (GLQuake's r_worldbatch, off by default) then draws through
+ * immediate mode. */
+static GLboolean R200Legacy_mglBeginFastPath(GLenum primitive, ULONG attributes, void *fp)
+{
+    (void)primitive; (void)attributes; (void)fp;
+    return GL_FALSE;
+}
+static void R200Legacy_mglEndFastPath(void *fp)
+{
+    (void)fp;
+}
+static ULONG R200Legacy_mglGetFastPathCapabilities(void)
+{
+    return 0;
+}
+
+struct R200LegacyTail {
+    GLboolean (*mglBeginFastPath)(GLenum primitive, ULONG attributes, void *fp);
+    void (*mglEndFastPath)(void *fp);
+    ULONG (*mglGetFastPathCapabilities)(void);
+};
+
+struct R200DispatchExport {
+    MGLDispatchTable table;
+    struct R200LegacyTail legacy;
+};
+
+#define R200_DISPATCH_OBJECT_BEGIN struct R200DispatchExport R200DispatchExport = { {
+#define R200_DISPATCH_OBJECT_END }, { R200Legacy_mglBeginFastPath, \
+    R200Legacy_mglEndFastPath, R200Legacy_mglGetFastPathCapabilities } };
+#define R200_DISPATCH_STRUCT_SIZE ((ULONG)sizeof(struct R200DispatchExport))
+#define MiniGLDispatchTable (R200DispatchExport.table)
+
 #include "../backend_r200/generated/dispatch_table_abi5.c"
 
-/* ABI 5: upstream 29.1's 205 slots plus the three FastPath slots. */
+/* ABI 5: upstream 29.1's table, 840 bytes, as MiniGLWOS's; the exported
+ * object with the legacy tail is 852 (0x354), as the old header's table. */
 typedef char R200DispatchABI5SizeCheck[
-    sizeof(MGLDispatchTable) == 0x354 ? 1 : -1];
+    sizeof(MGLDispatchTable) == 0x348 ? 1 : -1];
+typedef char R200DispatchExportSizeCheck[
+    sizeof(struct R200DispatchExport) == 0x354 &&
+    offsetof(struct R200DispatchExport, legacy) == 0x348 ? 1 : -1];
 
 /* Hooks for the backend-independent layer (ppc_common). */
 MGLDispatchTable *const MGLPPCSelfTable = &MiniGLDispatchTable;

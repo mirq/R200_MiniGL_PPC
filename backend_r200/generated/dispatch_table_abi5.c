@@ -177,9 +177,6 @@ void Lib_glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params);
 void Lib_glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
 void Lib_glColorMaterial(GLenum face, GLenum mode);
 void Lib_glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
-GLboolean Lib_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp);
-void Lib_mglEndFastPath(MGLFastPath *fp);
-ULONG Lib_mglGetFastPathCapabilities(void);
 
 /* 3 fields the R200 backend does not implement:
  *   GLTexGenfv
@@ -1147,21 +1144,6 @@ static void R200_GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, cons
     Lib_glTexEnvfv(target, pname, params);
 }
 
-static GLboolean R200_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp)
-{
-    return Lib_mglBeginFastPath(primitive, attributes, fp);
-}
-
-static void R200_mglEndFastPath(MGLFastPath *fp)
-{
-    Lib_mglEndFastPath(fp);
-}
-
-static ULONG R200_mglGetFastPathCapabilities(void)
-{
-    return Lib_mglGetFastPathCapabilities();
-}
-
 /* Overridable ABI-bridge slots (see OVERRIDABLE_ENTRIES). */
 #ifndef R200_TABLE_GLTexImage2D
 #define R200_TABLE_GLTexImage2D R200_GLTexImage2D
@@ -1170,9 +1152,15 @@ static ULONG R200_mglGetFastPathCapabilities(void)
 #define R200_TABLE_GLTexSubImage2D R200_GLTexSubImage2D
 #endif
 
-MGLDispatchTable MiniGLDispatchTable = {
+#ifndef R200_DISPATCH_OBJECT_BEGIN
+#define R200_DISPATCH_OBJECT_BEGIN MGLDispatchTable MiniGLDispatchTable = {
+#define R200_DISPATCH_OBJECT_END };
+#define R200_DISPATCH_STRUCT_SIZE ((ULONG)sizeof(MGLDispatchTable))
+#endif
+
+R200_DISPATCH_OBJECT_BEGIN
     MINIGL_DISPATCH_ABI_VERSION,
-    (ULONG)sizeof(MGLDispatchTable),
+    R200_DISPATCH_STRUCT_SIZE,
     MINIGL_BACKEND_FLAG_R200,
     0,
     &mini_CurrentContext,
@@ -1381,7 +1369,4 @@ MGLDispatchTable MiniGLDispatchTable = {
     R200_GLColorMaterial,
     R200_GLTexEnvfv,
     MGLGeneric_GLNormal3fv,
-    R200_mglBeginFastPath,
-    R200_mglEndFastPath,
-    R200_mglGetFastPathCapabilities,
-};
+R200_DISPATCH_OBJECT_END

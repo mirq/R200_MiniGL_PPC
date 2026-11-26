@@ -322,12 +322,6 @@ static void DestroyContext(struct MiniGLR200Context *context)
 
     if (!context)
         return;
-    if (context->activeFastPath) {
-        context->activeFastPath->privateData = NULL;
-        context->activeFastPath->currentVertex = NULL;
-    }
-    if (context->fastBuffer)
-        FreeMem(context->fastBuffer, context->fastBufferBytes);
     if (context->lockedVertices)
         FreeMem(context->lockedVertices,
                 context->lockedCount * sizeof(struct Vertex));

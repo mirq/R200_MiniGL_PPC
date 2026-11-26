@@ -6,11 +6,9 @@
 /*
  * This backend is self-contained: it declares the GL types and enums it needs
  * rather than including mgl/gl.h, so that the rendering core stays independent
- * of the client SDK headers. Tell libraries/minigl_fastpath.h not to pull
- * mgl/gl.h in on top of these declarations. The typedefs below are chosen to
- * match mgl/gl.h exactly, so the dispatch thunks need no conversion.
+ * of the client SDK headers. The typedefs below are chosen to match mgl/gl.h
+ * exactly, so the dispatch thunks need no conversion.
  */
-#define MINIGL_GL_TYPES_PROVIDED 1
 
 typedef void GLvoid;
 typedef unsigned char GLubyte;

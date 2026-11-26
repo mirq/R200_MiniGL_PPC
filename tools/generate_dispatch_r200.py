@@ -270,15 +270,25 @@ def main():
     )
     # Writable: display-list compilation swaps slots in it
     # (ppc_common/minigl_ppc_lists.c). Clients still see it through a const
-    # pointer.
-    out.append("\nMGLDispatchTable MiniGLDispatchTable = {\n")
+    # pointer. An includer may wrap the table in a larger object (the PPC DLL
+    # appends legacy slots after it, ppc_dll/minigl_ppc_dispatch_r200.c) by
+    # defining the three R200_DISPATCH_* macros; the defaults give the plain
+    # table.
+    out.append(
+        "\n#ifndef R200_DISPATCH_OBJECT_BEGIN\n"
+        "#define R200_DISPATCH_OBJECT_BEGIN MGLDispatchTable MiniGLDispatchTable = {\n"
+        "#define R200_DISPATCH_OBJECT_END };\n"
+        "#define R200_DISPATCH_STRUCT_SIZE ((ULONG)sizeof(MGLDispatchTable))\n"
+        "#endif\n"
+    )
+    out.append("\nR200_DISPATCH_OBJECT_BEGIN\n")
     out.append("    MINIGL_DISPATCH_ABI_VERSION,\n")
-    out.append("    (ULONG)sizeof(MGLDispatchTable),\n")
+    out.append("    R200_DISPATCH_STRUCT_SIZE,\n")
     out.append("    MINIGL_BACKEND_FLAG_R200,\n")
     out.append("    0,\n")
     out.append("    &mini_CurrentContext,\n")
     out.extend(f"    {entry},\n" for entry in entries)
-    out.append("};\n")
+    out.append("R200_DISPATCH_OBJECT_END\n")
 
     with open(out_path, "w", encoding="ascii") as handle:
         handle.write("".join(out))

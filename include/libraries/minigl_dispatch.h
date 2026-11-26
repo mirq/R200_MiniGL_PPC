@@ -16,7 +16,6 @@
 /* GLUT, for the 22 GLUT slots. USE_MGLAPI (defined above) suppresses this
  * header's own direct-call glut* macros so the dispatch wrappers below win. */
 #include <mgl/glut.h>
-#include <libraries/minigl_fastpath.h>
 #ifdef MINIGL_DIRECT_RESTORE_USE_MGLAPI
 #undef USE_MGLAPI
 #undef MINIGL_DIRECT_RESTORE_USE_MGLAPI
@@ -338,15 +337,10 @@ typedef struct MGLDispatchTable {
      * rather than expanding to GLNormal3f in the header, so the NULL guard the
      * driver carries is reachable from both linkages. */
     void (*GLNormal3fv)(GLcontext context, GLfloat *n);
-
-    /* PPC extension, after the last upstream slot (205): FastPath direct
-     * vertex-buffer submission (see libraries/minigl_fastpath.h). These were
-     * slots 135..137 in the V19 ABI-3 table. They keep the DLL's
-     * implicit-current-context model: no GLcontext argument. Any further
-     * upstream slots must be inserted BEFORE this block, which moves it. */
-    GLboolean (*mglBeginFastPath)(GLenum primitive, ULONG attributes, MGLFastPath *fp);
-    void (*mglEndFastPath)(MGLFastPath *fp);
-    ULONG (*mglGetFastPathCapabilities)(void);
+    /* Slot 205 is the last one: the table is upstream 29.1's, 840 bytes, the
+     * same as MiniGLWOS's, so one client binary loads either DLL. The PPC
+     * FastPath extension that used to follow it was removed (it measured
+     * slower than immediate mode on this stack and no client used it). */
 } MGLDispatchTable;
 
 extern const MGLDispatchTable *MiniGLDispatch;
@@ -1958,26 +1952,6 @@ static __inline__ void MGLD_glutSolidDodecahedron(void)
 }
 #undef glutSolidDodecahedron
 #define glutSolidDodecahedron MGLD_glutSolidDodecahedron
-
-static __inline__ GLboolean MGLD_mglBeginFastPath(GLenum primitive,
-                                                  ULONG attributes,
-                                                  MGLFastPath *fp)
-{
-    return MiniGLDispatch->mglBeginFastPath(primitive, attributes, fp);
-}
-#define mglBeginFastPath MGLD_mglBeginFastPath
-
-static __inline__ void MGLD_mglEndFastPath(MGLFastPath *fp)
-{
-    MiniGLDispatch->mglEndFastPath(fp);
-}
-#define mglEndFastPath MGLD_mglEndFastPath
-
-static __inline__ ULONG MGLD_mglGetFastPathCapabilities(void)
-{
-    return MiniGLDispatch->mglGetFastPathCapabilities();
-}
-#define mglGetFastPathCapabilities MGLD_mglGetFastPathCapabilities
 
 #endif /* !MINIGL_LIBRARY_BUILD */
 

@@ -21,7 +21,7 @@ emulator.
 | 1 | [overview.md](overview.md) | What MiniGL is, what this repo ships, the two runtime paths, repo map |
 | 2 | [architecture.md](architecture.md) | End-to-end data flow, components, tasks, memory, submission lifecycle |
 | 3 | [building.md](building.md) | Toolchains, every makefile and target, ET_REL contract, packaging |
-| 4 | [dispatch-abi.md](dispatch-abi.md) | `MGLDispatchTable` ABI 5 (upstream 29.1 layout), per-slot status, the shared `ppc_common` layer (display lists, GLU, GLUT), FastPath, upgrade rules |
+| 4 | [dispatch-abi.md](dispatch-abi.md) | `MGLDispatchTable` ABI 5 (upstream 29.1 layout), per-slot status, the shared `ppc_common` layer (display lists, GLU, GLUT), MiniGLWOS alignment, upgrade rules |
 | 5 | [client-guide.md](client-guide.md) | Writing and running PPC clients, runtime requirements, deployment |
 | 5a | [client-porting.md](client-porting.md) | For game developers: building a client against MiniGL 29 / ABI 5, migrating V19 ports, PowerOpen notes, Silent Hill example |
 | 5b | [porting-games.md](porting-games.md) | Porting a whole game engine: platform layer (timer, files, input, AHI), renderer adaptation, Hyperion plugin DLLs, C++, bring-up order |

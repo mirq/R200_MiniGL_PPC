@@ -92,7 +92,7 @@ More Python suites (each compiles or parses production code):
 | `tests/test_r200_texture_order.py` | texture ordering |
 | `tests/test_frame260_deep_profile.py` | frame-260 deep profiler paths |
 | `tests/test_enum_parity.py` | GL enum parity between the frontend header and `include/mgl/gl.h` (all 358 shared ABI-5 tokens; the client header's `#define`s are parsed as well as enums). The second pair (classic native backend vs classic client header) fails on `GL_MAX_TEXTURE_UNITS_ARB` 223 vs 227, identically at HEAD before ABI 5 |
-| `tools/check_dispatch_layout.py` | `MGLDispatchTable` against the vendored upstream 29.1 layout (names, parameter types, ABI 5, FastPath tail); also run by the R200 build |
+| `tools/check_dispatch_layout.py` | `MGLDispatchTable` against the vendored upstream 29.1 layout (names, parameter types, ABI 5, nothing after slot 205); also run by the R200 build |
 | `tests/test_68k_host_classifier.py` | the Sonnet classifier ban list |
 | `tools/test_batch_budget.py` | `r200_batch_budget.h` fits/cost tables |
 | `tools/test_batch_expansion.py` | expansion budgets vs the real driver emitter |
@@ -130,7 +130,8 @@ The readback tests encode the contract; keep it when touching readback:
 `tests/r200_readback_abi.c` must be compiled separately with both real target
 SDKs; it checks the command/capability, mailbox eligibility, eight-word
 arguments, the 80-byte zero-payload message, the ring control size and the
-160-byte mailbox. The current PPC DLL asserts the ABI-5 table size **0x354**.
+160-byte mailbox. The current PPC DLL asserts the ABI-5 table size **0x348** and its exported
+object (with the legacy tail) **0x354**.
 
 ## 3. Hardware test suite
 

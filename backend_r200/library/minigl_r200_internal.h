@@ -47,7 +47,6 @@
 #include "minigl_r200.h"
 #include <libraries/minigl_perf.h>
 #include <libraries/minigl_r200_bridge.h>
-#include <libraries/minigl_fastpath.h>
 #include <libraries/minigl_ppc_trace.h>
 #include "minigl_r200_base.h"
 
@@ -106,7 +105,13 @@ ULONG DepthStorageWidth(ULONG width);
 #define SCREEN_VERTEX_CAPACITY MAX_SCREEN_VERTICES
 #define MAX_RECORD_DWORDS RADEON3D_MAX_BATCH_DWORDS
 #define MAX_GENERATED_DWORDS RADEON3D_MAX_BATCH_DWORDS
-#if defined(R200_CPEMIT_68K) && R200_CPEMIT_68K
+/* 1 in the 68k build of this frontend (Makefile_dispatch_r68k.gcc), 0 for
+ * the PPC DLL. Defined here, before any file of the unity build uses it in an
+ * expression (r200_texture.c does). */
+#ifndef R200_CPEMIT_68K
+#define R200_CPEMIT_68K 0
+#endif
+#if R200_CPEMIT_68K
 /* minigl68k: a third batch in flight, so a GPU-heavy batch (the static
  * world) does not stall the CPU at the next slot */
 #define SUBMIT_SLOT_COUNT 3UL
@@ -244,12 +249,6 @@ struct Vertex {
     GLfloat t1;
     GLfloat fog;
     ULONG color;
-};
-
-struct FastVertex {
-    GLfloat x, y, z, w;
-    GLfloat r, g, b, a;
-    GLfloat u0, v0, u1, v1, q;
 };
 
 /* Field order mirrors the interface-11 hardware-TCL normal-vertex record
@@ -788,9 +787,6 @@ struct MiniGLR200Context {
     struct Vertex *lockedVertices;
     ULONG lockedFirst;
     ULONG lockedCount;
-    UBYTE *fastBuffer;
-    ULONG fastBufferBytes;
-    MGLFastPath *activeFastPath;
     struct TextureObject textures[MAX_TEXTURES];
     /* Surfaces awaiting fence retirement after their texture object was
      * released; see struct DeferredSurface. Reaped at present and in

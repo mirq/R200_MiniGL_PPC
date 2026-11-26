@@ -85,13 +85,16 @@ Build system, targets and the ET_REL contract:
 MINIGL_VERSION               29
 MINIGL_MIN_VERSION           29
 MINIGL_DISPATCH_ABI_VERSION   5
-sizeof(MGLDispatchTable)     0x354
+sizeof(MGLDispatchTable)     0x348
 ```
 
 The dispatch ABI follows upstream minigl.library **29.1**: slots 1..205 are
 upstream's layout field for field (the released WarpOS V10 layout is still
 the frozen prefix through `GLPolygonOffset`), the GL tokens carry OpenGL's own
-values, and the FastPath V2 entries follow as slots 206..208. New since V19:
+values, and nothing follows slot 205: the table is upstream's and
+MiniGLWOS's, so one client binary loads either DLL (the PPC FastPath
+extension was removed; binaries built with it still load this DLL, see
+[docs/dispatch-abi.md](docs/dispatch-abi.md#11-alignment-with-miniglwos-2026-11-27)). New since V19:
 fixed-function lighting, display lists, GLU (quadrics, `gluBuild2DMipmaps`),
 GLUT, framebuffer-to-texture copies, `glLineWidth`, the GL 1.1 query and edge
 flag entry points and `mglCreateContextFromWindow`/`FromBitMap`; the per-slot

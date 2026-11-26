@@ -233,19 +233,6 @@ static void Stub_GLUQuadricCallback(GLUquadricObj *q, GLenum which, MGLUfuncptr 
 static void Stub_GLColorMaterial(GLcontext context, GLenum face, GLenum mode) { stub_call("GLColorMaterial"); }
 static void Stub_GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, const GLfloat *params) { stub_call("GLTexEnvfv"); }
 static void Stub_GLNormal3fv(GLcontext context, GLfloat *n) { stub_call("GLNormal3fv"); }
-static GLboolean Stub_mglBeginFastPath(GLenum primitive, ULONG attributes, MGLFastPath *fp)
-{
-    (void)primitive; (void)attributes; (void)fp;
-    stub_call("mglBeginFastPath"); return GL_FALSE;
-}
-static void Stub_mglEndFastPath(MGLFastPath *fp)
-{
-    (void)fp; stub_call("mglEndFastPath");
-}
-static ULONG Stub_mglGetFastPathCapabilities(void)
-{
-    stub_call("mglGetFastPathCapabilities"); return 0;
-}
 
 const MGLDispatchTable MiniGLDispatchTable = {
     MINIGL_DISPATCH_ABI_VERSION,
@@ -458,14 +445,11 @@ const MGLDispatchTable MiniGLDispatchTable = {
     Stub_GLColorMaterial,
     Stub_GLTexEnvfv,
     Stub_GLNormal3fv,
-    Stub_mglBeginFastPath,
-    Stub_mglEndFastPath,
-    Stub_mglGetFastPathCapabilities,
 };
 
 
 typedef char StubDispatchABI5SizeCheck[
-    sizeof(MGLDispatchTable) == 0x354 ? 1 : -1];
+    sizeof(MGLDispatchTable) == 0x348 ? 1 : -1];
 
 const MGLDispatchTable * __saveds MGLGetDispatchTable(void)
 {

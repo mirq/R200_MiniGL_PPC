@@ -131,16 +131,6 @@ static void PPCStub_GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, c
     GLTexEnvi(context, target, pname, (GLint)params[0]);
 }
 
-/* The bundled mglQ3 core has no FastPath direct vertex buffer. */
-static GLboolean PPCStub_mglBeginFastPath(GLenum primitive, ULONG attributes,
-                                          MGLFastPath *fp)
-{
-    (void)primitive; (void)attributes; (void)fp;
-    return GL_FALSE;
-}
-static void PPCStub_mglEndFastPath(MGLFastPath *fp) { (void)fp; }
-static ULONG PPCStub_mglGetFastPathCapabilities(void) { return 0; }
-
 #ifndef MINIGL_PPC_BACKEND_FLAGS
 #define MINIGL_PPC_BACKEND_FLAGS MINIGL_BACKEND_FLAG_PPC
 #endif
@@ -357,13 +347,10 @@ static MGLDispatchTable PPCDispatchTable = {
     PPCStub_GLColorMaterial,
     PPCStub_GLTexEnvfv,
     MGLGeneric_GLNormal3fv,
-    PPCStub_mglBeginFastPath,
-    PPCStub_mglEndFastPath,
-    PPCStub_mglGetFastPathCapabilities,
 };
 
 typedef char PPCDispatchABI5SizeCheck[
-    sizeof(MGLDispatchTable) == 0x354 ? 1 : -1];
+    sizeof(MGLDispatchTable) == 0x348 ? 1 : -1];
 
 /* Hooks for the backend-independent layer (ppc_common). */
 MGLDispatchTable *const MGLPPCSelfTable = &PPCDispatchTable;

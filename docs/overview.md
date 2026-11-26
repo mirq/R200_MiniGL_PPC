@@ -112,7 +112,7 @@ payloads (the RV280 command processor and little-endian surface formats), see
 
 | Path | Contents |
 |---|---|
-| `include/` | Public client API: `proto/minigl.h`, `libraries/minigl_dispatch.h` (ABI + wrappers), `libraries/minigl_fastpath.h`, dispatch-only `mgl/` |
+| `include/` | Public client API: `proto/minigl.h`, `libraries/minigl_dispatch.h` (ABI + wrappers), dispatch-only `mgl/` |
 | `client/` | `MiniGLOpen`/`MiniGLClose`, import-archive glue (`lib/libminigl.a`) |
 | `hyperion_dll/` | Hyperion-style PPC DLL runtime (loader, startup, symbol/resource exports) |
 | `ppc_dll/` | Positional dispatch-table initializers: real mglQ3, stub, R200 |
