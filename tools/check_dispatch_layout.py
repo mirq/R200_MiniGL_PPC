@@ -15,7 +15,8 @@ tree to exist.
 Checked:
   * slots 1..205 match upstream by name and by signature (parameter names
     are ignored; types and order are not);
-  * the private PPC extension after slot 205 is exactly the FastPath trio;
+  * nothing follows slot 205: the table is upstream's, 840 bytes, the same
+    as MiniGLWOS's (the PPC FastPath extension was removed);
   * MINIGL_DISPATCH_ABI_VERSION equals the reference ABI.
 Prints the slot count and sizeof(MGLDispatchTable) on success.
 """
@@ -24,7 +25,7 @@ import re
 import sys
 
 HEADER_BYTES = 20  # abiVersion, structSize, backendFlags, reserved, currentContext
-EXTENSION = ["mglBeginFastPath", "mglEndFastPath", "mglGetFastPathCapabilities"]
+EXTENSION = []
 DEFAULT_REFERENCE = "tools/reference/minigl_dispatch_v29_1.txt"
 
 
@@ -124,7 +125,7 @@ def main(argv):
             errors.append(f"slot {i} {have[0]}: signature {have[1]}, expected {want[1]}")
     tail = [name for name, _ in ours[len(ref):]]
     if tail != EXTENSION:
-        errors.append(f"extension after slot {len(ref)} is {tail}, expected {EXTENSION}")
+        errors.append(f"slots after {len(ref)}: {tail}; the table must end at upstream's last slot")
     if errors:
         for e in errors[:20]:
             print(f"check_dispatch_layout: {e}", file=sys.stderr)

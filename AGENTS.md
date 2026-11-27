@@ -188,9 +188,11 @@
   upstream minigl.library 29.1: slots 1..205 are upstream's, field for field
   (`python3 tools/check_dispatch_layout.py include/libraries/minigl_dispatch.h`
   against `tools/reference/minigl_dispatch_v29_1.txt`; the R200 build runs it),
-  followed only by the FastPath trio (206..208, `sizeof` `0x354`). GL tokens
-  in `include/mgl/gl.h` carry OpenGL's own values. Never insert above slot
-  205; new upstream slots go before the FastPath block. `MiniGLOpen` tests
+  and nothing else (`sizeof` `0x348`, the same as MiniGLWOS's). GL tokens in
+  `include/mgl/gl.h` carry OpenGL's own values, the clear bits included.
+  Never insert above slot 205 and never add PPC-only slots. The R200 DLL's
+  exported object adds a 3-slot legacy tail (`structSize` `0x354`) only so
+  binaries built on the old 852-byte header still load. `MiniGLOpen` tests
   the ABI for equality, so ABI-3 (V19) clients must be rebuilt.
 - Any dispatch API change must keep the struct and client wrappers in
   `include/libraries/minigl_dispatch.h`, the real positional initializer

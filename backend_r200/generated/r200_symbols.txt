@@ -132,7 +132,6 @@ Lib_glVertex4f
 Lib_glVertex4fv
 Lib_glVertexPointer
 Lib_glViewport
-Lib_mglBeginFastPath
 Lib_mglChooseGuardBand
 Lib_mglChooseMtexBufferSize
 Lib_mglChooseNumberOfBuffers
@@ -148,9 +147,7 @@ Lib_mglDeleteContext
 Lib_mglDrawMultitexBuffer
 Lib_mglEmergencyCloseScreen
 Lib_mglEnableSync
-Lib_mglEndFastPath
 Lib_mglExit
-Lib_mglGetFastPathCapabilities
 Lib_mglGetInputWindowHandle
 Lib_mglGetSupportedScreenModes
 Lib_mglGetWindowHandle

@@ -20,7 +20,8 @@ PPC tree; the classic 68k library has its own, independently versioned table
 | `MINIGL_BACKEND_FLAG_R200` | `= PPC` | ditto |
 | `MINIGL_PPC_DLLNAME` | `"minigl_ppc.dll"` | client loads by this name |
 | `MINIGL_PPC_PORTNAME` | `"MiniGLPPC.DLL"` | Hyperion process port |
-| `sizeof(MGLDispatchTable)` | `0x354` (852 bytes) | compile-time checked in all three DLL initializers |
+| `sizeof(MGLDispatchTable)` | `0x348` (840 bytes), upstream 29.1's and MiniGLWOS's | compile-time checked in all three DLL initializers |
+| R200 DLL `structSize` | `0x354` (852 bytes): the table plus a 3-slot legacy tail | `ppc_dll/minigl_ppc_dispatch_r200.c`; see section 1.1 |
 
 **ABI 5 is upstream minigl.library 29.x's ABI.** Slots 1..205 match the
 upstream 29.1 header (`libraryroot/include/libraries/minigl_dispatch.h`,
@@ -35,7 +36,7 @@ DLL equally refuses an ABI-5 client.
 
 `tools/check_dispatch_layout.py` compares the header with the vendored upstream
 snapshot `tools/reference/minigl_dispatch_v29_1.txt` slot by slot (name and
-parameter types) and checks that only the FastPath trio follows slot 205. The
+parameter types) and checks that nothing follows slot 205. The
 R200 build runs it before generating its table; run it by hand after any
 dispatch change:
 
@@ -43,24 +44,37 @@ dispatch change:
 python3 tools/check_dispatch_layout.py include/libraries/minigl_dispatch.h
 ```
 
-**FastPath regression note (fixed 2026-10-20, offsets now ABI 5).** The three
-FastPath V2 slots were once missing from the committed tree, which built a
-table without them; a FastPath client compiled against a header that has them
-then reads its FastPath pointers past the end of the DLL's table and dies with
-a PowerPC Data Storage exception at DAR `0x10`, at the same code offset on
-every load. If a FastPath client shows that signature, check the DLL's table
-size (`0x354`) before anything else.
+### 1.1 Alignment with MiniGLWOS (2026-11-27)
+
+The table is exactly upstream 29.1's, 840 bytes, as Steffen Haeuser's
+MiniGLWOS and its `MiniGL_Classic` branch define it, and `mgl/gl.h` carries
+OpenGL's `GL_COLOR_BUFFER_BIT` (`0x4000`) and `GL_DEPTH_BUFFER_BIT` (`0x100`).
+A client built on these headers loads either DLL. Two things were removed or
+changed for that:
+
+- **FastPath V2 is gone** (it was a PPC extension in slots 206..208). Measured
+  on the reference A4000 it was slower than immediate mode for every client
+  that tried it (GLQuake's `r_worldbatch`, OpenCMR2), because the stack's
+  per-vertex work is the same on every submission route.
+- **The clear bits** were MiniGL's old `0x1`/`0x2`; upstream and MiniGLWOS use
+  OpenGL's values.
+
+Binaries built before the change keep working with this DLL: its exported
+object is the 840-byte table followed by the three old FastPath slots, so it
+reports `structSize` 852 (`0x354`), which their `MiniGLOpen` requires; those
+slots answer `GL_FALSE`/no-op/0 (FastPath unavailable, which every FastPath
+client checks), and `glClear` accepts both the old and the OpenGL bits.
 
 ## 2. Table layout
 
 ```
 struct MGLDispatchTable {
     ULONG abiVersion;              /* must equal 5                        */
-    ULONG structSize;              /* sizeof(MGLDispatchTable) = 0x354    */
+    ULONG structSize;              /* >= sizeof(MGLDispatchTable) = 0x348 */
     ULONG backendFlags;            /* bitmask, see above; R200 sets PPC   */
     ULONG reserved;                /* 0                                  */
     GLcontext *currentContext;     /* -> the DLL-owned global context     */
-    ... function pointers ...      /* fields 1..208 below                 */
+    ... function pointers ...      /* fields 1..205 below                 */
 };
 ```
 
@@ -68,7 +82,8 @@ struct MGLDispatchTable {
   ULONGs; both sides of the ABI are PPC. Do not add `#pragma pack` here.
 - Field order is append-only. The V10 frozen boundary is `GLPolygonOffset`
   (field 129). Fields 130..205 follow upstream exactly; new upstream slots go
-  after 205 and **before** the FastPath block, which then moves.
+  after 205. The R200 DLL's legacy tail (section 1.1) follows the table in the
+  exported object only, so it moves with any new slot.
 - The `currentContext` pointer is what lets wrappers be context-free: it is
   re-read on every call (`MGLD_CTX = (*MiniGLDispatch->currentContext)`), so a
   context create/destroy is immediately visible to subsequent calls.
@@ -79,13 +94,12 @@ Layout of the table (offsets grow downwards; field *i* is at `20 + (i-1)*4`):
 
 ```mermaid
 flowchart TB
-    subgraph T["MGLDispatchTable - 0x354 bytes, normal PPC layout"]
+    subgraph T["MGLDispatchTable - 0x348 bytes, normal PPC layout"]
         HDR["Header, 20 B: abiVersion = 5, structSize, backendFlags, reserved, currentContext"]
         V10["V10 frozen prefix - fields 1..129, ending at GLPolygonOffset<br/>never removed, reordered or resized"]
         UP["Upstream 29.1 - fields 130..205 (0x218..0x344)"]
-        FP["PPC extension - FastPath V2, fields 206..208 (0x348..0x350)"]
     end
-    HDR --> V10 --> UP --> FP
+    HDR --> V10 --> UP
 ```
 
 One prefix field changed type with ABI 5: `MGLResizeContext` (field 109)
@@ -160,9 +174,6 @@ follow upstream's Classic table where the backend cannot do better.
 | 203 | 0x33C | `GLColorMaterial` | real | `GL_INVALID_OPERATION` |
 | 204 | 0x340 | `GLTexEnvfv` | `GL_TEXTURE_ENV_COLOR` stored (not yet consumed by the texture stage); other pnames as `glTexEnvi` | `GL_TEXTURE_ENV_MODE` only |
 | 205 | 0x344 | `GLNormal3fv` | generic (over `glNormal3f`, NULL ignored) | generic |
-| 206 | 0x348 | `mglBeginFastPath` | FastPath V2 (section 5) | `GL_FALSE` |
-| 207 | 0x34C | `mglEndFastPath` | FastPath V2 | no-op |
-| 208 | 0x350 | `mglGetFastPathCapabilities` | capability bits | 0 |
 
 V19's `MGLEmergencyCloseScreen` and `MGLForceNewRenderPass` (old fields 133
 and 134) are gone, as upstream removed them; `mglEmergencyCloseScreen()` and
@@ -308,26 +319,12 @@ redisplay is pending, then the client's idle callback. Keys arrive through
 fullscreen context. `GLUT_ELAPSED_TIME` reads `GetSysTimePPC`. The window
 size is fixed, so the reshape callback only sees the creation size.
 
-## 5. FastPath V2 (`include/libraries/minigl_fastpath.h`)
+## 5. FastPath V2 (removed)
 
-FastPath lets a client fill a vertex buffer directly while the library supplies
-current attribute state, avoiding one call per attribute. It is a public V19
-feature, separate from the Silent Hill private tail.
-
-- `MGL_FASTPATH_VERSION` = 2; `MGL_FASTPATH_OFFSET_NONE` = `0xffffffff`.
-- Attribute bits: `POSITION`, `COLOR`, `TEXCOORD0`, `TEXCOORD1`, `TEXCOORD_Q`,
-  `NORMAL_INDEX`, `NORMAL`; reserved: `FOG`, `POINT_SIZE`.
-- `MGL_FASTPATH_CAPABILITIES_V2` is the OR of the implemented V2 bits.
-- `MGLFastPath` carries the requested/supported attributes, primitive type,
-  buffer base/stride/count/capacity and per-attribute offsets for client-side
-  interleaved arrays. When a direct buffer is not used, the library supplies
-  live `x/y/z/w`, `r/g/b/a`, `u0/v0`, `u1/v1`, `q` and `normalIndex` pointers.
-- SDK inlines (`mglFastPathHasRoom`, `mglFastPathRefreshPointers`,
-  `mglFastPathColor4f/3f`, `mglFastPathTexCoord2f`, `mglFastPathVertex3f`,
-  `mglAdvanceFastVertex`, …) perform no library calls in the inner loop;
-  `mglAdvanceFastVertex` copies current attributes and bumps the count.
-- The frontend implements the entry points; an unsupported backend returns
-  `GL_FALSE` from `mglBeginFastPath` (the mglQ3 DLL and the stub do).
+The PPC FastPath extension (`mglBeginFastPath`, `mglEndFastPath`,
+`mglGetFastPathCapabilities`, `libraries/minigl_fastpath.h`) was removed with
+the MiniGLWOS alignment (section 1.1). The R200 DLL still answers the three
+old slots for binaries built before it, reporting FastPath as unavailable.
 
 ## 6. Table initializers that must stay synchronized
 
@@ -365,7 +362,7 @@ tools/generate_dispatch_r200.py \
 - Explicit special cases: `MGLSetState` → `Lib_glEnable`/`Lib_glDisable`;
   `GLClientActiveTextureARB` maps to `Lib_glClientActiveTextureARB`;
   `MGLResizeContext` answers `GL_FALSE`; `GLMultiDrawArrays` loops
-  `Lib_glDrawArrays`; `mglBeginFastPath` and friends bind when present.
+  `Lib_glDrawArrays`.
 - Fields with no `Lib_*` of their own in `GENERIC_FIELDS`/`GENERIC_PREFIXES`
   (GLU, GLUT, display lists, `glGetDoublev`, `glNormal3fv`, colour index)
   bind to `MGLGeneric_*` in `ppc_common/`.
@@ -382,16 +379,19 @@ tools/generate_dispatch_r200.py \
   header that drifts from upstream never produces a table.
 
 `ppc_dll/minigl_ppc_dispatch_r200.c` adds a compile-time size assertion
-(`sizeof(MGLDispatchTable) == 0x354`), the `ppc_common` hooks and the
+(`sizeof(MGLDispatchTable) == 0x348`), the legacy tail of the exported object
+(section 1.1, `structSize` `0x354`), the `ppc_common` hooks and the
 `R200ABI3*` context shims (historical names; they serve ABI 5).
 
 ## 7. Changing the ABI safely
 
 1. Upstream slots (anything after 205 that upstream appends) go after the
-   last upstream slot and **before** the FastPath block, then refresh the
+   last upstream slot, then refresh the
    reference with `tools/check_dispatch_layout.py --extract <upstream header>
    > tools/reference/minigl_dispatch_v29_1.txt` (rename for the new release).
-   PPC-only additions go after FastPath. Never insert above slot 205.
+   Do not add PPC-only slots to the table: it must stay upstream's so one
+   client binary loads both this DLL and MiniGLWOS. Never insert above slot
+   205. A new upstream slot also moves the R200 DLL's legacy tail.
 2. Add the wrapper in `minigl_dispatch.h` (with the correct special-case
    handling) and any public header/enum it needs.
 3. Bind it in the real mglQ3 initializer, the stub initializer and the R200
@@ -411,7 +411,6 @@ tools/generate_dispatch_r200.py \
 - A backend may leave a slot as an explicit no-op (documented in
   [client-guide.md](client-guide.md#intentional-no-ops-and-limits)); clients must not
   assume a call has an effect just because the slot exists.
-- `mglBeginFastPath` returning `GL_FALSE` is a valid answer; check it.
 - The classic 68k shared library in `classic_68k/` still has its own private
   tail after `GLPolygonOffset` and the old token numbering; it is not ABI 5
   (plan P8). The PPC host talks to it over the wire, where

@@ -450,8 +450,10 @@ typedef unsigned int    GLenum;
 #define GL_RESCALE_NORMAL                    0x803A
 
 
-#define GL_COLOR_BUFFER_BIT     0x00000001
-#define GL_DEPTH_BUFFER_BIT     0x00000002
+/* OpenGL's own values, as upstream 29.1 and MiniGLWOS define them. The
+ * R200 DLL also accepts the pre-29.1 0x1/0x2 from older binaries. */
+#define GL_COLOR_BUFFER_BIT     0x00004000
+#define GL_DEPTH_BUFFER_BIT     0x00000100
 
 #define GL_TRUE                 1
 #define GL_FALSE                0

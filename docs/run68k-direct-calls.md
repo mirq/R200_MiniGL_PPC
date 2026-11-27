@@ -160,7 +160,9 @@ register-only call.
    standard GL: `GL_VENDOR=205`, `GL_VERSION=206`, `GL_RENDERER=148`,
    `GL_EXTENSIONS=57`, `GL_TRIANGLES=191`,
    `GL_COLOR_BUFFER_BIT=0x1`, `GL_DEPTH_BUFFER_BIT=0x2`. Passing standard GL
-   values returns `GL_INVALID_ENUM` (88).
+   values returns `GL_INVALID_ENUM` (88); the exception is `Lib_glClear`,
+   which since the MiniGLWOS alignment takes OpenGL's `0x4000`/`0x100` as
+   well as `0x1`/`0x2`.
 2. **Raw dispatch entries do not set `*currentContext`.** The client wrapper
    in `include/libraries/minigl_dispatch.h` publishes the context after
    `mglCreateContext`; a direct consumer must do the same if it relies on

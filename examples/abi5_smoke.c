@@ -1,7 +1,7 @@
 /*
  * ABI 5 smoke test: proves the DLL hands out an upstream-29.1-shaped table and
- * that every slot appended after GLMultiDrawArrays (133..205, plus the
- * FastPath trio) is callable without a crash.
+ * that every slot appended after GLMultiDrawArrays (133..205) is callable
+ * without a crash.
  *
  * It checks the table header and that no slot is NULL, calls each new entry
  * point once with harmless arguments, printing glGetError() after each so a
@@ -192,8 +192,6 @@ int main(int argc, char **argv)
     printf("abi5: glutGet(GLUT_WINDOW_WIDTH) = %d\n", glutGet(GLUT_WINDOW_WIDTH));
 
     glMultiDrawArrays(GL_TRIANGLES, first, drawn, 1); report("glMultiDrawArrays");
-    printf("abi5: mglGetFastPathCapabilities = 0x%lx\n",
-           (unsigned long)mglGetFastPathCapabilities());
 
     glDeleteTextures(1, &texture);
     mglDeleteContext();

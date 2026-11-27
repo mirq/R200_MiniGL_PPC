@@ -2783,7 +2783,7 @@ static void AddVertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
     struct MiniGLR200Context *context = CurrentContext();
     struct Vertex *vertex;
 
-    if (!context || !context->insideBegin || context->activeFastPath) {
+    if (!context || !context->insideBegin) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
@@ -2821,7 +2821,7 @@ void Lib_glEnd(void)
 {
     struct MiniGLR200Context *context = CurrentContext();
 
-    if (!context || !context->insideBegin || context->activeFastPath) {
+    if (!context || !context->insideBegin) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
@@ -3382,7 +3382,7 @@ void Lib_glArrayElement(GLint index)
 {
     struct MiniGLR200Context *context = CurrentContext();
     struct Vertex vertex;
-    if (!context || !context->insideBegin || context->activeFastPath) {
+    if (!context || !context->insideBegin) {
         SetError(context, GL_INVALID_OPERATION); return;
     }
     if (index < 0) { SetError(context, GL_INVALID_VALUE); return; }
@@ -3970,178 +3970,4 @@ void Lib_glDrawElements(GLenum mode, GLsizei count, GLenum type,
         if (context->perfEnabled)
             context->perf.drawTicks += PerfClock() - drawStart;
     }
-}
-
-static void ClearFastPath(MGLFastPath *fp)
-{
-    ULONG callerSize = fp->size;
-    UBYTE *bytes = (UBYTE *)fp;
-    ULONG index;
-    for (index = 0; index < sizeof(*fp); ++index)
-        bytes[index] = 0;
-    fp->size = callerSize;
-    fp->version = MGL_FASTPATH_VERSION;
-}
-
-ULONG Lib_mglGetFastPathCapabilities(void)
-{
-    return MGL_FASTPATH_POSITION | MGL_FASTPATH_COLOR |
-           MGL_FASTPATH_TEXCOORD0 | MGL_FASTPATH_TEXCOORD1 |
-           MGL_FASTPATH_TEXCOORD_Q;
-}
-
-GLboolean Lib_mglBeginFastPath(GLenum primitive, ULONG attributes,
-                               MGLFastPath *fp)
-{
-    struct MiniGLR200Context *context = CurrentContext();
-    struct FastVertex layout;
-    UBYTE *base = (UBYTE *)&layout;
-    ULONG supported = Lib_mglGetFastPathCapabilities();
-    ULONG none = MGL_FASTPATH_OFFSET_NONE;
-
-    if (!context) return GL_FALSE;
-    if (!fp || fp->size < sizeof(*fp)) {
-        SetError(context, GL_INVALID_VALUE);
-        return GL_FALSE;
-    }
-    if (context->insideBegin || context->activeFastPath) {
-        SetError(context, GL_INVALID_OPERATION);
-        return GL_FALSE;
-    }
-    if (context->lightingEnabled || HardwareSphereMapMask(context)) {
-        /* FastPath v2 vertices carry no normals; lit draws and hardware
-         * sphere-mapped draws both feed object-space normals to the TCL
-         * record, so they must go through the immediate/array paths. */
-        SetError(context, GL_INVALID_OPERATION);
-        return GL_FALSE;
-    }
-    if (!ValidPrimitive(primitive)) {
-        SetError(context, GL_INVALID_ENUM);
-        return GL_FALSE;
-    }
-    if (!(attributes & MGL_FASTPATH_POSITION)) {
-        SetError(context, GL_INVALID_VALUE);
-        return GL_FALSE;
-    }
-    if (attributes & ~supported) {
-        SetError(context, GL_INVALID_ENUM);
-        return GL_FALSE;
-    }
-    if (!context->fastBuffer) {
-        context->fastBufferBytes = MAX_VERTICES * sizeof(struct FastVertex);
-        context->fastBuffer = AllocMem(context->fastBufferBytes,
-                                       MEMF_PUBLIC | MEMF_CLEAR);
-        if (!context->fastBuffer) {
-            context->fastBufferBytes = 0;
-            SetError(context, GL_OUT_OF_MEMORY);
-            return GL_FALSE;
-        }
-    }
-
-    ClearFastPath(fp);
-    fp->requestedAttributes = attributes;
-    fp->supportedAttributes = supported;
-    fp->flags = MGL_FASTPATH_FLAG_DIRECT_BUFFER;
-    fp->primitive = primitive;
-    fp->vertexBuffer = context->fastBuffer;
-    fp->vertexStride = sizeof(struct FastVertex);
-    fp->vertexCapacity = MAX_VERTICES;
-    fp->firstVertex = 0;
-    fp->offsetX = (ULONG)((UBYTE *)&layout.x - base);
-    fp->offsetY = (ULONG)((UBYTE *)&layout.y - base);
-    fp->offsetZ = (ULONG)((UBYTE *)&layout.z - base);
-    fp->offsetW = (ULONG)((UBYTE *)&layout.w - base);
-    fp->offsetR = (attributes & MGL_FASTPATH_COLOR)
-                      ? (ULONG)((UBYTE *)&layout.r - base) : none;
-    fp->offsetG = (attributes & MGL_FASTPATH_COLOR)
-                      ? (ULONG)((UBYTE *)&layout.g - base) : none;
-    fp->offsetB = (attributes & MGL_FASTPATH_COLOR)
-                      ? (ULONG)((UBYTE *)&layout.b - base) : none;
-    fp->offsetA = (attributes & MGL_FASTPATH_COLOR)
-                      ? (ULONG)((UBYTE *)&layout.a - base) : none;
-    fp->offsetU0 = (attributes & MGL_FASTPATH_TEXCOORD0)
-                       ? (ULONG)((UBYTE *)&layout.u0 - base) : none;
-    fp->offsetV0 = (attributes & MGL_FASTPATH_TEXCOORD0)
-                       ? (ULONG)((UBYTE *)&layout.v0 - base) : none;
-    fp->offsetU1 = (attributes & MGL_FASTPATH_TEXCOORD1)
-                       ? (ULONG)((UBYTE *)&layout.u1 - base) : none;
-    fp->offsetV1 = (attributes & MGL_FASTPATH_TEXCOORD1)
-                       ? (ULONG)((UBYTE *)&layout.v1 - base) : none;
-    fp->offsetQ = (attributes & MGL_FASTPATH_TEXCOORD_Q)
-                      ? (ULONG)((UBYTE *)&layout.q - base) : none;
-    fp->offsetNormalIndex = none;
-    fp->offsetNormalX = fp->offsetNormalY = fp->offsetNormalZ = none;
-    fp->currentColor[0] = ((context->currentColor >> 16) & 255) / 255.0f;
-    fp->currentColor[1] = ((context->currentColor >> 8) & 255) / 255.0f;
-    fp->currentColor[2] = (context->currentColor & 255) / 255.0f;
-    fp->currentColor[3] = ((context->currentColor >> 24) & 255) / 255.0f;
-    fp->currentTex0[0] = context->currentS[0];
-    fp->currentTex0[1] = context->currentT[0];
-    fp->currentTex1[0] = context->currentS[1];
-    fp->currentTex1[1] = context->currentT[1];
-    fp->currentQ = 1.0f;
-    fp->privateData = context;
-    context->activeFastPath = fp;
-    context->insideBegin = TRUE;
-    context->primitive = primitive;
-    mglFastPathRefreshPointers(fp);
-    return GL_TRUE;
-}
-
-void Lib_mglEndFastPath(MGLFastPath *fp)
-{
-    struct MiniGLR200Context *context = CurrentContext();
-    ULONG attributes, count, index;
-    BOOL valid = TRUE;
-
-    if (!context) return;
-    if (!fp || fp != context->activeFastPath ||
-        fp->version != MGL_FASTPATH_VERSION || fp->privateData != context) {
-        SetError(context, GL_INVALID_OPERATION);
-        return;
-    }
-    attributes = fp->requestedAttributes;
-    count = fp->vertexCount;
-    if (count > fp->vertexCapacity || count > MAX_VERTICES) {
-        count = MAX_VERTICES;
-        SetError(context, GL_INVALID_OPERATION);
-        valid = FALSE;
-    }
-    for (index = 0; valid && index < count; ++index) {
-        const struct FastVertex *input =
-            (const struct FastVertex *)(context->fastBuffer +
-                                       index * sizeof(struct FastVertex));
-        struct Vertex *output = &context->vertices[index];
-        GLfloat q = (attributes & MGL_FASTPATH_TEXCOORD_Q) ? input->q : 1.0f;
-        if (q == 0.0f) {
-            SetError(context, GL_INVALID_VALUE);
-            valid = FALSE;
-            break;
-        }
-        output->x = input->x; output->y = input->y;
-        output->z = input->z; output->w = input->w;
-        output->nx = context->currentNormalX;
-        output->ny = context->currentNormalY;
-        output->nz = context->currentNormalZ;
-        output->color = (attributes & MGL_FASTPATH_COLOR)
-                            ? PackColor(input->r, input->g, input->b, input->a)
-                            : context->currentColor;
-        output->s = (attributes & MGL_FASTPATH_TEXCOORD0)
-                        ? input->u0 / q : context->currentS[0];
-        output->t = (attributes & MGL_FASTPATH_TEXCOORD0)
-                        ? input->v0 / q : context->currentT[0];
-        output->s1 = (attributes & MGL_FASTPATH_TEXCOORD1)
-                         ? input->u1 / q : context->currentS[1];
-        output->t1 = (attributes & MGL_FASTPATH_TEXCOORD1)
-                         ? input->v1 / q : context->currentT[1];
-        output->fog = FogFactor(context, output->x, output->y,
-                                output->z, output->w);
-    }
-    context->insideBegin = FALSE;
-    context->activeFastPath = NULL;
-    fp->privateData = NULL;
-    fp->currentVertex = NULL;
-    if (valid && !EmitPrimitive(context, context->vertices, count,
-                                fp->primitive))
-        SetError(context, GL_INVALID_OPERATION);
 }

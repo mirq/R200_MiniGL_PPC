@@ -461,9 +461,6 @@ BOOL CapturePendingDrawState(struct MiniGLR200Context *context,
             options |= RADEON3D_DRAW_COMPACT_VERTEX;
             state->vertexDwords = R200_TCL_VERTEX_TEX1_COMPACT_DWORDS;
         }
-#ifndef R200_CPEMIT_68K
-#define R200_CPEMIT_68K 0
-#endif
 #if R200_PPC_FRONTEND || R200_CPEMIT_68K
         /* Unlit one-unit TCL without fog (WiiStation's transformed path,
          * ~4.7k vertices a frame): the 7-dword x,y,z,w,colour,s0,t0 stride

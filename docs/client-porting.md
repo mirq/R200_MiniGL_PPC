@@ -11,7 +11,8 @@ source changes V19 code needs. Developers of MiniGL itself want
 ## 1. What changed for clients, in one paragraph
 
 MiniGL 29 follows upstream minigl.library 29.1: the dispatch table has
-upstream's layout (dispatch ABI **5**, 208 slots, `0x354` bytes) and the GL
+upstream's layout (dispatch ABI **5**, 205 slots, `0x348` bytes, the same as
+MiniGLWOS's) and the GL
 tokens in `<mgl/gl.h>` carry **OpenGL's own values** (`GL_TRIANGLES` is now
 `0x0004`, not an auto-numbered enum). A binary built against the V19 headers
 passes different integers for the same names, so `MiniGLOpen()` compares the
@@ -109,7 +110,7 @@ take the version and size checks from the headers, never literals:
 
 ```c
 if (dispatch->abiVersion != MINIGL_DISPATCH_ABI_VERSION ||       /* 5 */
-    dispatch->structSize < (ULONG)sizeof(MGLDispatchTable) ||     /* 0x354 */
+    dispatch->structSize < (ULONG)sizeof(MGLDispatchTable) ||     /* 0x348 */
     !dispatch->currentContext)
     fail();
 ```

@@ -73,7 +73,6 @@ Rules:
   can wedge the machine.
 - Build with the flags from [building.md](building.md); the ET_REL contract is
   not optional.
-- Check the return value of `mglBeginFastPath` before using the FastPath API.
 - Building or rebuilding a game against this version: see
   [client-porting.md](client-porting.md).
 - **ABI 5 (MiniGL 29).** The headers follow upstream minigl.library 29.1:

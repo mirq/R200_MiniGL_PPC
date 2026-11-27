@@ -443,7 +443,16 @@ void Lib_glClearColor(GLclampf red, GLclampf green, GLclampf blue,
     context->clearColor = PackColor(red, green, blue, alpha);
 }
 
-void Lib_glClear(GLbitfield mask)
+/* The public clear masks: OpenGL's values (the 29.1 headers, as MiniGLWOS
+ * defines them) and the pre-29.1 R200 header's 0x1/0x2, which binaries built
+ * before the change still pass. Both map to this backend's own
+ * GL_COLOR_BUFFER_BIT/GL_DEPTH_BUFFER_BIT (minigl_r200.h). */
+#define R200_CLEAR_COLOR_GL     0x00004000UL
+#define R200_CLEAR_DEPTH_GL     0x00000100UL
+#define R200_CLEAR_COLOR_LEGACY 0x00000001UL
+#define R200_CLEAR_DEPTH_LEGACY 0x00000002UL
+
+void Lib_glClear(GLbitfield publicMask)
 {
     struct MiniGLR200Context *context = CurrentContext();
     struct SubmitSlot *slot;
@@ -451,11 +460,17 @@ void Lib_glClear(GLbitfield mask)
     ULONG *record;
     ULONG left,top,right,bottom,generatedRequired;
     BOOL clearDepth;
+    GLbitfield mask = 0;
 
     if (!context)
         return;
-    if (context->insideBegin || (mask & ~(GL_COLOR_BUFFER_BIT |
-                                          GL_DEPTH_BUFFER_BIT))) {
+    if (publicMask & (R200_CLEAR_COLOR_GL | R200_CLEAR_COLOR_LEGACY))
+        mask |= GL_COLOR_BUFFER_BIT;
+    if (publicMask & (R200_CLEAR_DEPTH_GL | R200_CLEAR_DEPTH_LEGACY))
+        mask |= GL_DEPTH_BUFFER_BIT;
+    if (context->insideBegin ||
+        (publicMask & ~(R200_CLEAR_COLOR_GL | R200_CLEAR_DEPTH_GL |
+                        R200_CLEAR_COLOR_LEGACY | R200_CLEAR_DEPTH_LEGACY))) {
         SetError(context, GL_INVALID_OPERATION);
         return;
     }
